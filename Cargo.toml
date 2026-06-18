@@ -1,0 +1,5 @@
+[workspace]
+members = [
+    "src/skippy_mmucc_backend"
+]
+resolver = "2"

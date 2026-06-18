@@ -1,0 +1,27 @@
+{
+  "canisters": {
+    "skippy_mmucc_backend": {
+      "candid": "src/skippy_mmucc_backend/skippy_mmucc_backend.did",
+      "package": "skippy_mmucc_backend",
+      "type": "rust"
+    },
+    "skippy_mmucc_frontend": {
+      "dependencies": [
+        "skippy_mmucc_backend"
+      ],
+      "source": [
+        "src/skippy_mmucc_frontend/dist"
+      ],
+      "type": "assets",
+      "workspace": "skippy_mmucc_frontend"
+    }
+  },
+  "defaults": {
+    "build": {
+      "args": "",
+      "packtool": ""
+    }
+  },
+  "output_env_file": ".env",
+  "version": 1
+}
