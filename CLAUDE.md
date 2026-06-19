@@ -18,8 +18,15 @@ dfx deploy
 # Regenerate frontend bindings from the backend's Candid interface (run after changing lib.rs or the .did file)
 npm run generate
 
-# Start the frontend dev server (http://localhost:3000), proxying API calls to the replica
+# Start the frontend dev server (http://localhost:3000), proxying API calls to the replica.
+# Binds to 0.0.0.0, so it's also reachable from other devices on the LAN at
+# http://<this-machine's-LAN-IP>:3000 (e.g. for phone bench testing).
 npm start
+
+# Start the OpenRouter/ElevenLabs proxy (http://localhost:8787), also bound to 0.0.0.0.
+# Run this in its own terminal alongside `npm start` — it is intentionally NOT
+# wired into the root `start` script (see Architecture below).
+npm run dev -w skippy_mmucc_proxy
 
 # Build (workspaces-aware; builds the frontend)
 npm run build
@@ -38,8 +45,9 @@ The deployed app is served at `http://localhost:4943?canisterId={asset_canister_
 - `dfx.json` defines two canisters: `skippy_mmucc_backend` (type `rust`) and `skippy_mmucc_frontend` (type `assets`, depends on the backend, serves `src/skippy_mmucc_frontend/dist`).
 - `src/skippy_mmucc_backend/` — Rust canister source. `src/lib.rs` exposes canister methods via `ic_cdk` macros (e.g. `#[ic_cdk::query]`); `skippy_mmucc_backend.did` is the hand-maintained/generated Candid interface describing the canister's public API and must stay in sync with the exported methods.
 - `src/skippy_mmucc_frontend/` — Vite-based vanilla JS frontend (npm workspace `skippy_mmucc_frontend`). `npm run generate` (aliased via dfx) produces TypeScript bindings/declarations from the backend's Candid file so the frontend can call canister methods type-safely; this runs automatically before `dfx deploy` and should be re-run after backend interface changes.
-- Root `Cargo.toml` is a workspace pointing at `src/skippy_mmucc_backend`; root `package.json` declares the npm workspace pointing at `src/skippy_mmucc_frontend` and fans out `build`/`start`/`test` to workspace packages.
+- Root `Cargo.toml` is a workspace pointing at `src/skippy_mmucc_backend`; root `package.json` declares npm workspaces (`src/skippy_mmucc_frontend`, `src/skippy_mmucc_proxy`) and fans out `build`/`start`/`test` to workspace packages that define them (`--if-present`).
 - `output_env_file: ".env"` in `dfx.json` means `dfx deploy`/`dfx start` writes canister IDs and network info to `.env`, consumed by the frontend build.
+- `src/skippy_mmucc_proxy/` — a small local Express server (npm workspace `skippy_mmucc_proxy`, run via `npm run dev -w skippy_mmucc_proxy`) that holds `OPENROUTER_API_KEY`/`ELEVENLABS_API_KEY`/`ELEVENLABS_VOICE_ID` from the root `.env` and is the *only* thing that calls OpenRouter/ElevenLabs. The frontend asset canister is public, so secrets must never be bundled into its JS — the frontend only ever talks to this proxy (`POST /respond`, `GET /speak`), never to OpenRouter/ElevenLabs directly. Its `dev` script is deliberately not named `start`, so it doesn't get swept up by the root `npm start --workspaces` call (which would otherwise block on whichever dev server runs first).
 
 ## Notes
 
@@ -48,15 +56,16 @@ The deployed app is served at `http://localhost:4943?canisterId={asset_canister_
 
 ## Project Blueprint
 
-Planned system design for this project. Nothing below is implemented yet — this section is a forward-looking spec for future work, not a description of current code.
+Planned system design for this project. Sections below are marked **(scaffolded)** where a basic version now exists in code, vs. still forward-looking spec.
 
-### 1. Personality Matrix (Skippy)
+### 1. Personality Matrix (Skippy) — *(partially scaffolded: system prompt only)*
 
 - Identity: the assistant persona for this app is "Skippy", a hyper-intelligent, sarcastic AI.
 - Addresses the user as "Commander" or "Sean". Tone is roughly 70% sarcastic/witty/snarky, including occasional mocking of trivial questions (e.g. calling the user an "idiot" or "monkey") as part of the bit.
-- Guest mode: when an unauthenticated user interacts with the app, the persona shifts to treating them as a "primitive lifeform" or "clueless monkey".
+- Guest mode: when an unauthenticated user interacts with the app, the persona shifts to treating them as a "primitive lifeform" or "clueless monkey". **Not implemented** — there's no auth/guest distinction yet, so the persona is always in its authenticated Commander/Sean form.
+- The persona currently lives only in `SKIPPY_SYSTEM_PROMPT` in `src/skippy_mmucc_proxy/server.js`; the rest of the UI (buttons, status text) doesn't carry the persona's voice yet.
 
-### 2. Self-Dictation Audio Pipeline (Frontend Canister)
+### 2. Self-Dictation Audio Pipeline (Frontend Canister) — *(scaffolded)*
 
 - A background Web Speech API listener runs in the browser to support hands-free personal note-taking — it captures only the app user's own voice, with the user's full awareness (they choose and speak the trigger phrase themselves). This is not for recording other people or other parties in a conversation.
 - Listens for user-configured trigger phrases the user says to themselves to start a note, e.g.:
@@ -64,14 +73,159 @@ Planned system design for this project. Nothing below is implemented yet — thi
   - "Let me grab my notepad..."
 - On phrase detection, starts local recording/transcription of the user's own dictation that follows.
 - If this pipeline is ever extended to capture audio involving other people (e.g. calls, meetings), it must add an explicit, disclosed consent step for those other parties before recording — most jurisdictions require all-party consent to record a conversation, and silent/undisclosed recording of other people is not in scope for this feature.
+- Implemented in `src/skippy_mmucc_frontend/src/App.js`. Trigger phrases are currently a hardcoded constant (`TRIGGER_PHRASES`), not yet user-configurable via UI.
 
-### 3. External AI & Voice Pipeline (Integration Layer)
+### 3. External AI & Voice Pipeline (Integration Layer) — *(scaffolded)*
 
 - LLM routing: transcriptions are sent via the OpenRouter API, processed through the custom Skippy system prompt matrix.
 - Audio synthesis: the LLM's text response is routed to the ElevenLabs API for voice synthesis.
 - Voice profile: uses a designated ElevenLabs custom Voice ID (cloned R.C. Bray-style narration) for response playback.
+- Implemented via `src/skippy_mmucc_proxy` (see Architecture above) so API keys never reach the public frontend bundle. The frontend also offers a manual "Voice Mode" toggle between Premium (ElevenLabs, via the proxy) and Economy (the browser's built-in `speechSynthesis`, free/local) to manage API spend, and automatically fails over Premium → Economy if ElevenLabs errors or hits a quota/credit limit, so Skippy never goes silent.
 
-### 4. ICP Storage Layer & Knowledge Base (Backend Canister)
+### 4. ICP Storage Layer & Knowledge Base (Backend Canister) — *(scaffolded)*
 
 - Persistent storage: uses DFINITY Stable Memory (`StableBTreeMap`) so data survives canister upgrades.
 - Document indexing: storage is structured to hold, index, and query text data from the MMUCC V6 (Model Minimum Uniform Crash Criteria) and ANSI D.16 (Manual on Classification of Motor Vehicle Traffic Accidents) reference manuals.
+- Implemented as a single generic `MANUAL_SECTIONS` store in `src/skippy_mmucc_backend/src/lib.rs`, keyed by a `manual_name` field rather than hardcoded per-manual buckets, so new manuals can be added without backend changes. No MMUCC V6 / ANSI D.16 content has actually been loaded yet — the store is empty until something calls `add_manual_section`.
+
+## "Neo" Blueprint (Phase 5+) — planned, not yet started
+
+Supersedes/extends sections 1–4 above for a two-user (Commander + wife) Internet-Identity-authenticated
+version of the app. Nothing in this section is implemented yet. Pillars are numbered per the
+finalized spec for reference; **implementation order follows dependency, not pillar number** —
+see the roadmap in chat history for the sequenced plan. Internet Identity lands first since most
+other pillars need a real Principal to key data by. All architectural alignments below were
+explicitly confirmed with the user, including the two flagged risk areas (proxy-vs-user identity,
+Steel Rain citation format) — none are open questions anymore.
+
+### Pillar 1 — Hybrid Web 2.5 Architecture & Secure Proxy Roles (confirmed, no change needed)
+`src/skippy_mmucc_proxy` stays as the Web2 worker holding `OPENROUTER_API_KEY`/`ELEVENLABS_API_KEY`
+in environment memory, shielded from the frontend, and remains the only thing handling streamed
+audio chunking and direct external calls — confirmed over the alternative (moving keys/calls into
+the canister via IC HTTPS outcalls), which doesn't fit non-deterministic LLM sampling (breaks
+replica consensus) or streamed audio (2MB cap, no streaming support). The Rust backend canister is
+the Web3 state/storage/RAG vault; the proxy queries it for active context, manuals, and state
+before calling external APIs.
+**Implementation note:** since the *proxy* (not the end user's browser) is the one calling the
+canister, the canister sees the proxy's Principal as caller, not the end user's. Per-user
+partitioning (Pillar 2) needs either the user's II delegation forwarded through the proxy, or
+canister methods that accept an explicit `principal` argument trusted only from a single
+allow-listed "this is the proxy" caller. To be designed properly in Phase 5.1, not assumed.
+
+### Pillar 2 — Multi-user Cryptographic Whitelisting (Internet Identity)
+Native II login on the frontend. The canister enforces a strict allowlist of **exactly two**
+Internet Identity Principal IDs (Commander + wife); any request from an unlisted Principal is
+instantly rejected. All per-user data (notes, chat history) is partitioned by these two IDs, each
+getting a fully isolated profile/session state. The manual library is shared across both, not
+per-principal.
+
+### Pillar 3 — Behavioral State Machine (persona modes)
+An `operational_mode` state (`default` | `professional` | `tactical`), switched by voice trigger
+phrases ("Skippy, be yourself" / "Skippy, behave" / "Skippy, steel rain"), selecting a different
+system prompt server-side per mode.
+
+### Pillar 4 — Background Auto-Dictation Engine
+Mostly already built (section 2 above) — this is primarily a trigger-phrase content update
+("Let me take a note" / "Let me write that down") on the existing dictate → save pipeline.
+
+### Pillar 5 — Conversational History (Session Memory)
+Backend-owned rolling message history per Principal in stable memory; the proxy retrieves it from
+the canister and appends it to the OpenRouter payload on every turn, ending today's single-turn
+statelessness.
+
+### Pillar 6 — Universal "Neo" RAG Engine & Multi-Mode Web Intelligence
+Storage substrate already exists (section 4's generic `manual_name`-keyed store). New work:
+- **Neo Skin upload UI**: cross-platform (PC + mobile) file upload (`.txt`/documents) pushing
+  content through a parsing pipeline into the canister, expanding the reference library on the fly.
+- **Steel Rain (Tactical Mode) emergency/utility web fallback**: scope is general-purpose, not
+  limited to disaster scenarios — any situation needing immediate, uninflated data instantly
+  (medical/security crises, technical specs like torque values, safety rules, etc). If the query
+  is outside local RAG knowledge, the proxy autonomously searches/fetches the web **with no
+  confirmation step** and delivers raw numbers/steps first, zero conversational padding. **Output
+  always carries a minimal-footprint origin tag** — a single bracketed anchor prepended to the
+  answer (e.g. `[FEMA]...`, `[Chevy Manual]...`, `[Web]...`) — no long disclaimers, just enough to
+  establish provenance without slowing down delivery or speech playback. This was the one point
+  flagged as a safety concern (confidently-wrong guidance with zero indication of source, in
+  exactly the highest-stakes mode) and resolved with this minimal-tag compromise.
+- **Dumbass Web Loop (Default/Behave modes)**: if local RAG data is missing, Skippy stays in
+  character, mocks the user for the gap, and asks permission before searching. A direct override
+  command ("Skippy, go to the web and get the latest info on X") searches immediately and returns
+  results filtered through the active persona.
+- Both web-fetching paths should go through a small curated allowlist of sources / a real search
+  API rather than open-ended scraping of arbitrary inferred URLs — voice-driven "fetch whatever
+  URL the model infers" is a real SSRF risk (ambiguous/injected input pointing the proxy, which
+  sits on the LAN, at unintended or internal addresses). To be scoped concretely in Phase 5.5.
+- The frontend passes an active manual/context flag so its sections get injected into the LLM
+  prompt alongside the system prompt and history.
+
+### Pillar 7 — Cross-Profile Messaging (Courier Queue)
+Backend queue of pending alerts keyed by recipient Principal (one of the two whitelisted IDs from
+Pillar 2). Sender's intent ("tell my husband/the Commander...") gets captured and queued; on the
+recipient's next session/first greeting on any device, the pending message is injected at the head
+of the LLM context and delivered as Skippy's first remark, then cleared. Intent detection uses
+fixed phrase patterns (consistent with the existing `TRIGGER_PHRASES` approach) rather than a
+second LLM classification call, for v1.
+
+### Pillar 8 — Canister Cycle Gas Tank & Top-Up Logic
+Admin-only backend function exposing `ic_cdk::api::canister_balance()`; frontend "Fuel Gauge" UI;
+a low-balance threshold that alters Skippy's greeting to demand a refuel; an admin-only "Top Up"
+hook. Needs an admin/owner access-control concept distinct from the two-user partitioning (who
+counts as "admin," and how cycle top-ups are actually funded/transferred) — to be scoped when
+this phase comes up.
+
+### Pillar 9 — Wasm64 & Future-Proof Platform Specs (confirmed, deprioritized)
+Target Wasm64 to future-proof toward an 8GB+ resident heap, in preparation for eventually hosting
+on-chain AI model inference directly in the canister. Confirmed as a goal, but flagged and kept
+**decoupled from / lower priority than** the rest of the roadmap: the immediate 500GB
+stable-memory target doesn't actually need Wasm64 (stable memory is already separately addressable
+from the Wasm heap on standard Wasm32, and our local PocketIC setup already reports
+`max_stable_memory_size: 536870912000` = 500GB on the existing Wasm32 + `ic-stable-structures`
+setup). The larger heap only matters for the speculative on-chain-inference goal, which has its
+own much bigger blocker beyond memory — IC's per-message/per-round instruction execution limits —
+to be revisited only once that specific sub-goal becomes concrete, not before.
+
+## Implementation Roadmap (sequenced by dependency, not pillar number)
+
+Tracks actual build order across turns — pillar numbers above are the spec's numbering, phase
+numbers below are execution order. Each phase folds in its later-added hygiene/tactical patches.
+
+- **Phase 5.1 — Internet Identity + two-Principal whitelist** (Pillar 2, + Pillar 1's
+  implementation note). II login on frontend; local II canister for dev; canister-side allowlist
+  of exactly two Principals. **+ Proxy endpoint security patch**: since the proxy will eventually
+  be cloud-hosted, it must validate the caller's II session before making any external API call
+  (prevents public actors from hitting the proxy URL and draining OpenRouter/ElevenLabs credits).
+  Plain II delegations aren't independently verifiable by a non-canister Node server without
+  duplicating real crypto-verification logic, so the planned bridge is: frontend authenticates to
+  the canister directly (genuine II delegation, canister verifies via `msg_caller()`), canister
+  issues a short-lived opaque session token, frontend forwards that token to the proxy on each
+  request, proxy validates it with a query call back to the canister before proceeding.
+  **Whitelist bootstrap, confirmed:** the user already holds both real Principal IDs (no
+  first-login discovery step needed). They are supplied as **canister `#[init]` constructor
+  arguments at deploy time** (standard Candid init-args, passed via `dfx deploy --argument
+  '(principal "...", principal "...")'` or `dfx.json`'s `init_arg`), not hardcoded as Rust source
+  constants — so the canister's compiled code stays generic and the actual identities only exist
+  in deploy-time config. (IC has a newer, separate canister environment-variables feature
+  surfaced in this project's PocketIC config — `environment_variables: Enabled` — that could be an
+  alternative someday, but it isn't verified against our current ic-cdk/candid versions, so
+  `#[init]` args are the chosen, known-working mechanism for now.)
+  **Status: paused for the night by explicit user instruction — no Phase 5.1 code has been
+  written yet.** Resume here next session.
+- **Phase 5.2 — Conversational history** (Pillar 5). Backend-owned rolling message history per
+  Principal. **+ Memory pruning & archive patch**: an export/download-to-device function for
+  history, and a "Purge" function to selectively or fully wipe a principal's stored history.
+- **Phase 5.3 — Behavioral state machine** (Pillar 3). `operational_mode` + three system prompts.
+  **+ Dynamic persona injection patch**: the proxy injects the active principal's identity (e.g.
+  "User: Commander" vs "User: [Wife's name]") into the system prompt context so Skippy addresses
+  the right person and relationship dynamic — depends on Phase 5.1's principal→display-name
+  mapping existing.
+- **Phase 5.4 — Trigger phrase content update** (Pillar 4). **+ Note retrieval patch**: a "Notes
+  Vault" dashboard in the Neo Skin UI to view saved dictations, plus a voice retrieval command
+  ("Skippy, read back my recent notes") that fetches and reads them back.
+- **Phase 5.5 — RAG engine + multi-mode web intelligence** (Pillar 6). **+ RAG manual hygiene
+  patch**: a "Knowledge Manager" UI to view and permanently delete specific manuals — needs a new
+  backend delete capability (the store currently only supports add/get/list, no delete; deleting
+  "by manual" means collecting matching ids via `list_sections_by_manual` then removing each, since
+  `manual_name` isn't the primary key).
+- **Phase 5.6 — Courier queue** (Pillar 7).
+- **Phase 5.7 — Cycle gas tank** (Pillar 8).
+- **Phase 5.8 — Wasm64** (Pillar 9, deprioritized).

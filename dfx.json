@@ -22,6 +22,15 @@
       "packtool": ""
     }
   },
+  "networks": {
+    "local": {
+      "bind": "0.0.0.0:4943",
+      "type": "ephemeral",
+      "proxy": {
+        "domain": ["localhost", "127.0.0.1", "0.0.0.0", "172.27.155.66", "192.168.1.104"]
+      }
+    }
+  },
   "output_env_file": ".env",
   "version": 1
 }

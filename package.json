@@ -13,6 +13,7 @@
   },
   "type": "module",
   "workspaces": [
-    "src/skippy_mmucc_frontend"
+    "src/skippy_mmucc_frontend",
+    "src/skippy_mmucc_proxy"
   ]
 }

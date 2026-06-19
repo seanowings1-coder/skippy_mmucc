@@ -3,37 +3,66 @@ body {
   font-size: 1.5rem;
 }
 
-img {
-  max-width: 50vw;
-  max-height: 25vw;
-  display: block;
-  margin: auto;
-}
-
-form {
-  display: flex;
-  justify-content: center;
-  gap: 0.5em;
-  flex-flow: row wrap;
+main {
   max-width: 40vw;
   margin: auto;
-  align-items: baseline;
 }
 
-button[type="submit"] {
-  padding: 5px 20px;
-  margin: 10px auto;
-  float: right;
+.status {
+  color: #555;
+  font-size: 0.8em;
 }
 
-#greeting {
-  margin: 10px auto;
-  padding: 10px 60px;
+.voice-toggle {
+  margin: 0.5em 0;
+}
+
+.skippy-reply {
+  padding: 10px;
+  margin: 0.5em 0;
+  border-left: 4px solid #555;
+  font-style: italic;
+}
+
+.mic-controls {
+  display: flex;
+  align-items: center;
+  gap: 0.75em;
+  margin: 1em 0;
+}
+
+.mic-button.listening {
+  background-color: #fff3cd;
+}
+
+.mic-button.dictating {
+  background-color: #f8d7da;
+}
+
+.dictation .transcript {
+  padding: 10px;
   border: 1px solid #222;
+  min-height: 1.5em;
 }
 
-#greeting:empty {
-  display: none;
+.manual-browser {
+  margin-top: 2em;
+}
+
+.note-list {
+  list-style: none;
+  padding: 0;
+}
+
+.note-list li {
+  margin: 10px 0;
+  padding: 10px;
+  border: 1px solid #ccc;
+}
+
+.note-list .section-id {
+  color: #777;
+  font-size: 0.7em;
 }
 
 .browser-warning {
