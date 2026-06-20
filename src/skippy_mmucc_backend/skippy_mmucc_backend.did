@@ -6,6 +6,12 @@ type DocumentSection = record {
     content : text;
 };
 
+type Message = record {
+    role : text;
+    content : text;
+    timestamp : nat64;
+};
+
 service : (principal, principal) -> {
     "greet": (text) -> (text) query;
 
@@ -15,4 +21,8 @@ service : (principal, principal) -> {
 
     "login": () -> (variant { Ok : text; Err : text });
     "validate_session": (text) -> (opt principal) query;
+
+    "append_turn": (text, text) -> ();
+    "get_history": () -> (vec Message) query;
+    "purge_history": () -> ();
 }

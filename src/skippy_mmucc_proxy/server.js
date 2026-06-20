@@ -76,6 +76,15 @@ app.post('/respond', requireSession, async (req, res) => {
     return res.status(502).json({ error: 'OPENROUTER_API_KEY is not set.' });
   }
 
+  // History comes from the frontend's own canister-backed cache (see
+  // CLAUDE.md Phase 5.2) — the proxy never reads/writes it itself. Only
+  // role/content are forwarded to OpenRouter, never arbitrary client fields.
+  const history = Array.isArray(req.body?.history)
+    ? req.body.history
+        .filter((m) => m && typeof m.role === 'string' && typeof m.content === 'string')
+        .map(({ role, content }) => ({ role, content }))
+    : [];
+
   try {
     const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
       method: 'POST',
@@ -87,6 +96,7 @@ app.post('/respond', requireSession, async (req, res) => {
         model: OPENROUTER_MODEL,
         messages: [
           { role: 'system', content: SKIPPY_SYSTEM_PROMPT },
+          ...history,
           { role: 'user', content: text },
         ],
       }),

@@ -38,6 +38,10 @@ const IDENTITY_PROVIDER =
     ? undefined // falls back to @dfinity/auth-client's mainnet default
     : `http://${process.env.CANISTER_ID_INTERNET_IDENTITY}.${window.location.hostname}:4943`;
 
+// Mirrors the backend's MAX_HISTORY_MESSAGES cap so a long session without a
+// page refresh doesn't keep growing the history payload sent to the proxy.
+const MAX_LOCAL_HISTORY = 40;
+
 const TRIGGER_PHRASES = [
   'let me make sure i write this down',
   'let me grab my notepad',
@@ -95,6 +99,10 @@ class App {
   principalText = '';
   sessionToken = null;
   backendActor = null;
+  // In-memory mirror of the canister's rolling history for this session —
+  // fetched once at login, kept in sync locally so /respond doesn't need an
+  // extra canister round trip on every single message.
+  history = [];
 
   constructor() {
     if (SpeechRecognitionImpl) {
@@ -163,6 +171,7 @@ class App {
       if ('Ok' in result) {
         this.sessionToken = result.Ok;
         this.authState = 'ready';
+        this.history = await this.backendActor.get_history();
       } else {
         this.authState = 'rejected';
         this.authError = result.Err;
@@ -182,8 +191,31 @@ class App {
     this.principalText = '';
     this.sessionToken = null;
     this.backendActor = null;
+    this.history = [];
     this.authState = 'logged-out';
     this.#render();
+  };
+
+  #clearHistory = async () => {
+    if (!window.confirm('Erase your entire conversation history with Skippy? This cannot be undone.')) {
+      return;
+    }
+    await this.backendActor.purge_history();
+    this.history = [];
+    this.statusMessage = 'History cleared.';
+    this.#render();
+  };
+
+  #downloadHistory = () => {
+    const blob = new Blob([JSON.stringify(this.history, null, 2)], {
+      type: 'application/json',
+    });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `skippy-history-${new Date().toISOString()}.json`;
+    link.click();
+    URL.revokeObjectURL(url);
   };
 
   #unlockAudioPlayback() {
@@ -391,7 +423,10 @@ class App {
           'Content-Type': 'application/json',
           'X-Skippy-Session': this.sessionToken,
         },
-        body: JSON.stringify({ text }),
+        body: JSON.stringify({
+          text,
+          history: this.history.map(({ role, content }) => ({ role, content })),
+        }),
       });
       const data = await response.json();
 
@@ -405,6 +440,21 @@ class App {
       this.statusMessage = '';
       this.#render();
       this.#speak(data.reply);
+
+      const now = Date.now();
+      this.history.push(
+        { role: 'user', content: text, timestamp: now },
+        { role: 'assistant', content: data.reply, timestamp: now },
+      );
+      if (this.history.length > MAX_LOCAL_HISTORY) {
+        this.history.splice(0, this.history.length - MAX_LOCAL_HISTORY);
+      }
+      // Fire-and-forget: the canister is the source of truth for the *next*
+      // login's history, but this turn's reply already played — a failure
+      // here shouldn't block or re-render the UI around it.
+      this.backendActor.append_turn(text, data.reply).catch((err) => {
+        console.error('[Skippy] failed to persist conversation turn:', err);
+      });
     } catch (err) {
       this.statusMessage = `Couldn't reach Skippy's brain (is the proxy running on :8787?): ${err.message}`;
       this.#render();
@@ -591,6 +641,12 @@ class App {
         <section class="voice-toggle">
           <button @click=${this.#toggleVoiceMode}>
             Voice: ${this.voiceMode === 'premium' ? 'Premium 🎙' : 'Economy 💬'}
+          </button>
+          <button @click=${this.#downloadHistory} ?disabled=${this.history.length === 0}>
+            Download history
+          </button>
+          <button @click=${this.#clearHistory} ?disabled=${this.history.length === 0}>
+            Clear history
           </button>
           <button @click=${this.#logout}>Log out</button>
         </section>

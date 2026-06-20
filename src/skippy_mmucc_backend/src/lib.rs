@@ -17,6 +17,16 @@ const MANUAL_SECTIONS_MEMORY_ID: MemoryId = MemoryId::new(0);
 const NEXT_ID_MEMORY_ID: MemoryId = MemoryId::new(1);
 const COMMANDER_PRINCIPAL_MEMORY_ID: MemoryId = MemoryId::new(2);
 const PARTNER_PRINCIPAL_MEMORY_ID: MemoryId = MemoryId::new(3);
+const HISTORY_MEMORY_ID: MemoryId = MemoryId::new(4);
+
+// Rolling cap on a Principal's stored conversation: applied at write time so
+// both stable memory usage and the context forwarded to OpenRouter stay
+// bounded, instead of growing without limit over a long-lived conversation.
+const MAX_HISTORY_MESSAGES: usize = 40;
+
+// Generous bound since this holds up to MAX_HISTORY_MESSAGES whole messages
+// per Principal, not one row like DocumentSection.
+const MAX_HISTORY_SIZE: u32 = 200_000;
 
 // Session tokens are short-lived and only ever re-derived by logging in again,
 // so they live in heap memory rather than stable memory — losing them on a
@@ -55,6 +65,38 @@ impl Storable for DocumentSection {
     };
 }
 
+/// A single turn in a Principal's rolling conversation history with Skippy.
+#[derive(CandidType, Deserialize, Clone, Debug)]
+pub struct Message {
+    pub role: String,
+    pub content: String,
+    pub timestamp: u64,
+}
+
+#[derive(CandidType, Deserialize, Clone, Debug, Default)]
+pub struct ConversationHistory {
+    pub messages: Vec<Message>,
+}
+
+impl Storable for ConversationHistory {
+    fn to_bytes(&self) -> Cow<'_, [u8]> {
+        Cow::Owned(Encode!(self).unwrap())
+    }
+
+    fn into_bytes(self) -> Vec<u8> {
+        Encode!(&self).unwrap()
+    }
+
+    fn from_bytes(bytes: Cow<[u8]>) -> Self {
+        Decode!(bytes.as_ref(), Self).unwrap()
+    }
+
+    const BOUND: Bound = Bound::Bounded {
+        max_size: MAX_HISTORY_SIZE,
+        is_fixed_size: false,
+    };
+}
+
 thread_local! {
     static MEMORY_MANAGER: RefCell<MemoryManager<DefaultMemoryImpl>> =
         RefCell::new(MemoryManager::init(DefaultMemoryImpl::default()));
@@ -87,6 +129,11 @@ thread_local! {
     // token -> (principal, expiry in nanoseconds since epoch)
     static SESSIONS: RefCell<HashMap<String, (Principal, u64)>> =
         RefCell::new(HashMap::new());
+
+    static HISTORY: RefCell<StableBTreeMap<Principal, ConversationHistory, Memory>> =
+        RefCell::new(StableBTreeMap::init(
+            MEMORY_MANAGER.with(|m| m.borrow().get(HISTORY_MEMORY_ID)),
+        ));
 }
 
 #[init]
@@ -195,6 +242,43 @@ fn validate_session(token: String) -> Option<Principal> {
             }
         })
     })
+}
+
+/// Appends one user/assistant turn to the caller's rolling conversation
+/// history in a single round trip, trimming from the front if it exceeds
+/// MAX_HISTORY_MESSAGES. The proxy never calls this directly — it has no
+/// way to act as a specific end user (see Pillar 1's implementation note in
+/// CLAUDE.md) — the frontend calls it with its own authenticated identity
+/// right after a Skippy reply comes back.
+#[update]
+fn append_turn(user_text: String, assistant_text: String) {
+    let caller = assert_whitelisted();
+    let now = ic_cdk::api::time();
+    HISTORY.with(|h| {
+        let mut h = h.borrow_mut();
+        let mut history = h.get(&caller).unwrap_or_default();
+        history.messages.push(Message { role: "user".to_string(), content: user_text, timestamp: now });
+        history.messages.push(Message { role: "assistant".to_string(), content: assistant_text, timestamp: now });
+        if history.messages.len() > MAX_HISTORY_MESSAGES {
+            let excess = history.messages.len() - MAX_HISTORY_MESSAGES;
+            history.messages.drain(0..excess);
+        }
+        h.insert(caller, history);
+    });
+}
+
+#[query]
+fn get_history() -> Vec<Message> {
+    let caller = assert_whitelisted();
+    HISTORY.with(|h| h.borrow().get(&caller).map(|history| history.messages).unwrap_or_default())
+}
+
+#[update]
+fn purge_history() {
+    let caller = assert_whitelisted();
+    HISTORY.with(|h| {
+        h.borrow_mut().remove(&caller);
+    });
 }
 
 #[query]

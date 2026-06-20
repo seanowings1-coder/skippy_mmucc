@@ -256,9 +256,15 @@ numbers below are execution order. Each phase folds in its later-added hygiene/t
   working by the user. `COMMANDER_PRINCIPAL` is set in the gitignored `.env`; `PARTNER_PRINCIPAL`
   is still the anonymous-Principal placeholder (`2vxsx-fae`) until the second user logs in once
   and reports her real Principal from the rejection screen.
-- **Phase 5.2 — Conversational history** (Pillar 5). Backend-owned rolling message history per
-  Principal. **+ Memory pruning & archive patch**: an export/download-to-device function for
-  history, and a "Purge" function to selectively or fully wipe a principal's stored history.
+- **Phase 5.2 — Conversational history** (Pillar 5). **Status: done, verified end-to-end in a
+  real browser.** Backend-owned rolling message history per Principal (`append_turn`/
+  `get_history`/`purge_history` in `lib.rs`, capped at `MAX_HISTORY_MESSAGES = 40`), read/written
+  via the frontend's own authenticated actor — the proxy stays stateless regarding the canister
+  and just forwards whatever `history` array the frontend includes in `/respond`. **+ Memory
+  pruning & archive patch**: "Download history" exports `get_history()`'s data to a JSON file
+  client-side; "Clear history" calls `purge_history()` (full wipe of the caller's own history
+  only — confirmed no per-message deletion needed). User confirmed Skippy correctly recalls
+  earlier turns in a conversation, and that Clear history works.
 - **Phase 5.3 — Behavioral state machine, with Brain Switching** (Pillar 3, fully specified —
   see Pillar 3 above for the resolved design). `operational_mode` + three system prompts.
   **+ Dynamic persona injection patch**: the proxy injects the active principal's identity
