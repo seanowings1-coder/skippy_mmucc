@@ -19,6 +19,7 @@ const COMMANDER_PRINCIPAL_MEMORY_ID: MemoryId = MemoryId::new(2);
 const PARTNER_PRINCIPAL_MEMORY_ID: MemoryId = MemoryId::new(3);
 const HISTORY_MEMORY_ID: MemoryId = MemoryId::new(4);
 const PERSONA_PROFILES_MEMORY_ID: MemoryId = MemoryId::new(5);
+const WORKSPACES_MEMORY_ID: MemoryId = MemoryId::new(6);
 
 // Rolling cap on a Principal's stored conversation: applied at write time so
 // both stable memory usage and the context forwarded to OpenRouter stay
@@ -98,6 +99,77 @@ impl Storable for ConversationHistory {
     };
 }
 
+/// Composite key for `HISTORY` (Pillar 10) — each Principal can now have many
+/// workspaces, each with its own rolling conversation, instead of one flat
+/// stream per Principal. `Ord`/`PartialOrd` are derived field-order
+/// (principal first) purely so this can key a `StableBTreeMap`; no query
+/// relies on that ordering.
+#[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct HistoryKey {
+    pub principal: Principal,
+    pub workspace_id: u64,
+}
+
+impl Storable for HistoryKey {
+    fn to_bytes(&self) -> Cow<'_, [u8]> {
+        Cow::Owned(Encode!(self).unwrap())
+    }
+
+    fn into_bytes(self) -> Vec<u8> {
+        Encode!(&self).unwrap()
+    }
+
+    fn from_bytes(bytes: Cow<[u8]>) -> Self {
+        Decode!(bytes.as_ref(), Self).unwrap()
+    }
+
+    const BOUND: Bound = Bound::Bounded {
+        max_size: 64,
+        is_fixed_size: false,
+    };
+}
+
+/// `Active` workspaces show up in the main switcher; `Archived` ones are
+/// hidden from it but stay fully intact in stable memory until either
+/// restored or explicitly hard-deleted (Pillar 10 — archiving never implies
+/// deletion).
+#[derive(CandidType, Deserialize, Clone, Debug, PartialEq)]
+pub enum WorkspaceStatus {
+    Active,
+    Archived,
+}
+
+/// A user-defined project/context partition for conversation history
+/// (Pillar 10). Private per-Principal — never shared between the two
+/// whitelisted users, unlike the manual/RAG library (Pillar 6).
+#[derive(CandidType, Deserialize, Clone, Debug)]
+pub struct Workspace {
+    pub id: u64,
+    pub owner: Principal,
+    pub name: String,
+    pub status: WorkspaceStatus,
+    pub created_at: u64,
+}
+
+impl Storable for Workspace {
+    fn to_bytes(&self) -> Cow<'_, [u8]> {
+        Cow::Owned(Encode!(self).unwrap())
+    }
+
+    fn into_bytes(self) -> Vec<u8> {
+        Encode!(&self).unwrap()
+    }
+
+    fn from_bytes(bytes: Cow<[u8]>) -> Self {
+        Decode!(bytes.as_ref(), Self).unwrap()
+    }
+
+    const BOUND: Bound = Bound::Bounded {
+        max_size: 2_000,
+        is_fixed_size: false,
+    };
+}
+
 /// A Principal's self-set display name and ElevenLabs voice ID (Pillar 3's
 /// dual-voice routing). Not secret, unlike the whitelist — settable at
 /// runtime by each user for themselves, no redeploy needed.
@@ -169,9 +241,14 @@ thread_local! {
     static SESSIONS: RefCell<HashMap<String, (Principal, u64)>> =
         RefCell::new(HashMap::new());
 
-    static HISTORY: RefCell<StableBTreeMap<Principal, ConversationHistory, Memory>> =
+    static HISTORY: RefCell<StableBTreeMap<HistoryKey, ConversationHistory, Memory>> =
         RefCell::new(StableBTreeMap::init(
             MEMORY_MANAGER.with(|m| m.borrow().get(HISTORY_MEMORY_ID)),
+        ));
+
+    static WORKSPACES: RefCell<StableBTreeMap<u64, Workspace, Memory>> =
+        RefCell::new(StableBTreeMap::init(
+            MEMORY_MANAGER.with(|m| m.borrow().get(WORKSPACES_MEMORY_ID)),
         ));
 
     static PERSONA_PROFILES: RefCell<StableBTreeMap<Principal, PersonaProfile, Memory>> =
@@ -304,40 +381,117 @@ fn validate_session(token: String) -> Option<SessionInfo> {
     })
 }
 
-/// Appends one user/assistant turn to the caller's rolling conversation
-/// history in a single round trip, trimming from the front if it exceeds
-/// MAX_HISTORY_MESSAGES. The proxy never calls this directly — it has no
-/// way to act as a specific end user (see Pillar 1's implementation note in
-/// CLAUDE.md) — the frontend calls it with its own authenticated identity
-/// right after a Skippy reply comes back.
+/// Looks up a workspace by id and traps unless the caller owns it — same
+/// "trust nothing, verify ownership" shape as `assert_whitelisted`, since
+/// workspace ids are caller-suppliable (returned by `create_workspace`, but
+/// nothing stops a client from passing back an arbitrary u64).
+fn assert_workspace_owner(caller: Principal, workspace_id: u64) -> Workspace {
+    let workspace = WORKSPACES.with(|w| w.borrow().get(&workspace_id));
+    match workspace {
+        Some(w) if w.owner == caller => w,
+        _ => ic_cdk::trap("Workspace not found or not owned by caller."),
+    }
+}
+
+/// Creates a new Active workspace owned by the caller (Pillar 10). Workspaces
+/// reuse the same global auto-increment counter as manual sections — there's
+/// no need for a separate id space.
 #[update]
-fn append_turn(user_text: String, assistant_text: String) {
+fn create_workspace(name: String) -> u64 {
     let caller = assert_whitelisted();
+    let id = take_next_id();
+    let workspace = Workspace {
+        id,
+        owner: caller,
+        name,
+        status: WorkspaceStatus::Active,
+        created_at: ic_cdk::api::time(),
+    };
+    WORKSPACES.with(|w| w.borrow_mut().insert(id, workspace));
+    id
+}
+
+#[query]
+fn list_my_workspaces() -> Vec<Workspace> {
+    let caller = assert_whitelisted();
+    WORKSPACES.with(|w| {
+        w.borrow()
+            .iter()
+            .map(|entry| entry.value().clone())
+            .filter(|ws| ws.owner == caller)
+            .collect()
+    })
+}
+
+#[update]
+fn archive_workspace(workspace_id: u64) {
+    let caller = assert_whitelisted();
+    let mut workspace = assert_workspace_owner(caller, workspace_id);
+    workspace.status = WorkspaceStatus::Archived;
+    WORKSPACES.with(|w| w.borrow_mut().insert(workspace_id, workspace));
+}
+
+#[update]
+fn restore_workspace(workspace_id: u64) {
+    let caller = assert_whitelisted();
+    let mut workspace = assert_workspace_owner(caller, workspace_id);
+    workspace.status = WorkspaceStatus::Active;
+    WORKSPACES.with(|w| w.borrow_mut().insert(workspace_id, workspace));
+}
+
+/// Hard-delete (Pillar 10) — removes the workspace record and its
+/// conversation history. Intended to be called only after the frontend has
+/// offered the user an export; nothing server-side enforces that ordering.
+#[update]
+fn delete_workspace(workspace_id: u64) {
+    let caller = assert_whitelisted();
+    assert_workspace_owner(caller, workspace_id);
+    WORKSPACES.with(|w| w.borrow_mut().remove(&workspace_id));
+    HISTORY.with(|h| {
+        h.borrow_mut().remove(&HistoryKey { principal: caller, workspace_id });
+    });
+}
+
+/// Appends one user/assistant turn to the caller's rolling conversation
+/// history for one workspace (Pillar 10) in a single round trip, trimming
+/// from the front if it exceeds MAX_HISTORY_MESSAGES. The proxy never calls
+/// this directly — it has no way to act as a specific end user (see Pillar
+/// 1's implementation note in CLAUDE.md) — the frontend calls it with its
+/// own authenticated identity right after a Skippy reply comes back.
+#[update]
+fn append_turn(workspace_id: u64, user_text: String, assistant_text: String) {
+    let caller = assert_whitelisted();
+    assert_workspace_owner(caller, workspace_id);
+    let key = HistoryKey { principal: caller, workspace_id };
     let now = ic_cdk::api::time();
     HISTORY.with(|h| {
         let mut h = h.borrow_mut();
-        let mut history = h.get(&caller).unwrap_or_default();
+        let mut history = h.get(&key).unwrap_or_default();
         history.messages.push(Message { role: "user".to_string(), content: user_text, timestamp: now });
         history.messages.push(Message { role: "assistant".to_string(), content: assistant_text, timestamp: now });
         if history.messages.len() > MAX_HISTORY_MESSAGES {
             let excess = history.messages.len() - MAX_HISTORY_MESSAGES;
             history.messages.drain(0..excess);
         }
-        h.insert(caller, history);
+        h.insert(key, history);
     });
 }
 
 #[query]
-fn get_history() -> Vec<Message> {
+fn get_history(workspace_id: u64) -> Vec<Message> {
     let caller = assert_whitelisted();
-    HISTORY.with(|h| h.borrow().get(&caller).map(|history| history.messages).unwrap_or_default())
+    assert_workspace_owner(caller, workspace_id);
+    let key = HistoryKey { principal: caller, workspace_id };
+    HISTORY.with(|h| h.borrow().get(&key).map(|history| history.messages).unwrap_or_default())
 }
 
 #[update]
-fn purge_history() {
+fn purge_history(workspace_id: u64) {
     let caller = assert_whitelisted();
+    assert_workspace_owner(caller, workspace_id);
+    let key = HistoryKey { principal: caller, workspace_id };
     HISTORY.with(|h| {
-        h.borrow_mut().remove(&caller);
+        h.borrow_mut().remove(&key);
     });
 }
 

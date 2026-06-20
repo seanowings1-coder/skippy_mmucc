@@ -132,6 +132,11 @@ class App {
   // spoken/typed trigger phrase is too much noise: toggle on, then everything
   // typed just saves silently as a note, no Skippy reply, no TTS.
   manualNoteMode = false;
+  // Pillar 10 — private per-Principal project partitions for history.
+  // activeWorkspaceId is a bigint (candid nat64), matching every other
+  // server-issued id already flowing through this file unconverted.
+  workspaces = [];
+  activeWorkspaceId = null;
   selectedManual = NOTES_MANUAL;
   sections = [];
   statusMessage = '';
@@ -143,7 +148,6 @@ class App {
   // Independent of voiceMode — when true, Skippy never speaks at all (either
   // engine), just renders text. For meetings/quiet rooms.
   voiceMuted = false;
-  skippyReply = '';
   premiumAudioEl = null;
   audioUnlocked = false;
   // Monotonic counter + abort handle so a new utterance can immediately
@@ -249,7 +253,7 @@ class App {
       if ('Ok' in result) {
         this.sessionToken = result.Ok;
         this.authState = 'ready';
-        this.history = await this.backendActor.get_history();
+        await this.#loadWorkspaces();
         const profileOpt = await this.backendActor.get_my_persona_profile();
         const profile = profileOpt[0];
         this.profileName = profile?.name?.[0] || '';
@@ -274,6 +278,8 @@ class App {
     this.sessionToken = null;
     this.backendActor = null;
     this.history = [];
+    this.workspaces = [];
+    this.activeWorkspaceId = null;
     this.operationalMode = 'default';
     this.profileName = '';
     this.profileVoiceId = '';
@@ -351,22 +357,99 @@ class App {
     if (!window.confirm('Erase your entire conversation history with Skippy? This cannot be undone.')) {
       return;
     }
-    await this.backendActor.purge_history();
+    await this.backendActor.purge_history(this.activeWorkspaceId);
     this.history = [];
     this.statusMessage = 'History cleared.';
     this.#render();
   };
 
-  #downloadHistory = () => {
-    const blob = new Blob([JSON.stringify(this.history, null, 2)], {
-      type: 'application/json',
-    });
+  // Markdown, not JSON — this is meant to be read by a human after the
+  // workspace is gone (Pillar 10), not re-imported into Skippy. Message
+  // timestamps are a bigint (nanoseconds) when they came from the canister's
+  // get_history, but a plain ms Number for anything appended locally this
+  // session (#recordTurn) before the next login round-trips it — handle both.
+  #exportWorkspace = () => {
+    const workspace = this.workspaces.find((w) => w.id === this.activeWorkspaceId);
+    const title = workspace?.name || 'Skippy Conversation';
+    const toDate = (ts) =>
+      typeof ts === 'bigint' ? new Date(Number(ts / 1_000_000n)) : new Date(Number(ts));
+
+    const lines = [`# ${title}`, ''];
+    for (const { role, content, timestamp } of this.history) {
+      const who = role === 'user' ? 'You' : 'Skippy';
+      lines.push(`**${who}** (${toDate(timestamp).toISOString()}):`, '', content, '');
+    }
+
+    const blob = new Blob([lines.join('\n')], { type: 'text/markdown' });
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
     link.href = url;
-    link.download = `skippy-history-${new Date().toISOString()}.json`;
+    const slug = title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+    link.download = `${slug || 'skippy-workspace'}-${new Date().toISOString()}.md`;
     link.click();
     URL.revokeObjectURL(url);
+  };
+
+  // Loads (or, on first-ever login, creates) the caller's workspaces and
+  // settles on one Active workspace to actually display/chat in. Shared by
+  // login and by delete (since deleting the last active workspace needs the
+  // exact same "make sure something Active exists" fallback).
+  #loadWorkspaces = async () => {
+    this.workspaces = await this.backendActor.list_my_workspaces();
+    let active = this.workspaces.find((w) => 'Active' in w.status);
+    if (!active) {
+      const id = await this.backendActor.create_workspace('Default');
+      this.workspaces = await this.backendActor.list_my_workspaces();
+      active = this.workspaces.find((w) => w.id === id);
+    }
+    await this.#switchWorkspace(active.id);
+  };
+
+  #switchWorkspace = async (id) => {
+    this.activeWorkspaceId = id;
+    this.history = await this.backendActor.get_history(id);
+    this.#render();
+  };
+
+  #handleWorkspaceChange = (e) => {
+    this.#switchWorkspace(BigInt(e.target.value));
+  };
+
+  #createWorkspace = async () => {
+    const name = window.prompt('New workspace name:');
+    if (!name || !name.trim()) return;
+    const id = await this.backendActor.create_workspace(name.trim());
+    this.workspaces = await this.backendActor.list_my_workspaces();
+    await this.#switchWorkspace(id);
+  };
+
+  #archiveActiveWorkspace = async () => {
+    if (this.workspaces.filter((w) => 'Active' in w.status).length <= 1) {
+      window.alert("That's your only active workspace — create or restore another one first.");
+      return;
+    }
+    await this.backendActor.archive_workspace(this.activeWorkspaceId);
+    this.workspaces = await this.backendActor.list_my_workspaces();
+    const nextActive = this.workspaces.find((w) => 'Active' in w.status);
+    await this.#switchWorkspace(nextActive.id);
+  };
+
+  #restoreWorkspace = async (id) => {
+    await this.backendActor.restore_workspace(id);
+    this.workspaces = await this.backendActor.list_my_workspaces();
+    this.#render();
+  };
+
+  #deleteActiveWorkspaceForever = async () => {
+    if (
+      !window.confirm(
+        'Permanently delete this workspace and all its history? Export first if you want a copy — this cannot be undone.',
+      )
+    ) {
+      return;
+    }
+    await this.backendActor.delete_workspace(this.activeWorkspaceId);
+    await this.#loadWorkspaces();
   };
 
   #unlockAudioPlayback() {
@@ -618,7 +701,7 @@ class App {
     // Fire-and-forget: the canister is the source of truth for the *next*
     // login's history, but this turn's reply already played — a failure
     // here shouldn't block or re-render the UI around it.
-    this.backendActor.append_turn(userText, assistantText).catch((err) => {
+    this.backendActor.append_turn(this.activeWorkspaceId, userText, assistantText).catch((err) => {
       console.error('[Skippy] failed to persist conversation turn:', err);
     });
   }
@@ -649,13 +732,12 @@ class App {
     if (ack) {
       // Bare trigger phrase, nothing else attached — skip OpenRouter
       // entirely rather than have Skippy ramble asking what you want.
-      this.skippyReply = ack;
       this.lastBrain = '';
       this.lastModel = '';
       this.statusMessage = '';
+      this.#recordTurn(text, ack);
       this.#render();
       this.#speak(ack);
-      this.#recordTurn(text, ack);
       return;
     }
 
@@ -685,13 +767,12 @@ class App {
         return;
       }
 
-      this.skippyReply = data.reply;
       this.lastBrain = data.brain || '';
       this.lastModel = data.model || '';
       this.statusMessage = '';
+      this.#recordTurn(text, data.reply);
       this.#render();
       this.#speak(data.reply);
-      this.#recordTurn(text, data.reply);
     } catch (err) {
       if (err.name === 'AbortError' || mySeq !== this.requestSeq) return;
       this.statusMessage = `Couldn't reach Skippy's brain (is the proxy running on :8787?): ${err.message}`;
@@ -718,11 +799,10 @@ class App {
         : `Here ${recent.length === 1 ? 'is' : 'are'} your ${recent.length} most recent note${recent.length === 1 ? '' : 's'}: ` +
           recent.map((s, i) => `Note ${i + 1}: ${s.content}`).join('. ');
 
-    this.skippyReply = reply;
     this.statusMessage = '';
+    this.#recordTurn(text, reply);
     this.#render();
     this.#speak(reply);
-    this.#recordTurn(text, reply);
   };
 
   // Dedicated silent stop, distinct from barging in with a new utterance:
@@ -964,6 +1044,40 @@ class App {
       <main>
         <h1>Skippy Voice Notes</h1>
 
+        <section class="workspace-switcher">
+          <select @change=${this.#handleWorkspaceChange} .value=${this.activeWorkspaceId?.toString() ?? ''}>
+            ${this.workspaces
+              .filter((w) => 'Active' in w.status)
+              .map((w) => html`<option value=${w.id.toString()}>${w.name}</option>`)}
+          </select>
+          <button @click=${this.#createWorkspace}>+ New workspace</button>
+          <button @click=${this.#archiveActiveWorkspace}>Archive</button>
+          <button @click=${this.#exportWorkspace} ?disabled=${this.history.length === 0}>
+            Export (.md)
+          </button>
+          <button @click=${this.#deleteActiveWorkspaceForever}>Delete forever</button>
+
+          ${this.workspaces.some((w) => 'Archived' in w.status)
+            ? html`
+                <details class="archived-workspaces">
+                  <summary>Archived workspaces</summary>
+                  <ul>
+                    ${this.workspaces
+                      .filter((w) => 'Archived' in w.status)
+                      .map(
+                        (w) => html`
+                          <li>
+                            ${w.name}
+                            <button @click=${() => this.#restoreWorkspace(w.id)}>Restore</button>
+                          </li>
+                        `,
+                      )}
+                  </ul>
+                </details>
+              `
+            : ''}
+        </section>
+
         <section class="voice-toggle">
           <button
             @click=${this.#silence}
@@ -976,9 +1090,6 @@ class App {
           </button>
           <button @click=${this.#toggleVoiceMuted}>
             ${this.voiceMuted ? '🔇 Muted (text only)' : '🔊 Mute'}
-          </button>
-          <button @click=${this.#downloadHistory} ?disabled=${this.history.length === 0}>
-            Download history
           </button>
           <button @click=${this.#clearHistory} ?disabled=${this.history.length === 0}>
             Clear history
@@ -1025,9 +1136,21 @@ class App {
           </form>
         </details>
 
-        ${this.skippyReply
-          ? html`<p class="skippy-reply">${this.skippyReply}</p>`
-          : ''}
+        <div class="conversation-transcript">
+          ${this.history.length === 0
+            ? html`<p class="status">No messages yet in this workspace.</p>`
+            : // Newest first — display order only, a reversed copy. The
+              // underlying this.history array stays chronological (oldest
+              // first), since that's the order OpenRouter and append_turn
+              // both expect.
+              [...this.history].reverse().map(
+                (msg) => html`
+                  <p class="transcript-message ${msg.role}">
+                    <strong>${msg.role === 'user' ? 'You' : 'Skippy'}:</strong> ${msg.content}
+                  </p>
+                `,
+              )}
+        </div>
 
         ${micUnsupported
           ? html`<p class="status">

@@ -23,6 +23,16 @@ type SessionInfo = record {
     voice_id : opt text;
 };
 
+type WorkspaceStatus = variant { Active; Archived };
+
+type Workspace = record {
+    id : nat64;
+    owner : principal;
+    name : text;
+    status : WorkspaceStatus;
+    created_at : nat64;
+};
+
 service : (principal, principal) -> {
     "greet": (text) -> (text) query;
 
@@ -34,9 +44,15 @@ service : (principal, principal) -> {
     "login": () -> (variant { Ok : text; Err : text });
     "validate_session": (text) -> (opt SessionInfo) query;
 
-    "append_turn": (text, text) -> ();
-    "get_history": () -> (vec Message) query;
-    "purge_history": () -> ();
+    "create_workspace": (text) -> (nat64);
+    "list_my_workspaces": () -> (vec Workspace) query;
+    "archive_workspace": (nat64) -> ();
+    "restore_workspace": (nat64) -> ();
+    "delete_workspace": (nat64) -> ();
+
+    "append_turn": (nat64, text, text) -> ();
+    "get_history": (nat64) -> (vec Message) query;
+    "purge_history": (nat64) -> ();
 
     "set_persona_profile": (text, text) -> ();
     "get_my_persona_profile": () -> (opt PersonaProfile) query;

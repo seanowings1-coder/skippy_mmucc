@@ -409,10 +409,33 @@ numbers below are execution order. Each phase folds in its later-added hygiene/t
   `<textarea>` (was a single-line `<input>`) at ~50% width, with Enter-to-submit/Shift+Enter-for-
   newline restored via a keydown handler, since textareas don't auto-submit on Enter the way the
   old input did.
-- **Phase 5.5 — Workspaces: multi-project lifecycle & export** (Pillar 10, new 2026-06-20):
-  `workspace_id`-segmented history, Active/Archived status, a workspace switcher UI, and
-  human-readable (Markdown/text, not JSON) export before hard-delete. Sequenced ahead of RAG below
-  since Pillar 6's "global, not siloed" RAG design assumes workspaces already exist as a concept.
+- **Phase 5.5 — Workspaces: multi-project lifecycle & export** (Pillar 10). **Status: done,
+  verified end-to-end in a real browser.** `HistoryKey { principal, workspace_id }` replaces the
+  old bare-`Principal` key on `HISTORY` (`lib.rs`); `append_turn`/`get_history`/`purge_history` all
+  now take a `workspace_id`, validated against a new `WORKSPACES` store via
+  `assert_workspace_owner`. New methods: `create_workspace`/`list_my_workspaces`/
+  `archive_workspace`/`restore_workspace`/`delete_workspace` (hard-delete, removes both the
+  workspace record and its history). Frontend: a workspace switcher dropdown (Active only) +
+  collapsible "Archived workspaces" list with per-entry Restore, "+ New workspace" (a plain
+  `window.prompt`, matching this app's existing low-ceremony form patterns), Archive (refuses to
+  archive your last remaining Active workspace), "Delete forever" (confirm-gated), and an Export
+  button producing Markdown (not JSON — title + role-tagged turns with ISO timestamps) via the
+  same blob-download pattern the old JSON "Download history" button used (replaced, not kept
+  alongside, since the old format was explicitly the thing this phase was meant to stop doing).
+  Auto-creates a "Default" workspace on first-ever login (or after deleting your last one) so
+  there's never a dead end with zero workspaces to select. Sequenced ahead of RAG below since
+  Pillar 6's "global, not siloed" RAG design assumes workspaces already exist as a concept.
+  **+ Conversation transcript patch (found during verification):** switching workspaces correctly
+  re-scoped `this.history`/`append_turn` server-side the whole time, but there was no way to
+  *see* that — the UI only ever rendered a single `skippyReply` field (the latest reply), which
+  switching never touched, so the screen looked frozen on the same message regardless of which
+  workspace was selected. Removed `skippyReply` entirely and replaced it with a real
+  `.conversation-transcript` rendered straight from `this.history` (newest message first, per
+  follow-up request — display order only, the underlying array stays chronological since that's
+  what OpenRouter/`append_turn` both expect). Required moving the three `#recordTurn(...)` call
+  sites (main reply, bare-trigger ack, note read-back) to run *before* `#render()` instead of
+  after, so the transcript reflects the turn that just completed instead of lagging one render
+  behind.
 - **Phase 5.6 — RAG engine + multi-mode web intelligence** (Pillar 6). **+ RAG manual hygiene
   patch**: a "Knowledge Manager" UI to view and permanently delete specific manuals — the backend
   capability this needed (`delete_manual_section(id)`) already shipped early, as part of Phase
