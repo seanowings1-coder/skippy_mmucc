@@ -123,10 +123,35 @@ instantly rejected. All per-user data (notes, chat history) is partitioned by th
 getting a fully isolated profile/session state. The manual library is shared across both, not
 per-principal.
 
-### Pillar 3 — Behavioral State Machine (persona modes)
+### Pillar 3 — Behavioral State Machine (persona modes, with Brain Switching)
 An `operational_mode` state (`default` | `professional` | `tactical`), switched by voice trigger
 phrases ("Skippy, be yourself" / "Skippy, behave" / "Skippy, steel rain"), selecting a different
 system prompt server-side per mode.
+- **Dual-voice routing**: distinct ElevenLabs voice profiles for the Commander vs. the wife,
+  stored as `COMMANDER_VOICE_ID`/`PARTNER_VOICE_ID` in the backend canister via a **runtime
+  admin update method** (callable only by the two whitelisted Principals), not `.env` and not
+  baked into immutable `#[init]` args — these aren't secret like the whitelist is, and this way
+  a voice can be changed later without a redeploy. The proxy resolves "whose session is this"
+  (it already does, via `validate_session`) and gets the right voice from the same canister.
+  Voice selection is keyed off the authenticated Principal, not the operational mode — identity
+  governs voice and system-prompt relationship context only, never the engine.
+- **Brain Switching**: a 3-tier OpenRouter model matrix selected by **plain string-matching on
+  the voice transcript only** — explicitly no secondary LLM classification call:
+  - **Everyday Brain** (default, no trigger phrase): the current standard/balanced model.
+  - **Heavy Hitter Brain** ("toss on your thinking hat"): the most capable available model
+    (e.g. Claude Sonnet/Opus, GPT-4o) for deep reasoning/coding/architecture questions, with
+    quick-reply constraints dropped. **One-shot**: applies only to the message containing the
+    phrase, then reverts to whichever brain/mode was active before — avoids silently staying on
+    an expensive top-tier model for the rest of the conversation. **Model-only**: doesn't
+    introduce a 4th `operational_mode`; persona/system-prompt selection is untouched, only the
+    underlying model executing the active prompt changes.
+  - **Tactical Brain** ("steel rain"): the fastest/cheapest available model (e.g. Claude Haiku,
+    Gemini Flash), zero fluff/snark, for when latency is all that matters. **Unified with the
+    `tactical` operational mode above** — saying "Skippy, steel rain" sets `operational_mode =
+    tactical` *and* selects the Tactical Brain together in one shot; persona and engine were
+    always the same lean/fast/no-nonsense mode described from two angles, not separate state.
+  - Brain selection is **shared** across both users — whoever says the phrase gets the same
+    model; identity never affects which engine is used, only voice and addressing.
 
 ### Pillar 4 — Background Auto-Dictation Engine
 Mostly already built (section 2 above) — this is primarily a trigger-phrase content update
@@ -234,11 +259,17 @@ numbers below are execution order. Each phase folds in its later-added hygiene/t
 - **Phase 5.2 — Conversational history** (Pillar 5). Backend-owned rolling message history per
   Principal. **+ Memory pruning & archive patch**: an export/download-to-device function for
   history, and a "Purge" function to selectively or fully wipe a principal's stored history.
-- **Phase 5.3 — Behavioral state machine** (Pillar 3). `operational_mode` + three system prompts.
-  **+ Dynamic persona injection patch**: the proxy injects the active principal's identity (e.g.
-  "User: Commander" vs "User: [Wife's name]") into the system prompt context so Skippy addresses
-  the right person and relationship dynamic — depends on Phase 5.1's principal→display-name
-  mapping existing.
+- **Phase 5.3 — Behavioral state machine, with Brain Switching** (Pillar 3, fully specified —
+  see Pillar 3 above for the resolved design). `operational_mode` + three system prompts.
+  **+ Dynamic persona injection patch**: the proxy injects the active principal's identity
+  (e.g. "User: Commander" vs "User: [Wife's name]") into the system prompt context so Skippy
+  addresses the right person and relationship dynamic — depends on Phase 5.1's
+  principal→display-name mapping existing. **+ Dual-voice routing**: per-Principal ElevenLabs
+  voice ID selection (Commander vs. wife) via a runtime admin update method on the backend
+  canister. **+ Brain Switching**: 3-tier OpenRouter model swap (Everyday/Heavy Hitter/Tactical)
+  by plain string-match on the voice transcript, no secondary classification call; "steel rain"
+  unifies with the existing `tactical` operational mode, "thinking hat" is one-shot and
+  model-only, brain selection is shared across both users regardless of identity.
 - **Phase 5.4 — Trigger phrase content update** (Pillar 4). **+ Note retrieval patch**: a "Notes
   Vault" dashboard in the Neo Skin UI to view saved dictations, plus a voice retrieval command
   ("Skippy, read back my recent notes") that fetches and reads them back.
