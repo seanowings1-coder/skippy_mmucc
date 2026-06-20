@@ -395,17 +395,31 @@ numbers below are execution order. Each phase folds in its later-added hygiene/t
   `StableBTreeMap` iterates by ascending auto-increment id, so the tail of the returned `Vec` is
   already the most recent notes, no timestamp parsing needed — and speaks them back directly,
   skipping OpenRouter entirely (same "nothing for the LLM to add" reasoning as the bare-trigger
-  acknowledgment patch from Phase 5.3).
+  acknowledgment patch from Phase 5.3). **+ Section delete + manual quick-note patches
+  (2026-06-20):** added `delete_manual_section(id)` to the backend (generic, like the rest of the
+  store — works for any manual, not just notes) plus a "Delete" button per entry in the Notes
+  Vault/manual-browser list, after the user noticed there was no way to remove a note once its
+  point had passed. This also retires the open question in Phase 5.6's RAG manual hygiene patch
+  below — the backend capability it needed already exists now, so that phase is UI-only (Knowledge
+  Manager) when it comes up. Also added a **"📝 Note Mode" toggle** next to the typed-message box:
+  switches the box into silently saving everything typed as a note (`#persistNote` directly, no
+  `#askSkippy` reply, no TTS) until toggled off — for meetings, where even the existing
+  trigger-phrase flow's spoken acknowledgment is unwanted noise; stays on across multiple notes
+  rather than resetting per-note. **+ Larger message box**: the typed-input field is now a 3-row
+  `<textarea>` (was a single-line `<input>`) at ~50% width, with Enter-to-submit/Shift+Enter-for-
+  newline restored via a keydown handler, since textareas don't auto-submit on Enter the way the
+  old input did.
 - **Phase 5.5 — Workspaces: multi-project lifecycle & export** (Pillar 10, new 2026-06-20):
   `workspace_id`-segmented history, Active/Archived status, a workspace switcher UI, and
   human-readable (Markdown/text, not JSON) export before hard-delete. Sequenced ahead of RAG below
   since Pillar 6's "global, not siloed" RAG design assumes workspaces already exist as a concept.
 - **Phase 5.6 — RAG engine + multi-mode web intelligence** (Pillar 6). **+ RAG manual hygiene
-  patch**: a "Knowledge Manager" UI to view and permanently delete specific manuals — needs a new
-  backend delete capability (the store currently only supports add/get/list, no delete; deleting
-  "by manual" means collecting matching ids via `list_sections_by_manual` then removing each, since
-  `manual_name` isn't the primary key). Knowledge base stays global across workspaces (Pillar 6's
-  "global, not siloed" note) with a strict top-k retrieval limit.
+  patch**: a "Knowledge Manager" UI to view and permanently delete specific manuals — the backend
+  capability this needed (`delete_manual_section(id)`) already shipped early, as part of Phase
+  5.4's note-deletion patch, so this is UI-only when it comes up: "delete by manual" just means
+  collecting matching ids via `list_sections_by_manual` then calling `delete_manual_section` per
+  id, since `manual_name` isn't the primary key. Knowledge base stays global across workspaces
+  (Pillar 6's "global, not siloed" note) with a strict top-k retrieval limit.
 - **Phase 5.7 — Courier queue** (Pillar 7).
 - **Phase 5.8 — Unified Fuel & Quotas dashboard** (Pillar 8, expanded scope — see Pillar 8 above):
   ICP cycle gauge + OpenRouter balance + ElevenLabs usage via a single `/api/fuel` proxy endpoint,

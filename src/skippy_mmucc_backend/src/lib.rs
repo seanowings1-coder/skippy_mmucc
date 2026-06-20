@@ -236,6 +236,16 @@ fn get_manual_section(id: u64) -> Option<DocumentSection> {
     MANUAL_SECTIONS.with(|s| s.borrow().get(&id))
 }
 
+// Generic by design, same as the rest of this store: notes are just sections
+// under the reserved "SKIPPY_NOTES" manual name, so this one method covers
+// both per-note deletion (Notes Vault) and the Knowledge Manager's "delete
+// by manual" (collect ids via list_sections_by_manual, then call this per id).
+#[update]
+fn delete_manual_section(id: u64) -> bool {
+    assert_whitelisted();
+    MANUAL_SECTIONS.with(|s| s.borrow_mut().remove(&id)).is_some()
+}
+
 #[query]
 fn list_sections_by_manual(manual_name: String) -> Vec<DocumentSection> {
     assert_whitelisted();

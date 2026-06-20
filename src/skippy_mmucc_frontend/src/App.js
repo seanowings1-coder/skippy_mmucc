@@ -128,6 +128,10 @@ class App {
   state = 'idle';
   noteBuffer = '';
   liveTranscript = '';
+  // Manual quick-note mode (typed text box only) — for meetings where even a
+  // spoken/typed trigger phrase is too much noise: toggle on, then everything
+  // typed just saves silently as a note, no Skippy reply, no TTS.
+  manualNoteMode = false;
   selectedManual = NOTES_MANUAL;
   sections = [];
   statusMessage = '';
@@ -304,6 +308,14 @@ class App {
     if (!text) return;
     form.elements.textInput.value = '';
 
+    if (this.manualNoteMode) {
+      // Stays in note mode after saving (not a one-shot) — a meeting can
+      // produce several quick notes in a row, and re-toggling between each
+      // one would defeat the point of having a quiet mode at all.
+      this.#persistNote(text);
+      return;
+    }
+
     // Mirrors #handleFinalChunk's note-trigger check (voice path) — typed
     // input arrives complete in one shot, so there's no need for the voice
     // flow's incremental dictate-then-"Stop & Save" buffer: just strip the
@@ -323,6 +335,16 @@ class App {
     }
 
     this.#askSkippy(text);
+  };
+
+  // A <textarea> doesn't auto-submit its form on Enter the way the old
+  // single-line <input> did — restore that (Shift+Enter still inserts a
+  // newline, same convention as Slack/Discord) now that the box is multi-line.
+  #handleTextareaKeydown = (e) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      e.target.form.requestSubmit();
+    }
   };
 
   #clearHistory = async () => {
@@ -854,6 +876,11 @@ class App {
     this.#render();
   };
 
+  #toggleNoteMode = () => {
+    this.manualNoteMode = !this.manualNoteMode;
+    this.#render();
+  };
+
   #refreshSections = async () => {
     this.sections = await this.backendActor.list_sections_by_manual(
       this.selectedManual,
@@ -864,6 +891,17 @@ class App {
   #handleManualChange = (e) => {
     this.selectedManual = e.target.value;
     this.#render();
+  };
+
+  // Generic by design (matches delete_manual_section on the backend) — works
+  // for any manual section, not just notes, so the same button will cover
+  // Phase 5.6's Knowledge Manager later.
+  #deleteSection = async (id) => {
+    if (!window.confirm('Delete this entry permanently? This cannot be undone.')) {
+      return;
+    }
+    await this.backendActor.delete_manual_section(id);
+    await this.#refreshSections();
   };
 
   #statusText() {
@@ -949,12 +987,22 @@ class App {
         </section>
 
         <form class="text-input" @submit=${this.#sendTextMessage}>
-          <input
+          <button
+            type="button"
+            class=${this.manualNoteMode ? 'note-mode-toggle active' : 'note-mode-toggle'}
+            @click=${this.#toggleNoteMode}
+          >
+            ${this.manualNoteMode ? '📝 Note Mode: ON' : '📝 Note Mode'}
+          </button>
+          <textarea
             name="textInput"
-            type="text"
-            placeholder="Type to Skippy (e.g. for meetings)..."
-          />
-          <button type="submit">Send</button>
+            rows="3"
+            placeholder=${this.manualNoteMode
+              ? 'Note mode: type and press Enter to save (no chat, no voice)...'
+              : 'Type to Skippy (e.g. for meetings)...'}
+            @keydown=${this.#handleTextareaKeydown}
+          ></textarea>
+          <button type="submit">${this.manualNoteMode ? 'Save Note' : 'Send'}</button>
         </form>
 
         <p class="status">Mode: ${this.operationalMode}</p>
@@ -1027,6 +1075,7 @@ class App {
                 <li>
                   <strong>${section.title}</strong>
                   <span class="section-id">(${section.section})</span>
+                  <button @click=${() => this.#deleteSection(section.id)}>Delete</button>
                   <p>${section.content}</p>
                 </li>
               `,

@@ -29,6 +29,7 @@ service : (principal, principal) -> {
     "add_manual_section": (text, text, text, text) -> (nat64);
     "get_manual_section": (nat64) -> (opt DocumentSection) query;
     "list_sections_by_manual": (text) -> (vec DocumentSection) query;
+    "delete_manual_section": (nat64) -> (bool);
 
     "login": () -> (variant { Ok : text; Err : text });
     "validate_session": (text) -> (opt SessionInfo) query;
