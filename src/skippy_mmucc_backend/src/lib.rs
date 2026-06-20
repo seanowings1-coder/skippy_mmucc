@@ -18,6 +18,7 @@ const NEXT_ID_MEMORY_ID: MemoryId = MemoryId::new(1);
 const COMMANDER_PRINCIPAL_MEMORY_ID: MemoryId = MemoryId::new(2);
 const PARTNER_PRINCIPAL_MEMORY_ID: MemoryId = MemoryId::new(3);
 const HISTORY_MEMORY_ID: MemoryId = MemoryId::new(4);
+const PERSONA_PROFILES_MEMORY_ID: MemoryId = MemoryId::new(5);
 
 // Rolling cap on a Principal's stored conversation: applied at write time so
 // both stable memory usage and the context forwarded to OpenRouter stay
@@ -97,6 +98,44 @@ impl Storable for ConversationHistory {
     };
 }
 
+/// A Principal's self-set display name and ElevenLabs voice ID (Pillar 3's
+/// dual-voice routing). Not secret, unlike the whitelist — settable at
+/// runtime by each user for themselves, no redeploy needed.
+#[derive(CandidType, Deserialize, Clone, Debug, Default)]
+pub struct PersonaProfile {
+    pub name: Option<String>,
+    pub voice_id: Option<String>,
+}
+
+impl Storable for PersonaProfile {
+    fn to_bytes(&self) -> Cow<'_, [u8]> {
+        Cow::Owned(Encode!(self).unwrap())
+    }
+
+    fn into_bytes(self) -> Vec<u8> {
+        Encode!(&self).unwrap()
+    }
+
+    fn from_bytes(bytes: Cow<[u8]>) -> Self {
+        Decode!(bytes.as_ref(), Self).unwrap()
+    }
+
+    const BOUND: Bound = Bound::Bounded {
+        max_size: 2_000,
+        is_fixed_size: false,
+    };
+}
+
+/// Returned by `validate_session` so the proxy gets everything it needs
+/// (caller identity, display name, voice) from the one query it already
+/// makes on every request, instead of a second round trip.
+#[derive(CandidType, Deserialize, Clone, Debug)]
+pub struct SessionInfo {
+    pub principal: Principal,
+    pub name: Option<String>,
+    pub voice_id: Option<String>,
+}
+
 thread_local! {
     static MEMORY_MANAGER: RefCell<MemoryManager<DefaultMemoryImpl>> =
         RefCell::new(MemoryManager::init(DefaultMemoryImpl::default()));
@@ -133,6 +172,11 @@ thread_local! {
     static HISTORY: RefCell<StableBTreeMap<Principal, ConversationHistory, Memory>> =
         RefCell::new(StableBTreeMap::init(
             MEMORY_MANAGER.with(|m| m.borrow().get(HISTORY_MEMORY_ID)),
+        ));
+
+    static PERSONA_PROFILES: RefCell<StableBTreeMap<Principal, PersonaProfile, Memory>> =
+        RefCell::new(StableBTreeMap::init(
+            MEMORY_MANAGER.with(|m| m.borrow().get(PERSONA_PROFILES_MEMORY_ID)),
         ));
 }
 
@@ -231,9 +275,9 @@ async fn login() -> Result<String, String> {
 }
 
 #[query]
-fn validate_session(token: String) -> Option<Principal> {
+fn validate_session(token: String) -> Option<SessionInfo> {
     let now = ic_cdk::api::time();
-    SESSIONS.with(|s| {
+    let principal = SESSIONS.with(|s| {
         s.borrow().get(&token).and_then(|(principal, expiry)| {
             if now < *expiry {
                 Some(*principal)
@@ -241,6 +285,12 @@ fn validate_session(token: String) -> Option<Principal> {
                 None
             }
         })
+    })?;
+    let profile = PERSONA_PROFILES.with(|p| p.borrow().get(&principal));
+    Some(SessionInfo {
+        principal,
+        name: profile.as_ref().and_then(|p| p.name.clone()),
+        voice_id: profile.as_ref().and_then(|p| p.voice_id.clone()),
     })
 }
 
@@ -279,6 +329,26 @@ fn purge_history() {
     HISTORY.with(|h| {
         h.borrow_mut().remove(&caller);
     });
+}
+
+/// Each user sets their own display name/voice — no `principal` argument,
+/// caller is the key, same pattern as `append_turn`/`get_history`. Full
+/// overwrite of both fields; no partial-update support needed for v1.
+#[update]
+fn set_persona_profile(name: String, voice_id: String) {
+    let caller = assert_whitelisted();
+    PERSONA_PROFILES.with(|p| {
+        p.borrow_mut().insert(
+            caller,
+            PersonaProfile { name: Some(name), voice_id: Some(voice_id) },
+        );
+    });
+}
+
+#[query]
+fn get_my_persona_profile() -> Option<PersonaProfile> {
+    let caller = assert_whitelisted();
+    PERSONA_PROFILES.with(|p| p.borrow().get(&caller))
 }
 
 #[query]

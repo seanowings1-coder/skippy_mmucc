@@ -265,17 +265,33 @@ numbers below are execution order. Each phase folds in its later-added hygiene/t
   client-side; "Clear history" calls `purge_history()` (full wipe of the caller's own history
   only — confirmed no per-message deletion needed). User confirmed Skippy correctly recalls
   earlier turns in a conversation, and that Clear history works.
-- **Phase 5.3 — Behavioral state machine, with Brain Switching** (Pillar 3, fully specified —
-  see Pillar 3 above for the resolved design). `operational_mode` + three system prompts.
-  **+ Dynamic persona injection patch**: the proxy injects the active principal's identity
-  (e.g. "User: Commander" vs "User: [Wife's name]") into the system prompt context so Skippy
-  addresses the right person and relationship dynamic — depends on Phase 5.1's
-  principal→display-name mapping existing. **+ Dual-voice routing**: per-Principal ElevenLabs
-  voice ID selection (Commander vs. wife) via a runtime admin update method on the backend
-  canister. **+ Brain Switching**: 3-tier OpenRouter model swap (Everyday/Heavy Hitter/Tactical)
-  by plain string-match on the voice transcript, no secondary classification call; "steel rain"
-  unifies with the existing `tactical` operational mode, "thinking hat" is one-shot and
-  model-only, brain selection is shared across both users regardless of identity.
+- **Phase 5.3 — Behavioral state machine, with Brain Switching** (Pillar 3). **Status: done,
+  verified end-to-end in a real browser.** `operational_mode` (`default`/`professional`/
+  `tactical`) + three system prompts in `server.js`, selected by voice trigger phrases detected
+  client-side in `App.js`'s `#detectModeAndBrain`. **+ Dynamic persona injection patch**: the
+  proxy prepends "You are speaking with {name}." to the system prompt when the caller has a
+  saved `PersonaProfile` name. **+ Dual-voice routing**: `set_persona_profile`/
+  `get_my_persona_profile` on the backend canister let each Principal set their own name/
+  ElevenLabs voice ID at runtime (minimal settings UI in `App.js`); `validate_session` returns
+  this alongside the Principal so the proxy gets it in the one query it already makes.
+  **+ Brain Switching**: 3-tier OpenRouter model swap (Everyday/Heavy Hitter/Tactical) by plain
+  string-match on the transcript (`anthropic/claude-sonnet-4.6` / `anthropic/claude-haiku-4.5`
+  by default); "steel rain" (and the confirmed real STT mishearing "still rain") unifies with
+  `tactical` mode, "toss on your thinking hat" is one-shot and model-only. **+ Bare-trigger
+  acknowledgment patch**: if a mode-switch phrase has no actual question/task attached (just
+  "Skippy, steel rain" with nothing else — filler words like "hey"/"skippy" stripped before
+  checking), Skippy acknowledges locally (e.g. "Understood. Standing by.") instead of round-
+  tripping to OpenRouter and rambling for clarification. **+ Barge-in patch**: any new utterance
+  (voice or typed) immediately aborts an in-flight request and silences whatever Skippy is
+  currently saying — `#askSkippy` uses a monotonic sequence number + `AbortController` rather
+  than dropping overlapping input; the wake word "Skippy" also cuts off playback the instant
+  it's heard in an *interim* (not yet finalized) recognition result, since waiting for the full
+  phrase to transcribe was too slow to feel interruptible. **+ Mute + text input patch**: a mute
+  toggle makes Skippy text-only (no TTS, either engine); a typed-message form feeds the same
+  `#askSkippy` pipeline as voice, for meetings/quiet rooms — the typed-input field deliberately
+  reads its value from the DOM on submit (`#saveProfile`'s pattern) rather than as a
+  React-style controlled input, since re-rendering on every keystroke fought with the mic's own
+  re-renders firing on every interim speech result while listening was active.
 - **Phase 5.4 — Trigger phrase content update** (Pillar 4). **+ Note retrieval patch**: a "Notes
   Vault" dashboard in the Neo Skin UI to view saved dictations, plus a voice retrieval command
   ("Skippy, read back my recent notes") that fetches and reads them back.

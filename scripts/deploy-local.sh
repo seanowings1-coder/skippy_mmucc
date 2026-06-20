@@ -15,5 +15,12 @@ if [[ -z "${COMMANDER_PRINCIPAL:-}" || -z "${PARTNER_PRINCIPAL:-}" ]]; then
 fi
 
 dfx deploy internet_identity
-dfx deploy skippy_mmucc_backend --argument "(principal \"${COMMANDER_PRINCIPAL}\", principal \"${PARTNER_PRINCIPAL}\")"
+# --upgrade-unchanged is required: dfx skips re-running install_code (and
+# therefore #[post_upgrade], which is what actually re-applies these args)
+# whenever the wasm module hash is unchanged from what's already deployed —
+# e.g. every time only .env's Principal values change but the Rust source
+# doesn't. Without this flag, editing COMMANDER_PRINCIPAL/PARTNER_PRINCIPAL
+# and redeploying silently does nothing, and the canister keeps rejecting
+# the "newly whitelisted" Principal.
+dfx deploy skippy_mmucc_backend --argument "(principal \"${COMMANDER_PRINCIPAL}\", principal \"${PARTNER_PRINCIPAL}\")" --upgrade-unchanged
 dfx deploy skippy_mmucc_frontend

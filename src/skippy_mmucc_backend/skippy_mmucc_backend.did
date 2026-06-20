@@ -12,6 +12,17 @@ type Message = record {
     timestamp : nat64;
 };
 
+type PersonaProfile = record {
+    name : opt text;
+    voice_id : opt text;
+};
+
+type SessionInfo = record {
+    "principal" : principal;
+    name : opt text;
+    voice_id : opt text;
+};
+
 service : (principal, principal) -> {
     "greet": (text) -> (text) query;
 
@@ -20,9 +31,12 @@ service : (principal, principal) -> {
     "list_sections_by_manual": (text) -> (vec DocumentSection) query;
 
     "login": () -> (variant { Ok : text; Err : text });
-    "validate_session": (text) -> (opt principal) query;
+    "validate_session": (text) -> (opt SessionInfo) query;
 
     "append_turn": (text, text) -> ();
     "get_history": () -> (vec Message) query;
     "purge_history": () -> ();
+
+    "set_persona_profile": (text, text) -> ();
+    "get_my_persona_profile": () -> (opt PersonaProfile) query;
 }

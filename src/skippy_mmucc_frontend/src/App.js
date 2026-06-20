@@ -47,6 +47,43 @@ const TRIGGER_PHRASES = [
   'let me grab my notepad',
 ];
 
+// Pillar 3's persona/Brain Switching trigger phrases — plain substring
+// matching on the transcript, no secondary classification call. "behave"
+// and "be yourself" require a "skippy" lead-in elsewhere in the same chunk
+// since they're short/common words that could otherwise false-trigger
+// (e.g. "I told the dog to behave"); "steel rain" and the thinking-hat
+// phrase are distinctive enough to match as plain substrings.
+const MODE_TRIGGER_PHRASES_WITH_LEAD_IN = {
+  'be yourself': 'default',
+  behave: 'professional',
+};
+// "still rain" is a confirmed real speech-to-text mishearing of "steel
+// rain" (same vowel sound), not a guess — accepted as an alias rather than
+// trying to fix the recognizer itself.
+const STEEL_RAIN_PHRASES = ['steel rain', 'still rain'];
+const THINKING_HAT_PHRASE = 'toss on your thinking hat';
+
+// Said with nothing else attached (e.g. just "Skippy, steel rain"), these
+// trigger phrases have no actual question/task for the LLM to respond to —
+// without this, Skippy would call OpenRouter anyway and ramble asking what
+// you want. Skip the network round trip entirely and acknowledge locally.
+const MODE_SWITCH_ACKNOWLEDGMENTS = {
+  tactical: 'Understood. Standing by.',
+  default: 'Back to myself. What do you need?',
+  professional: 'Understood. I will behave.',
+};
+const THINKING_HAT_BARE_ACKNOWLEDGMENT = 'Ready when you are.';
+
+// Common address/filler words people naturally tack onto a voice command
+// ("hey Skippy, steel rain") that aren't themselves real content.
+const FILLER_WORDS_PATTERN = /\b(hey|ok|okay|please|skippy)\b/gi;
+
+// True if, after stripping out the matched trigger phrase and any filler
+// words, nothing but whitespace/punctuation is left.
+function isTrivialRemainder(remainder) {
+  return remainder.replace(FILLER_WORDS_PATTERN, '').replace(/[^a-z0-9]/gi, '').length === 0;
+}
+
 const NOTES_MANUAL = 'SKIPPY_NOTES';
 const MANUAL_OPTIONS = [NOTES_MANUAL, 'MMUCC_V6', 'ANSI_D16'];
 
@@ -86,10 +123,25 @@ class App {
   recognitionActive = false;
   // 'premium' (ElevenLabs via proxy) | 'economy' (browser speechSynthesis)
   voiceMode = 'premium';
+  // Independent of voiceMode — when true, Skippy never speaks at all (either
+  // engine), just renders text. For meetings/quiet rooms.
+  voiceMuted = false;
   skippyReply = '';
   premiumAudioEl = null;
   audioUnlocked = false;
-  awaitingSkippyReply = false;
+  // Monotonic counter + abort handle so a new utterance can immediately
+  // interrupt whatever Skippy is currently saying or still waiting on,
+  // rather than dropping the new one or waiting for the old reply to
+  // finish — see #askSkippy's "barge-in" handling.
+  requestSeq = 0;
+  currentAbortController = null;
+  // True only while Skippy's voice is actually audible — lets the wake word
+  // "Skippy" cut him off the instant it's heard, even on an interim (not
+  // yet finalized) recognition result, rather than waiting for the whole
+  // barge-in phrase to finish being transcribed. Without headphones, the
+  // mic also picks up Skippy's own voice from the speakers, so a fast,
+  // simple wake word is more reliable than fully solving acoustic echo.
+  isSpeaking = false;
 
   authClient = null;
   identity = null;
@@ -103,6 +155,15 @@ class App {
   // fetched once at login, kept in sync locally so /respond doesn't need an
   // extra canister round trip on every single message.
   history = [];
+  // 'default' | 'professional' | 'tactical' — live "current vibe", in-memory
+  // only, resets to default on logout/refresh rather than being persisted.
+  operationalMode = 'default';
+  profileName = '';
+  profileVoiceId = '';
+  // TEMPORARY debug aid for verifying Brain Switching (Phase 5.3) — which
+  // brain/model actually answered the last message. Drop once confirmed.
+  lastBrain = '';
+  lastModel = '';
 
   constructor() {
     if (SpeechRecognitionImpl) {
@@ -172,6 +233,10 @@ class App {
         this.sessionToken = result.Ok;
         this.authState = 'ready';
         this.history = await this.backendActor.get_history();
+        const profileOpt = await this.backendActor.get_my_persona_profile();
+        const profile = profileOpt[0];
+        this.profileName = profile?.name?.[0] || '';
+        this.profileVoiceId = profile?.voice_id?.[0] || '';
       } else {
         this.authState = 'rejected';
         this.authError = result.Err;
@@ -192,8 +257,40 @@ class App {
     this.sessionToken = null;
     this.backendActor = null;
     this.history = [];
+    this.operationalMode = 'default';
+    this.profileName = '';
+    this.profileVoiceId = '';
     this.authState = 'logged-out';
     this.#render();
+  };
+
+  #saveProfile = async (e) => {
+    e.preventDefault();
+    const form = e.target;
+    const name = form.elements.profileName.value.trim();
+    const voiceId = form.elements.profileVoiceId.value.trim();
+    await this.backendActor.set_persona_profile(name, voiceId);
+    this.profileName = name;
+    this.profileVoiceId = voiceId;
+    this.statusMessage = 'Profile saved.';
+    this.#render();
+  };
+
+  // Typed alternative to voice — same #askSkippy pipeline (mode/brain
+  // detection, barge-in, history) as a spoken utterance, for meetings or
+  // anywhere talking to a screen out loud isn't an option. Reads the value
+  // directly from the form on submit (same pattern as #saveProfile) rather
+  // than tracking it reactively on every keystroke — a controlled input
+  // re-rendering on every keystroke fights with the mic's own re-renders
+  // firing on every interim speech result while listening is active, and
+  // the two competing renders can reset the input's cursor/focus mid-type.
+  #sendTextMessage = (e) => {
+    e.preventDefault();
+    const form = e.target;
+    const text = form.elements.textInput.value.trim();
+    if (!text) return;
+    form.elements.textInput.value = '';
+    this.#askSkippy(text);
   };
 
   #clearHistory = async () => {
@@ -256,6 +353,13 @@ class App {
         if (!result.isFinal) {
           this.liveTranscript = result[0].transcript;
           console.log('[Skippy] interim transcript:', this.liveTranscript);
+          // Cut Skippy off the instant the wake word is heard, rather than
+          // waiting for the rest of the barge-in phrase to finish being
+          // transcribed — saying "Skippy" alone is enough to shut him up.
+          if (this.isSpeaking && this.liveTranscript.toLowerCase().includes('skippy')) {
+            this.#stopSpeaking();
+            this.statusMessage = "I'm listening...";
+          }
           this.#render();
           continue;
         }
@@ -404,16 +508,90 @@ class App {
     await this.#askSkippy(content);
   };
 
+  // Implements Pillar 3's precedence rules: thinking-hat is one-shot and
+  // model-only (mode unchanged); steel-rain unifies tactical persona + the
+  // Tactical Brain in one trigger; be-yourself/behave switch the sticky
+  // operational mode (Everyday Brain); otherwise stay on whatever mode/brain
+  // was already active.
+  #detectModeAndBrain(text) {
+    const lower = text.toLowerCase();
+
+    if (lower.includes(THINKING_HAT_PHRASE)) {
+      const remainder = lower.replace(THINKING_HAT_PHRASE, '');
+      const ack = isTrivialRemainder(remainder) ? THINKING_HAT_BARE_ACKNOWLEDGMENT : undefined;
+      return { mode: this.operationalMode, brain: 'heavy_hitter', ack };
+    }
+    const steelRainPhrase = STEEL_RAIN_PHRASES.find((phrase) => lower.includes(phrase));
+    if (steelRainPhrase) {
+      const remainder = lower.replace(steelRainPhrase, '');
+      const ack = isTrivialRemainder(remainder) ? MODE_SWITCH_ACKNOWLEDGMENTS.tactical : undefined;
+      return { mode: 'tactical', brain: 'tactical', ack };
+    }
+    if (lower.includes('skippy')) {
+      for (const [phrase, mode] of Object.entries(MODE_TRIGGER_PHRASES_WITH_LEAD_IN)) {
+        if (lower.includes(phrase)) {
+          const remainder = lower.replace('skippy', '').replace(phrase, '');
+          const ack = isTrivialRemainder(remainder) ? MODE_SWITCH_ACKNOWLEDGMENTS[mode] : undefined;
+          return { mode, brain: 'everyday', ack };
+        }
+      }
+    }
+    return {
+      mode: this.operationalMode,
+      brain: this.operationalMode === 'tactical' ? 'tactical' : 'everyday',
+    };
+  }
+
+  // Records a completed turn (real or canned) in local + canister history,
+  // capped to MAX_LOCAL_HISTORY — shared by both the normal OpenRouter path
+  // and the bare-trigger-phrase acknowledgment path below.
+  #recordTurn(userText, assistantText) {
+    const now = Date.now();
+    this.history.push(
+      { role: 'user', content: userText, timestamp: now },
+      { role: 'assistant', content: assistantText, timestamp: now },
+    );
+    if (this.history.length > MAX_LOCAL_HISTORY) {
+      this.history.splice(0, this.history.length - MAX_LOCAL_HISTORY);
+    }
+    // Fire-and-forget: the canister is the source of truth for the *next*
+    // login's history, but this turn's reply already played — a failure
+    // here shouldn't block or re-render the UI around it.
+    this.backendActor.append_turn(userText, assistantText).catch((err) => {
+      console.error('[Skippy] failed to persist conversation turn:', err);
+    });
+  }
+
+  // A new utterance always wins over whatever Skippy is currently saying or
+  // still waiting on — barging in is the whole point of a voice trigger
+  // phrase like "Skippy, behave" ("I don't want to wait for him to finish
+  // before I can switch modes"). mySeq lets a late-arriving response from a
+  // since-superseded request detect that it's stale and discard itself.
   #askSkippy = async (text) => {
-    if (this.awaitingSkippyReply) {
-      // A reply is already in flight — letting a second one dispatch
-      // concurrently is exactly how replies arrive back out of order and
-      // stack/interrupt each other's speech. Drop this one instead.
-      console.warn('[Skippy] already waiting on a reply — ignoring overlapping request:', text);
+    this.#stopSpeaking();
+    this.currentAbortController?.abort();
+    this.currentAbortController = new AbortController();
+    const { signal } = this.currentAbortController;
+    const mySeq = ++this.requestSeq;
+
+    this.statusMessage = 'Skippy is thinking...';
+
+    const { mode, brain, ack } = this.#detectModeAndBrain(text);
+    this.operationalMode = mode;
+
+    if (ack) {
+      // Bare trigger phrase, nothing else attached — skip OpenRouter
+      // entirely rather than have Skippy ramble asking what you want.
+      this.skippyReply = ack;
+      this.lastBrain = '';
+      this.lastModel = '';
+      this.statusMessage = '';
+      this.#render();
+      this.#speak(ack);
+      this.#recordTurn(text, ack);
       return;
     }
-    this.awaitingSkippyReply = true;
-    this.statusMessage = 'Skippy is thinking...';
+
     this.#render();
 
     try {
@@ -426,9 +604,13 @@ class App {
         body: JSON.stringify({
           text,
           history: this.history.map(({ role, content }) => ({ role, content })),
+          mode,
+          brain,
         }),
+        signal,
       });
       const data = await response.json();
+      if (mySeq !== this.requestSeq) return; // superseded by a newer utterance
 
       if (!response.ok) {
         this.statusMessage = data.error || 'Skippy had nothing to say.';
@@ -437,29 +619,16 @@ class App {
       }
 
       this.skippyReply = data.reply;
+      this.lastBrain = data.brain || '';
+      this.lastModel = data.model || '';
       this.statusMessage = '';
       this.#render();
       this.#speak(data.reply);
-
-      const now = Date.now();
-      this.history.push(
-        { role: 'user', content: text, timestamp: now },
-        { role: 'assistant', content: data.reply, timestamp: now },
-      );
-      if (this.history.length > MAX_LOCAL_HISTORY) {
-        this.history.splice(0, this.history.length - MAX_LOCAL_HISTORY);
-      }
-      // Fire-and-forget: the canister is the source of truth for the *next*
-      // login's history, but this turn's reply already played — a failure
-      // here shouldn't block or re-render the UI around it.
-      this.backendActor.append_turn(text, data.reply).catch((err) => {
-        console.error('[Skippy] failed to persist conversation turn:', err);
-      });
+      this.#recordTurn(text, data.reply);
     } catch (err) {
+      if (err.name === 'AbortError' || mySeq !== this.requestSeq) return;
       this.statusMessage = `Couldn't reach Skippy's brain (is the proxy running on :8787?): ${err.message}`;
       this.#render();
-    } finally {
-      this.awaitingSkippyReply = false;
     }
   };
 
@@ -473,12 +642,20 @@ class App {
     this.premiumAudioEl.load();
   };
 
-  #speak = (text) => {
-    const cleanText = stripMarkdown(text);
-
-    // Clear any leftover state from a previous turn before starting a new one.
+  // Immediately silences whatever Skippy is currently saying (Premium audio
+  // or the Economy speechSynthesis fallback) — used both to clear leftover
+  // state before a new reply starts speaking, and to let a barged-in
+  // utterance cut him off mid-sentence (see #askSkippy).
+  #stopSpeaking = () => {
     window.speechSynthesis?.cancel();
     this.#detachCurrentAudio();
+    this.isSpeaking = false;
+  };
+
+  #speak = (text) => {
+    if (this.voiceMuted) return;
+    const cleanText = stripMarkdown(text);
+    this.#stopSpeaking();
 
     if (this.voiceMode === 'economy') {
       this.#speakEconomy(cleanText);
@@ -509,6 +686,11 @@ class App {
 
     audio.onplaying = () => {
       hasStartedPlaying = true;
+      this.isSpeaking = true;
+    };
+
+    audio.onended = () => {
+      this.isSpeaking = false;
     };
 
     audio.onerror = () => {
@@ -517,6 +699,7 @@ class App {
       // audible — only fall back if it never managed to start at all.
       if (hasStartedPlaying) {
         console.warn('[Skippy] premium audio errored after playback started — ignoring fallback');
+        this.isSpeaking = false;
         return;
       }
       fallBackToEconomy('media error');
@@ -557,12 +740,28 @@ class App {
     // the cancellation and produce dropped or out-of-order utterances.
     // Deferring a tick lets the cancellation fully settle first.
     setTimeout(() => {
-      window.speechSynthesis.speak(new SpeechSynthesisUtterance(stripMarkdown(text)));
+      const utterance = new SpeechSynthesisUtterance(stripMarkdown(text));
+      utterance.onstart = () => {
+        this.isSpeaking = true;
+      };
+      utterance.onend = () => {
+        this.isSpeaking = false;
+      };
+      window.speechSynthesis.speak(utterance);
     }, 0);
   };
 
   #toggleVoiceMode = () => {
     this.voiceMode = this.voiceMode === 'premium' ? 'economy' : 'premium';
+    this.#render();
+  };
+
+  #toggleVoiceMuted = () => {
+    this.voiceMuted = !this.voiceMuted;
+    if (this.voiceMuted) {
+      // Muting should shut him up immediately, not just suppress future replies.
+      this.#stopSpeaking();
+    }
     this.#render();
   };
 
@@ -639,8 +838,11 @@ class App {
         <h1>Skippy Voice Notes</h1>
 
         <section class="voice-toggle">
-          <button @click=${this.#toggleVoiceMode}>
+          <button @click=${this.#toggleVoiceMode} ?disabled=${this.voiceMuted}>
             Voice: ${this.voiceMode === 'premium' ? 'Premium 🎙' : 'Economy 💬'}
+          </button>
+          <button @click=${this.#toggleVoiceMuted}>
+            ${this.voiceMuted ? '🔇 Muted (text only)' : '🔊 Mute'}
           </button>
           <button @click=${this.#downloadHistory} ?disabled=${this.history.length === 0}>
             Download history
@@ -650,6 +852,35 @@ class App {
           </button>
           <button @click=${this.#logout}>Log out</button>
         </section>
+
+        <form class="text-input" @submit=${this.#sendTextMessage}>
+          <input
+            name="textInput"
+            type="text"
+            placeholder="Type to Skippy (e.g. for meetings)..."
+          />
+          <button type="submit">Send</button>
+        </form>
+
+        <p class="status">Mode: ${this.operationalMode}</p>
+        ${this.lastBrain
+          ? html`<p class="status">Last brain: ${this.lastBrain} (${this.lastModel})</p>`
+          : ''}
+
+        <details class="persona-settings">
+          <summary>Profile (name &amp; voice)</summary>
+          <form @submit=${this.#saveProfile}>
+            <label>
+              Name
+              <input name="profileName" type="text" .value=${this.profileName} placeholder="Commander" />
+            </label>
+            <label>
+              ElevenLabs Voice ID
+              <input name="profileVoiceId" type="text" .value=${this.profileVoiceId} placeholder="(default voice)" />
+            </label>
+            <button type="submit">Save profile</button>
+          </form>
+        </details>
 
         ${this.skippyReply
           ? html`<p class="skippy-reply">${this.skippyReply}</p>`
