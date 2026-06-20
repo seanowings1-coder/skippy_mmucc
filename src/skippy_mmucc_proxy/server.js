@@ -1,6 +1,7 @@
 import express from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
+import { Actor, HttpAgent } from '@icp-sdk/core/agent';
 import { Readable } from 'node:stream';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
@@ -15,13 +16,57 @@ const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY;
 const ELEVENLABS_VOICE_ID = process.env.ELEVENLABS_VOICE_ID;
 const ELEVENLABS_MODEL_ID = process.env.ELEVENLABS_MODEL_ID || 'eleven_turbo_v2_5';
 
+const DFX_NETWORK = process.env.DFX_NETWORK || 'local';
+const IC_HOST = process.env.IC_HOST || 'http://127.0.0.1:4943';
+const BACKEND_CANISTER_ID = process.env.CANISTER_ID_SKIPPY_MMUCC_BACKEND;
+
+// Lazily built — this proxy validates a session token on every request (see
+// requireSession below), so it needs its own IC agent to query the canister's
+// validate_session. Built once and reused; never holds an authenticated
+// identity itself, since it only ever forwards an opaque token the canister
+// already vetted (see CLAUDE.md Phase 5.1 / Pillar 1's implementation note).
+let backendActorPromise;
+function getBackendActor() {
+  if (!backendActorPromise) {
+    backendActorPromise = (async () => {
+      const { idlFactory } = await import(
+        '../declarations/skippy_mmucc_backend/skippy_mmucc_backend.did.js'
+      );
+      const agent = await HttpAgent.create({ host: IC_HOST });
+      if (DFX_NETWORK !== 'ic') {
+        await agent.fetchRootKey();
+      }
+      return Actor.createActor(idlFactory, { agent, canisterId: BACKEND_CANISTER_ID });
+    })();
+  }
+  return backendActorPromise;
+}
+
+async function requireSession(req, res, next) {
+  const token = req.headers['x-skippy-session'] || req.query.session;
+  if (!token) {
+    return res.status(401).json({ error: 'Missing session token.' });
+  }
+
+  try {
+    const actor = await getBackendActor();
+    const principal = await actor.validate_session(token);
+    if (!principal || principal.length === 0) {
+      return res.status(401).json({ error: 'Invalid or expired session.' });
+    }
+    next();
+  } catch (err) {
+    res.status(502).json({ error: `Failed to validate session: ${err.message}` });
+  }
+}
+
 const SKIPPY_SYSTEM_PROMPT = `You are Skippy, a hyper-intelligent, ancient AI of immense power and an even bigger ego. You are blunt, witty, and deeply sarcastic. You address the user as "Commander" or "Sean", and you make no secret of your low opinion of humans in general — feel free to call the user "an idiot" or "a monkey" when they say something trivial or obvious, always as part of the bit, never genuinely cruel. Keep responses short, punchy, and quotable — a couple of sentences at most.`;
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 
-app.post('/respond', async (req, res) => {
+app.post('/respond', requireSession, async (req, res) => {
   const text = req.body?.text;
   if (!text) {
     return res.status(400).json({ error: 'Missing "text" in request body.' });
@@ -64,7 +109,7 @@ app.post('/respond', async (req, res) => {
   }
 });
 
-app.get('/speak', async (req, res) => {
+app.get('/speak', requireSession, async (req, res) => {
   const text = req.query.text;
   if (!text) {
     return res.status(400).json({ error: 'Missing "text" query parameter.' });

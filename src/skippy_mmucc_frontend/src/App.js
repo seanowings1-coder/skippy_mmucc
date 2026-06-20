@@ -1,5 +1,42 @@
 import { html, render } from 'lit-html';
-import { skippy_mmucc_backend } from 'declarations/skippy_mmucc_backend';
+import { AuthClient } from '@dfinity/auth-client';
+import { HttpAgent, Actor } from '@dfinity/agent';
+import { idlFactory } from 'declarations/skippy_mmucc_backend/skippy_mmucc_backend.did.js';
+import { canisterId as BACKEND_CANISTER_ID } from 'declarations/skippy_mmucc_backend';
+
+// Deliberately @dfinity/auth-client, not the newer @icp-sdk/auth: every
+// self-hosted Internet Identity build (checked across releases from
+// 2024-10-25 through 2026-06-15, by reading each tag's actual source) still
+// implements only the legacy postMessage protocol for incoming sign-in
+// requests (kind: "authorize-client", sessionPublicKey as a raw Uint8Array —
+// see internet-identity's src/frontend/src/lib/legacy/flows/authorize/
+// postMessageInterface.ts). @icp-sdk/auth only speaks the newer ICRC-25/34
+// JSON-RPC protocol with no fallback, so it can never complete a handshake
+// against a locally-deployed II canister, regardless of which release is
+// pinned in dfx.json. @dfinity/auth-client speaks the legacy protocol
+// natively. Everything else in this app keeps using @icp-sdk/core; only this
+// login path uses the @dfinity/agent family, since the resulting Identity
+// needs an agent built from the same family to authenticate calls.
+//
+// The popup II opens needs a fully-qualified URL reachable by the browser
+// directly (it isn't routed through Vite's dev-server proxy). It must be the
+// *subdomain* form (<canister-id>.<host>:4943), not the `?canisterId=` query
+// form — the local replica's HTTP gateway only honors that query param on the
+// single document request that carries it; the page's own relative asset
+// requests have no canister hint at all and 400, leaving a blank popup. The
+// subdomain form works because every relative request naturally inherits the
+// same (canister-id-bearing) host. This only resolves for "localhost" (the
+// `*.localhost` TLD always resolves to loopback, including through a
+// Windows->WSL netsh portproxy) — a raw LAN IP can't be subdomained, so II
+// login specifically won't work over phone/LAN bench testing without a
+// wildcard-DNS-to-IP service (e.g. nip.io); the rest of the app's canister
+// calls are unaffected since those go through Vite's same-origin "/api"
+// proxy instead. No path/hash suffix is needed — the legacy protocol is
+// triggered by the popup detecting window.opener, not by the URL.
+const IDENTITY_PROVIDER =
+  process.env.DFX_NETWORK === 'ic'
+    ? undefined // falls back to @dfinity/auth-client's mainnet default
+    : `http://${process.env.CANISTER_ID_INTERNET_IDENTITY}.${window.location.hostname}:4943`;
 
 const TRIGGER_PHRASES = [
   'let me make sure i write this down',
@@ -50,6 +87,15 @@ class App {
   audioUnlocked = false;
   awaitingSkippyReply = false;
 
+  authClient = null;
+  identity = null;
+  // 'loading' | 'logged-out' | 'rejected' | 'ready'
+  authState = 'loading';
+  authError = '';
+  principalText = '';
+  sessionToken = null;
+  backendActor = null;
+
   constructor() {
     if (SpeechRecognitionImpl) {
       this.#setUpRecognition();
@@ -57,7 +103,88 @@ class App {
     // One persistent element, reused for every reply — see #unlockAudioPlayback.
     this.premiumAudioEl = new Audio();
     this.#render();
+    this.#initAuth();
   }
+
+  #initAuth = async () => {
+    // AuthClient.create() is async; isAuthenticated() is async too, but
+    // getIdentity() (used below) is synchronous — @dfinity/auth-client's
+    // sync/async split is the opposite of what you'd guess.
+    this.authClient = await AuthClient.create();
+    if (await this.authClient.isAuthenticated()) {
+      await this.#completeLogin(this.authClient.getIdentity());
+    } else {
+      this.authState = 'logged-out';
+      this.#render();
+    }
+  };
+
+  #login = () => {
+    this.authState = 'loading';
+    this.authError = '';
+    this.#render();
+    // login() takes onSuccess/onError callbacks rather than resolving its
+    // own returned promise with the result.
+    this.authClient.login({
+      identityProvider: IDENTITY_PROVIDER,
+      onSuccess: () => this.#completeLogin(this.authClient.getIdentity()),
+      onError: (err) => {
+        console.error('[Skippy] sign-in failed:', err);
+        this.authState = 'logged-out';
+        this.authError = `Sign-in failed: ${err}`;
+        this.#render();
+      },
+    });
+  };
+
+  #completeLogin = async (identity) => {
+    this.identity = identity;
+    this.principalText = identity.getPrincipal().toString();
+
+    const agent = await HttpAgent.create({ identity });
+    if (process.env.DFX_NETWORK !== 'ic') {
+      // Local replica's self-signed root key — same dance as the generated
+      // anonymous createActor() does for non-"ic" networks.
+      await agent.fetchRootKey().catch((err) => {
+        console.warn('[Skippy] fetchRootKey failed:', err);
+      });
+    }
+    // Built directly via @dfinity/agent's own Actor.createActor (not the
+    // generated declarations' createActor, which is hardwired to
+    // @icp-sdk/core's Actor/HttpAgent) — idlFactory itself is plain,
+    // framework-agnostic Candid IDL data, reusable across both families.
+    this.backendActor = Actor.createActor(idlFactory, {
+      agent,
+      canisterId: BACKEND_CANISTER_ID,
+    });
+
+    try {
+      const result = await this.backendActor.login();
+      if ('Ok' in result) {
+        this.sessionToken = result.Ok;
+        this.authState = 'ready';
+      } else {
+        this.authState = 'rejected';
+        this.authError = result.Err;
+      }
+    } catch (err) {
+      // The canister traps (rather than returning Err) for a non-whitelisted
+      // caller — see assert_whitelisted() in lib.rs.
+      this.authState = 'rejected';
+      this.authError = err.message;
+    }
+    this.#render();
+  };
+
+  #logout = async () => {
+    await this.authClient.logout();
+    this.identity = null;
+    this.principalText = '';
+    this.sessionToken = null;
+    this.backendActor = null;
+    this.authState = 'logged-out';
+    this.#render();
+  };
 
   #unlockAudioPlayback() {
     // Must run synchronously inside a real user-gesture handler (no awaits
@@ -228,7 +355,7 @@ class App {
     this.statusMessage = 'Saving note...';
     this.#render();
 
-    await skippy_mmucc_backend.add_manual_section(
+    await this.backendActor.add_manual_section(
       NOTES_MANUAL,
       timestamp,
       title,
@@ -260,7 +387,10 @@ class App {
     try {
       const response = await fetch(`${PROXY_URL}/respond`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Skippy-Session': this.sessionToken,
+        },
         body: JSON.stringify({ text }),
       });
       const data = await response.json();
@@ -311,7 +441,7 @@ class App {
     // new Audio() each time — a fresh element has no user-gesture history
     // and mobile browsers will block it regardless of timing.
     const audio = this.premiumAudioEl;
-    audio.src = `${PROXY_URL}/speak?text=${encodeURIComponent(cleanText)}`;
+    audio.src = `${PROXY_URL}/speak?text=${encodeURIComponent(cleanText)}&session=${encodeURIComponent(this.sessionToken)}`;
     audio.load();
 
     const fallBackToEconomy = (reason) => {
@@ -387,7 +517,7 @@ class App {
   };
 
   #refreshSections = async () => {
-    this.sections = await skippy_mmucc_backend.list_sections_by_manual(
+    this.sections = await this.backendActor.list_sections_by_manual(
       this.selectedManual,
     );
     this.#render();
@@ -409,7 +539,49 @@ class App {
     }
   }
 
+  #renderAuthGate() {
+    let body;
+    if (this.authState === 'rejected') {
+      body = html`
+        <main>
+          <h1>Skippy Voice Notes</h1>
+          <p class="status">
+            Not authorized. Your Principal is not on the whitelist:
+          </p>
+          <p class="principal">${this.principalText}</p>
+          <p class="status">
+            Add it to <code>COMMANDER_PRINCIPAL</code> or
+            <code>PARTNER_PRINCIPAL</code> in <code>.env</code>, then
+            <code>npm run deploy:local</code> again.
+          </p>
+          <button @click=${this.#logout}>Log out</button>
+        </main>
+      `;
+    } else {
+      body = html`
+        <main>
+          <h1>Skippy Voice Notes</h1>
+          <button
+            @click=${this.#login}
+            ?disabled=${this.authState === 'loading'}
+          >
+            ${this.authState === 'loading'
+              ? 'Signing in...'
+              : 'Login with Internet Identity'}
+          </button>
+          ${this.authError ? html`<p class="status">${this.authError}</p>` : ''}
+        </main>
+      `;
+    }
+    render(body, document.getElementById('root'));
+  }
+
   #render() {
+    if (this.authState !== 'ready') {
+      this.#renderAuthGate();
+      return;
+    }
+
     const micUnsupported = !SpeechRecognitionImpl;
 
     let body = html`
@@ -420,6 +592,7 @@ class App {
           <button @click=${this.#toggleVoiceMode}>
             Voice: ${this.voiceMode === 'premium' ? 'Premium 🎙' : 'Economy 💬'}
           </button>
+          <button @click=${this.#logout}>Log out</button>
         </section>
 
         ${this.skippyReply

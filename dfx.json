@@ -7,13 +7,24 @@
     },
     "skippy_mmucc_frontend": {
       "dependencies": [
-        "skippy_mmucc_backend"
+        "skippy_mmucc_backend",
+        "internet_identity"
       ],
       "source": [
         "src/skippy_mmucc_frontend/dist"
       ],
       "type": "assets",
       "workspace": "skippy_mmucc_frontend"
+    },
+    "internet_identity": {
+      "type": "custom",
+      "candid": "https://github.com/dfinity/internet-identity/releases/download/release-2026-01-26/internet_identity.did",
+      "wasm": "https://github.com/dfinity/internet-identity/releases/download/release-2026-01-26/internet_identity_dev.wasm.gz",
+      "remote": {
+        "id": {
+          "ic": "rdmx6-jaaaa-aaaaa-aaadq-cai"
+        }
+      }
     }
   },
   "defaults": {

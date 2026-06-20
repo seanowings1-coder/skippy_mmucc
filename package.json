@@ -6,6 +6,7 @@
   "name": "skippy_mmucc",
   "scripts": {
     "build": "npm run build --workspaces --if-present",
+    "deploy:local": "bash scripts/deploy-local.sh",
     "prebuild": "npm run prebuild --workspaces --if-present",
     "pretest": "npm run prebuild --workspaces --if-present",
     "start": "npm start --workspaces --if-present",

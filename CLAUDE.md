@@ -12,8 +12,11 @@ A dfx (Internet Computer SDK) project with a Rust backend canister and a vanilla
 # Start the local replica in the background
 dfx start --background
 
-# Deploy all canisters to the local replica and generate the Candid interface
-dfx deploy
+# Deploy all canisters to the local replica and generate the Candid interface.
+# The backend canister now requires two Principal init args (the Internet
+# Identity whitelist, Phase 5.1) — use this instead of a bare `dfx deploy`,
+# which will fail with "this canister requires an initialization argument".
+npm run deploy:local
 
 # Regenerate frontend bindings from the backend's Candid interface (run after changing lib.rs or the .did file)
 npm run generate
@@ -42,7 +45,8 @@ The deployed app is served at `http://localhost:4943?canisterId={asset_canister_
 
 ## Architecture
 
-- `dfx.json` defines two canisters: `skippy_mmucc_backend` (type `rust`) and `skippy_mmucc_frontend` (type `assets`, depends on the backend, serves `src/skippy_mmucc_frontend/dist`).
+- `dfx.json` defines three canisters: `skippy_mmucc_backend` (type `rust`), `skippy_mmucc_frontend` (type `assets`, depends on the backend and `internet_identity`, serves `src/skippy_mmucc_frontend/dist`), and `internet_identity` (type `custom`, pulls the prebuilt dev wasm/candid from the `dfinity/internet-identity` GitHub releases for local II login; on the `ic` network it instead resolves to the real mainnet II canister via `remote.id.ic`, never redeploying it).
+- The backend's `#[init]` takes two `principal` args — the Internet Identity whitelist (Commander + wife, see "Neo" Blueprint Pillar 2). They're sourced from `COMMANDER_PRINCIPAL`/`PARTNER_PRINCIPAL` in the gitignored `.env` by `scripts/deploy-local.sh` (run via `npm run deploy:local`), never hardcoded or committed.
 - `src/skippy_mmucc_backend/` — Rust canister source. `src/lib.rs` exposes canister methods via `ic_cdk` macros (e.g. `#[ic_cdk::query]`); `skippy_mmucc_backend.did` is the hand-maintained/generated Candid interface describing the canister's public API and must stay in sync with the exported methods.
 - `src/skippy_mmucc_frontend/` — Vite-based vanilla JS frontend (npm workspace `skippy_mmucc_frontend`). `npm run generate` (aliased via dfx) produces TypeScript bindings/declarations from the backend's Candid file so the frontend can call canister methods type-safely; this runs automatically before `dfx deploy` and should be re-run after backend interface changes.
 - Root `Cargo.toml` is a workspace pointing at `src/skippy_mmucc_backend`; root `package.json` declares npm workspaces (`src/skippy_mmucc_frontend`, `src/skippy_mmucc_proxy`) and fans out `build`/`start`/`test` to workspace packages that define them (`--if-present`).
@@ -208,8 +212,25 @@ numbers below are execution order. Each phase folds in its later-added hygiene/t
   surfaced in this project's PocketIC config — `environment_variables: Enabled` — that could be an
   alternative someday, but it isn't verified against our current ic-cdk/candid versions, so
   `#[init]` args are the chosen, known-working mechanism for now.)
-  **Status: paused for the night by explicit user instruction — no Phase 5.1 code has been
-  written yet.** Resume here next session.
+  **Status: done, verified end-to-end in a real browser.** Backend `#[init]`/`#[post_upgrade]`
+  take the two whitelisted Principals; `assert_whitelisted()` guards `add_manual_section`/
+  `get_manual_section`/`list_sections_by_manual`; `login()`/`validate_session()` mint and verify
+  the opaque session-token bridge for the proxy, which requires a valid `X-Skippy-Session`
+  header (`/respond`) or `?session=` param (`/speak`) before calling OpenRouter/ElevenLabs.
+  Frontend gates its entire UI behind a "Login with Internet Identity" screen
+  (`src/skippy_mmucc_frontend/src/App.js`). A local `internet_identity` canister was added to
+  `dfx.json`, pinned to **`release-2026-01-26`** specifically — every other release tried
+  (older and newer) either fails local HTTP-gateway certification or doesn't match the
+  client's protocol; see the comment above `IDENTITY_PROVIDER` in `App.js` before ever
+  bumping this pin. Login uses **`@dfinity/auth-client`**, not `@icp-sdk/auth` — every
+  self-hosted II build still speaks only the legacy postMessage protocol
+  (`kind: "authorize-client"`), which `@icp-sdk/auth` (ICRC-25/34 JSON-RPC only, no fallback)
+  can never complete a handshake with; `@icp-sdk/core` remains in use everywhere else.
+  Full real-browser login (anchor creation, passkey, whitelist accept/reject, session token,
+  proxy gating, OpenRouter reply, ElevenLabs **and** browser-fallback voice playback) confirmed
+  working by the user. `COMMANDER_PRINCIPAL` is set in the gitignored `.env`; `PARTNER_PRINCIPAL`
+  is still the anonymous-Principal placeholder (`2vxsx-fae`) until the second user logs in once
+  and reports her real Principal from the rejection screen.
 - **Phase 5.2 — Conversational history** (Pillar 5). Backend-owned rolling message history per
   Principal. **+ Memory pruning & archive patch**: an export/download-to-device function for
   history, and a "Purge" function to selectively or fully wipe a principal's stored history.

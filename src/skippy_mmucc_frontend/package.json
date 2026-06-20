@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "setup": "npm i && dfx canister create skippy_mmucc_backend && dfx generate skippy_mmucc_backend && dfx deploy",
-    "start": "vite --port 3000",
+    "start": "vite --port 3000 --host",
     "prebuild": "dfx generate",
     "build": "tsc && vite build",
     "format": "prettier --write \"src/**/*.{json,js,jsx,ts,tsx,css,scss}\""
@@ -21,6 +21,10 @@
     "vitest": "^2.0.5"
   },
   "dependencies": {
+    "@dfinity/agent": "^3.4.3",
+    "@dfinity/auth-client": "^3.4.3",
+    "@dfinity/identity": "^3.4.3",
+    "@dfinity/principal": "^3.4.3",
     "@icp-sdk/core": "^5.0.0",
     "lit-html": "^2.8.0"
   }
