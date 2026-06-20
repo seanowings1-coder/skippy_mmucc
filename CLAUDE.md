@@ -195,12 +195,27 @@ of the LLM context and delivered as Skippy's first remark, then cleared. Intent 
 fixed phrase patterns (consistent with the existing `TRIGGER_PHRASES` approach) rather than a
 second LLM classification call, for v1.
 
-### Pillar 8 — Canister Cycle Gas Tank & Top-Up Logic
-Admin-only backend function exposing `ic_cdk::api::canister_balance()`; frontend "Fuel Gauge" UI;
-a low-balance threshold that alters Skippy's greeting to demand a refuel; an admin-only "Top Up"
-hook. Needs an admin/owner access-control concept distinct from the two-user partitioning (who
-counts as "admin," and how cycle top-ups are actually funded/transferred) — to be scoped when
-this phase comes up.
+### Pillar 8 — Unified "Fuel & Quotas" Dashboard (expanded scope, confirmed 2026-06-20)
+Originally just a Web3 cycle gauge; expanded to a single dashboard covering both the Web3
+canister fuel tank *and* the Web2 API balances the proxy spends on every request, since running
+out of either one silences Skippy identically from the user's point of view.
+- **ICP Cycles** (original scope): admin-only backend function exposing
+  `ic_cdk::api::canister_balance()`; frontend "Fuel Gauge" UI; a low-balance threshold that alters
+  Skippy's greeting to demand a refuel; an admin-only "Top Up" hook. Needs an admin/owner
+  access-control concept distinct from the two-user partitioning (who counts as "admin," and how
+  cycle top-ups are actually funded/transferred) — to be scoped when this phase comes up.
+- **OpenRouter balance**: a function in the proxy (`src/skippy_mmucc_proxy/server.js`) that fetches
+  current credit balance/usage from OpenRouter's `/api/v1/credits` (or equivalent auth/key)
+  endpoint using the existing `OPENROUTER_API_KEY`.
+- **ElevenLabs balance**: a function in the proxy that fetches character usage/limits from
+  ElevenLabs' `/v1/user/subscription` endpoint using the existing `ELEVENLABS_API_KEY`.
+- **Unified endpoint**: a single `GET /api/fuel` route on the proxy returning both API balances
+  together, so the frontend makes one request instead of two. Like every other proxy route, this
+  must sit behind the existing `requireSession` middleware (Phase 5.1's security patch) — it's
+  hitting paid external APIs, so it can't be left open to unauthenticated callers any more than
+  `/respond`/`/speak` are.
+- **UI integration**: a clean, simple readout in the frontend dashboard showing ICP cycles,
+  OpenRouter $ balance, and ElevenLabs character limits side-by-side.
 
 ### Pillar 9 — Wasm64 & Future-Proof Platform Specs (confirmed, deprioritized)
 Target Wasm64 to future-proof toward an 8GB+ resident heap, in preparation for eventually hosting
@@ -301,5 +316,6 @@ numbers below are execution order. Each phase folds in its later-added hygiene/t
   "by manual" means collecting matching ids via `list_sections_by_manual` then removing each, since
   `manual_name` isn't the primary key).
 - **Phase 5.6 — Courier queue** (Pillar 7).
-- **Phase 5.7 — Cycle gas tank** (Pillar 8).
+- **Phase 5.7 — Unified Fuel & Quotas dashboard** (Pillar 8, expanded scope — see Pillar 8 above):
+  ICP cycle gauge + OpenRouter balance + ElevenLabs usage via a single `/api/fuel` proxy endpoint.
 - **Phase 5.8 — Wasm64** (Pillar 9, deprioritized).
