@@ -632,6 +632,19 @@ class App {
     }
   };
 
+  // Dedicated silent stop, distinct from barging in with a new utterance:
+  // sending a fresh message (even "stop") still gets its own reply, since
+  // it's just normal conversation content. This instead only kills whatever
+  // request/playback is in flight and says nothing back — no new
+  // OpenRouter/ElevenLabs call at all.
+  #silence = () => {
+    this.#stopSpeaking();
+    this.currentAbortController?.abort();
+    ++this.requestSeq; // discard any late-arriving response from the aborted request
+    this.statusMessage = 'Silenced.';
+    this.#render();
+  };
+
   #detachCurrentAudio = () => {
     // Fully reset the element (not just pause) so mobile browsers can't
     // silently auto-resume a previously-blocked play() later on, which is
@@ -687,10 +700,12 @@ class App {
     audio.onplaying = () => {
       hasStartedPlaying = true;
       this.isSpeaking = true;
+      this.#render();
     };
 
     audio.onended = () => {
       this.isSpeaking = false;
+      this.#render();
     };
 
     audio.onerror = () => {
@@ -700,6 +715,7 @@ class App {
       if (hasStartedPlaying) {
         console.warn('[Skippy] premium audio errored after playback started — ignoring fallback');
         this.isSpeaking = false;
+        this.#render();
         return;
       }
       fallBackToEconomy('media error');
@@ -743,9 +759,11 @@ class App {
       const utterance = new SpeechSynthesisUtterance(stripMarkdown(text));
       utterance.onstart = () => {
         this.isSpeaking = true;
+        this.#render();
       };
       utterance.onend = () => {
         this.isSpeaking = false;
+        this.#render();
       };
       window.speechSynthesis.speak(utterance);
     }, 0);
@@ -838,6 +856,12 @@ class App {
         <h1>Skippy Voice Notes</h1>
 
         <section class="voice-toggle">
+          <button
+            @click=${this.#silence}
+            ?disabled=${!this.isSpeaking && this.statusMessage !== 'Skippy is thinking...'}
+          >
+            ✋ Stop
+          </button>
           <button @click=${this.#toggleVoiceMode} ?disabled=${this.voiceMuted}>
             Voice: ${this.voiceMode === 'premium' ? 'Premium 🎙' : 'Economy 💬'}
           </button>

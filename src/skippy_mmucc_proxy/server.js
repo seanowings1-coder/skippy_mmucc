@@ -133,6 +133,15 @@ app.post('/respond', requireSession, async (req, res) => {
     systemPrompt = `You are speaking with ${req.skippySession.name}. ${systemPrompt}`;
   }
 
+  // Barge-in (App.js's #askSkippy aborts its fetch to /respond the instant a
+  // new utterance arrives) only kills the browser-to-proxy connection by
+  // itself — without this, the proxy kept awaiting the OpenRouter call to
+  // completion regardless, paying for output tokens nobody was listening to
+  // anymore. 'close' fires on disconnect for any reason; aborting after a
+  // normal completion is a harmless no-op since the fetch has already settled.
+  const upstreamAbort = new AbortController();
+  req.on('close', () => upstreamAbort.abort());
+
   try {
     const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
       method: 'POST',
@@ -148,6 +157,7 @@ app.post('/respond', requireSession, async (req, res) => {
           { role: 'user', content: text },
         ],
       }),
+      signal: upstreamAbort.signal,
     });
 
     if (!response.ok) {
@@ -165,6 +175,7 @@ app.post('/respond', requireSession, async (req, res) => {
     // 5.3) — easy to drop once Brain Switching is confirmed working.
     res.json({ reply, brain, model: BRAIN_MODELS[brain] });
   } catch (err) {
+    if (err.name === 'AbortError') return; // client already gone, nothing to send back
     res.status(502).json({ error: `Failed to reach OpenRouter: ${err.message}` });
   }
 });
@@ -180,6 +191,17 @@ app.get('/speak', requireSession, async (req, res) => {
     return res.status(502).json({ error: 'ELEVENLABS_API_KEY or ELEVENLABS_VOICE_ID is not set.' });
   }
 
+  // App.js's #detachCurrentAudio (barge-in, or a fresh reply cutting off the
+  // previous one) clears the <audio> element's src and calls load(), which
+  // aborts the browser's request to this endpoint — but left unhandled here,
+  // the proxy kept streaming the ElevenLabs response into a dead socket.
+  // Note this mainly saves bandwidth/compute, not ElevenLabs character
+  // billing itself: TTS providers bill per input character at request time,
+  // not per byte streamed, so the synthesis cost for this utterance is
+  // already incurred the moment the request was sent.
+  const upstreamAbort = new AbortController();
+  req.on('close', () => upstreamAbort.abort());
+
   try {
     const response = await fetch(
       `https://api.elevenlabs.io/v1/text-to-speech/${voiceId}/stream`,
@@ -194,6 +216,7 @@ app.get('/speak', requireSession, async (req, res) => {
           text,
           model_id: ELEVENLABS_MODEL_ID,
         }),
+        signal: upstreamAbort.signal,
       },
     );
 
@@ -205,6 +228,7 @@ app.get('/speak', requireSession, async (req, res) => {
     res.setHeader('Content-Type', 'audio/mpeg');
     Readable.fromWeb(response.body).pipe(res);
   } catch (err) {
+    if (err.name === 'AbortError') return; // client already gone, nothing to send back
     res.status(502).json({ error: `Failed to reach ElevenLabs: ${err.message}` });
   }
 });

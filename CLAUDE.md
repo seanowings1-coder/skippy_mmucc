@@ -164,6 +164,14 @@ statelessness.
 
 ### Pillar 6 — Universal "Neo" RAG Engine & Multi-Mode Web Intelligence
 Storage substrate already exists (section 4's generic `manual_name`-keyed store). New work:
+- **Global, not siloed (confirmed 2026-06-20)**: the manual/RAG knowledge base is never
+  partitioned by workspace (Pillar 10) — it stays the single shared library described in Pillar 2.
+  A query made inside any workspace can pull chunks from any uploaded manual (e.g.
+  cross-referencing ANSI D.16 against MMUCC V6 while sitting in an unrelated "Legal" workspace);
+  workspace boundaries only ever apply to conversational history, never to manual content.
+- **Context safety**: retrieval keeps a strict top-k chunk limit per query (exact k to be tuned
+  once the embedding/vector-search implementation is chosen) so cross-pollinated lookups across
+  every loaded manual can't balloon the LLM context window.
 - **Neo Skin upload UI**: cross-platform (PC + mobile) file upload (`.txt`/documents) pushing
   content through a parsing pipeline into the canister, expanding the reference library on the fly.
 - **Steel Rain (Tactical Mode) emergency/utility web fallback**: scope is general-purpose, not
@@ -183,7 +191,7 @@ Storage substrate already exists (section 4's generic `manual_name`-keyed store)
 - Both web-fetching paths should go through a small curated allowlist of sources / a real search
   API rather than open-ended scraping of arbitrary inferred URLs — voice-driven "fetch whatever
   URL the model infers" is a real SSRF risk (ambiguous/injected input pointing the proxy, which
-  sits on the LAN, at unintended or internal addresses). To be scoped concretely in Phase 5.5.
+  sits on the LAN, at unintended or internal addresses). To be scoped concretely in Phase 5.6.
 - The frontend passes an active manual/context flag so its sections get injected into the LLM
   prompt alongside the system prompt and history.
 
@@ -201,21 +209,31 @@ canister fuel tank *and* the Web2 API balances the proxy spends on every request
 out of either one silences Skippy identically from the user's point of view.
 - **ICP Cycles** (original scope): admin-only backend function exposing
   `ic_cdk::api::canister_balance()`; frontend "Fuel Gauge" UI; a low-balance threshold that alters
-  Skippy's greeting to demand a refuel; an admin-only "Top Up" hook. Needs an admin/owner
-  access-control concept distinct from the two-user partitioning (who counts as "admin," and how
-  cycle top-ups are actually funded/transferred) — to be scoped when this phase comes up.
+  Skippy's greeting to demand a refuel; a "Top Up" link (see "dumb meat sack" protocol below, not
+  an in-app action) pointing at wherever the user actually funds cycles (NNS dapp / cycles wallet).
+  Needs an admin/owner access-control concept distinct from the two-user partitioning (who counts
+  as "admin," and how cycle top-ups are actually funded/transferred) — to be scoped when this
+  phase comes up.
 - **OpenRouter balance**: a function in the proxy (`src/skippy_mmucc_proxy/server.js`) that fetches
   current credit balance/usage from OpenRouter's `/api/v1/credits` (or equivalent auth/key)
   endpoint using the existing `OPENROUTER_API_KEY`.
 - **ElevenLabs balance**: a function in the proxy that fetches character usage/limits from
   ElevenLabs' `/v1/user/subscription` endpoint using the existing `ELEVENLABS_API_KEY`.
+- **"Dumb meat sack" protocol (confirmed 2026-06-20)**: zero billing integration lives inside the
+  app for any of the three balances above — no payment forms, no stored cards, no API calls that
+  move money. Each balance in the dashboard gets its own plain `<a target="_blank">` link straight
+  to that provider's own billing page (OpenRouter's credit/billing page, ElevenLabs' subscription
+  page, the NNS/cycles top-up page) so the user authorizes any actual payment manually in a
+  separate, already-trusted browser tab. The dashboard only ever *reads* balances; it never writes
+  them. These are fixed external URLs, so they need no new backend/proxy route — just `<a>` tags
+  in the frontend next to each readout.
 - **Unified endpoint**: a single `GET /api/fuel` route on the proxy returning both API balances
   together, so the frontend makes one request instead of two. Like every other proxy route, this
   must sit behind the existing `requireSession` middleware (Phase 5.1's security patch) — it's
   hitting paid external APIs, so it can't be left open to unauthenticated callers any more than
   `/respond`/`/speak` are.
 - **UI integration**: a clean, simple readout in the frontend dashboard showing ICP cycles,
-  OpenRouter $ balance, and ElevenLabs character limits side-by-side.
+  OpenRouter $ balance, and ElevenLabs character limits side-by-side, each with its "Top Up" link.
 
 ### Pillar 9 — Wasm64 & Future-Proof Platform Specs (confirmed, deprioritized)
 Target Wasm64 to future-proof toward an 8GB+ resident heap, in preparation for eventually hosting
@@ -227,6 +245,33 @@ from the Wasm heap on standard Wasm32, and our local PocketIC setup already repo
 setup). The larger heap only matters for the speculative on-chain-inference goal, which has its
 own much bigger blocker beyond memory — IC's per-message/per-round instruction execution limits —
 to be revisited only once that specific sub-goal becomes concrete, not before.
+
+### Pillar 10 — Workspaces: Multi-Project Lifecycle & Export (confirmed 2026-06-20)
+Lets a user partition Skippy's conversational memory into fully separate projects (e.g. "Legal
+Case", "Garage Build") that can be switched, archived, and exported independently — today's
+history (Pillar 5) is a single flat per-Principal stream with no concept of project boundaries.
+- **Segmented history**: extend the per-Principal history store (Pillar 5 / `lib.rs`) with a
+  `workspace_id` (or `project_id`) axis, so `append_turn`/`get_history`/`purge_history` all
+  take/filter by the active workspace. Workspaces are private per-Principal, not shared between
+  the two whitelisted Principals — only the manual library (Pillar 2, Pillar 6) is shared.
+- **Lifecycle status flag**: each workspace record carries a status (`Active` | `Archived`).
+  Archiving hides a workspace from the main switcher list without deleting any data — fully
+  restorable later via an "Archived projects" view. Archiving never implies deletion; hard-delete
+  is a separate, explicit action the user takes only after exporting (see below).
+- **Workspace switcher UI**: a dropdown/sidebar in `App.js` listing the Principal's own Active
+  workspaces plus an "Archived" sub-view; switching workspaces swaps which `workspace_id` the
+  frontend reads/writes history against and re-fetches that workspace's history into view. No
+  voice routing — this is mouse/touch dashboard UI only, consistent with the Notes Vault,
+  Knowledge Manager, and Fuel Gauge controls, not a voice trigger phrase.
+- **Human-readable export**: before a hard-delete, an "Export" button downloads the workspace's
+  chat history client-side as a clean, human-readable document — Markdown (`.md`) or plain text
+  (`.txt`) at minimum (trivial to generate client-side from the existing message array, no new
+  dependency), with PDF as a stretch goal only if a lightweight client-side PDF library fits
+  without bloating the frontend bundle. Explicitly **not** a raw JSON dump — this export is for
+  the user to read/archive outside the app, not to re-import into Skippy later.
+- **Hard-delete**: a new backend capability to free canister stable-memory space — deletes a
+  workspace's history rows by `workspace_id` plus the workspace record itself, intended to be used
+  only after the user has had the chance to export.
 
 ## Implementation Roadmap (sequenced by dependency, not pillar number)
 
@@ -306,16 +351,45 @@ numbers below are execution order. Each phase folds in its later-added hygiene/t
   `#askSkippy` pipeline as voice, for meetings/quiet rooms — the typed-input field deliberately
   reads its value from the DOM on submit (`#saveProfile`'s pattern) rather than as a
   React-style controlled input, since re-rendering on every keystroke fought with the mic's own
-  re-renders firing on every interim speech result while listening was active.
+  re-renders firing on every interim speech result while listening was active. **+ Backend network
+  severing patch (2026-06-20):** the barge-in `AbortController` above only ever killed the
+  browser-to-proxy connection — the proxy itself kept awaiting the upstream OpenRouter call to
+  completion (a non-streaming request, so the full reply was always generated regardless) and kept
+  piping the ElevenLabs audio stream into a socket nobody was reading anymore. Fixed in
+  `server.js`: both `/respond` and `/speak` now attach `req.on('close', () =>
+  upstreamAbort.abort())` and pass `upstreamAbort.signal` into their respective `fetch()` calls, so
+  a disconnect (barge-in, or a fresh reply cutting off the previous one) instantly severs the
+  upstream OpenRouter/ElevenLabs connection too. Note this fully stops further OpenRouter output
+  generation (saving on tokens nobody hears), but does **not** meaningfully reduce ElevenLabs
+  billing — TTS providers charge per input character at request time, not per byte streamed, so
+  that cost is already incurred the moment the `/speak` request is sent; the fix still matters for
+  not wasting bandwidth/compute on a dead connection. **+ Dedicated silent-stop patch
+  (2026-06-20):** barge-in only fires on a *new* utterance, and that utterance still gets its own
+  reply — typing/saying "stop" doesn't mean "go silent," it's just conversational content Skippy
+  answers in character. Added a `#silence` method (`App.js`) and a "✋ Stop" button that calls
+  `#stopSpeaking()` + aborts `currentAbortController` with **no new `/respond` call** — pure kill,
+  no reply. Surfaced a pre-existing bug while wiring its enabled state: `isSpeaking` was flipped
+  inside the Premium `<audio>` element's `onplaying`/`onended`/`onerror` handlers and the Economy
+  `SpeechSynthesisUtterance`'s `onstart`/`onend` handlers, but none of those four call `#render()`,
+  so the UI never visibly reflected actual playback state — any control gated on `isSpeaking`
+  (like this button) would flicker live only during the brief "Skippy is thinking..." network
+  round-trip, then look frozen/disabled for the entire time he was actually talking. Fixed by
+  adding `#render()` to all four handlers.
 - **Phase 5.4 — Trigger phrase content update** (Pillar 4). **+ Note retrieval patch**: a "Notes
   Vault" dashboard in the Neo Skin UI to view saved dictations, plus a voice retrieval command
   ("Skippy, read back my recent notes") that fetches and reads them back.
-- **Phase 5.5 — RAG engine + multi-mode web intelligence** (Pillar 6). **+ RAG manual hygiene
+- **Phase 5.5 — Workspaces: multi-project lifecycle & export** (Pillar 10, new 2026-06-20):
+  `workspace_id`-segmented history, Active/Archived status, a workspace switcher UI, and
+  human-readable (Markdown/text, not JSON) export before hard-delete. Sequenced ahead of RAG below
+  since Pillar 6's "global, not siloed" RAG design assumes workspaces already exist as a concept.
+- **Phase 5.6 — RAG engine + multi-mode web intelligence** (Pillar 6). **+ RAG manual hygiene
   patch**: a "Knowledge Manager" UI to view and permanently delete specific manuals — needs a new
   backend delete capability (the store currently only supports add/get/list, no delete; deleting
   "by manual" means collecting matching ids via `list_sections_by_manual` then removing each, since
-  `manual_name` isn't the primary key).
-- **Phase 5.6 — Courier queue** (Pillar 7).
-- **Phase 5.7 — Unified Fuel & Quotas dashboard** (Pillar 8, expanded scope — see Pillar 8 above):
-  ICP cycle gauge + OpenRouter balance + ElevenLabs usage via a single `/api/fuel` proxy endpoint.
-- **Phase 5.8 — Wasm64** (Pillar 9, deprioritized).
+  `manual_name` isn't the primary key). Knowledge base stays global across workspaces (Pillar 6's
+  "global, not siloed" note) with a strict top-k retrieval limit.
+- **Phase 5.7 — Courier queue** (Pillar 7).
+- **Phase 5.8 — Unified Fuel & Quotas dashboard** (Pillar 8, expanded scope — see Pillar 8 above):
+  ICP cycle gauge + OpenRouter balance + ElevenLabs usage via a single `/api/fuel` proxy endpoint,
+  each with a "dumb meat sack" external Top-Up link — no in-app billing.
+- **Phase 5.9 — Wasm64** (Pillar 9, deprioritized).
