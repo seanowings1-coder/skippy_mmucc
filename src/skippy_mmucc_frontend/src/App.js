@@ -45,7 +45,20 @@ const MAX_LOCAL_HISTORY = 40;
 const TRIGGER_PHRASES = [
   'let me make sure i write this down',
   'let me grab my notepad',
+  'let me take a note',
+  'let me write that down',
 ];
+
+// Voice/text retrieval command (Pillar 4's "Note retrieval patch") — checked
+// in #askSkippy itself (not #handleFinalChunk) so it works from both voice
+// and typed input, same as mode/brain detection.
+const NOTE_RETRIEVAL_PHRASES = [
+  'read back my recent notes',
+  'read back my notes',
+  'read my recent notes',
+  'read my notes back',
+];
+const RECENT_NOTES_COUNT = 5;
 
 // Pillar 3's persona/Brain Switching trigger phrases — plain substring
 // matching on the transcript, no secondary classification call. "behave"
@@ -290,6 +303,25 @@ class App {
     const text = form.elements.textInput.value.trim();
     if (!text) return;
     form.elements.textInput.value = '';
+
+    // Mirrors #handleFinalChunk's note-trigger check (voice path) — typed
+    // input arrives complete in one shot, so there's no need for the voice
+    // flow's incremental dictate-then-"Stop & Save" buffer: just strip the
+    // trigger phrase and save whatever's left directly.
+    const lowerText = text.toLowerCase();
+    const matchedPhrase = TRIGGER_PHRASES.find((phrase) => lowerText.includes(phrase));
+    if (matchedPhrase) {
+      const matchIndex = lowerText.indexOf(matchedPhrase);
+      const remainder = text
+        .slice(matchIndex + matchedPhrase.length)
+        .replace(/^[:,.\s]+/, '')
+        .trim();
+      if (remainder) {
+        this.#persistNote(remainder).then(() => this.#askSkippy(remainder));
+      }
+      return;
+    }
+
     this.#askSkippy(text);
   };
 
@@ -476,18 +508,14 @@ class App {
     this.#render();
   };
 
-  #saveNote = async () => {
-    const content = this.noteBuffer.trim();
-    if (!content) {
-      this.#cancelDictation();
-      return;
-    }
-
+  // Shared by the voice dictation flow (#saveNote, content gathered
+  // incrementally into noteBuffer) and the typed one-shot flow
+  // (#sendTextMessage, content already complete at submit time) — the
+  // actual canister write + Notes Vault refresh is identical either way.
+  #persistNote = async (content) => {
     const timestamp = new Date().toISOString();
     const title = content.split(/\s+/).slice(0, 6).join(' ');
 
-    this.noteBuffer = '';
-    this.state = 'listening';
     this.statusMessage = 'Saving note...';
     this.#render();
 
@@ -504,7 +532,18 @@ class App {
     } else {
       this.#render();
     }
+  };
 
+  #saveNote = async () => {
+    const content = this.noteBuffer.trim();
+    if (!content) {
+      this.#cancelDictation();
+      return;
+    }
+
+    this.noteBuffer = '';
+    this.state = 'listening';
+    await this.#persistNote(content);
     await this.#askSkippy(content);
   };
 
@@ -574,6 +613,12 @@ class App {
     const { signal } = this.currentAbortController;
     const mySeq = ++this.requestSeq;
 
+    const lowerText = text.toLowerCase();
+    if (NOTE_RETRIEVAL_PHRASES.some((phrase) => lowerText.includes(phrase))) {
+      await this.#readBackNotes(text, mySeq);
+      return;
+    }
+
     this.statusMessage = 'Skippy is thinking...';
 
     const { mode, brain, ack } = this.#detectModeAndBrain(text);
@@ -630,6 +675,32 @@ class App {
       this.statusMessage = `Couldn't reach Skippy's brain (is the proxy running on :8787?): ${err.message}`;
       this.#render();
     }
+  };
+
+  // "Skippy, read back my recent notes" — fetches straight from the
+  // canister and speaks the result directly, skipping OpenRouter entirely:
+  // the content to read is already fully determined by what's stored, so
+  // there's nothing for the LLM to add (same reasoning as the bare-trigger
+  // acknowledgment patch above).
+  #readBackNotes = async (text, mySeq) => {
+    this.statusMessage = 'Fetching your notes...';
+    this.#render();
+
+    const sections = await this.backendActor.list_sections_by_manual(NOTES_MANUAL);
+    if (mySeq !== this.requestSeq) return; // superseded by a newer utterance
+
+    const recent = sections.slice(-RECENT_NOTES_COUNT).reverse();
+    const reply =
+      recent.length === 0
+        ? "You haven't saved any notes yet, Commander. Shocking, I know."
+        : `Here ${recent.length === 1 ? 'is' : 'are'} your ${recent.length} most recent note${recent.length === 1 ? '' : 's'}: ` +
+          recent.map((s, i) => `Note ${i + 1}: ${s.content}`).join('. ');
+
+    this.skippyReply = reply;
+    this.statusMessage = '';
+    this.#render();
+    this.#speak(reply);
+    this.#recordTurn(text, reply);
   };
 
   // Dedicated silent stop, distinct from barging in with a new utterance:

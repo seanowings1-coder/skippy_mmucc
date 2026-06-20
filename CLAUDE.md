@@ -375,9 +375,27 @@ numbers below are execution order. Each phase folds in its later-added hygiene/t
   (like this button) would flicker live only during the brief "Skippy is thinking..." network
   round-trip, then look frozen/disabled for the entire time he was actually talking. Fixed by
   adding `#render()` to all four handlers.
-- **Phase 5.4 — Trigger phrase content update** (Pillar 4). **+ Note retrieval patch**: a "Notes
-  Vault" dashboard in the Neo Skin UI to view saved dictations, plus a voice retrieval command
-  ("Skippy, read back my recent notes") that fetches and reads them back.
+- **Phase 5.4 — Trigger phrase content update** (Pillar 4). **Status: done, verified end-to-end in
+  a real browser.** Added "let me take a note" / "let me write that down" to `TRIGGER_PHRASES`
+  alongside the original two dictation-start phrases. **+ Typed-input note-trigger parity bug
+  (caught during verification):** `TRIGGER_PHRASES` matching only ever existed in
+  `#handleFinalChunk` (the voice path) — the typed-text path (`#sendTextMessage`) sent everything
+  straight to `#askSkippy`/OpenRouter with no check at all, so typing a note-trigger phrase just
+  asked Skippy a question about it instead of saving anything. Fixed by extracting the actual save
+  + Notes Vault refresh into a shared `#persistNote(content)` (used by both `#saveNote`'s
+  voice-dictation buffer and a new one-shot check in `#sendTextMessage`, which strips the matched
+  phrase and saves the remainder directly — no incremental buffer needed since typed input arrives
+  complete in one message). **+ Note retrieval patch**: the "Notes Vault"
+  view turned out to already exist — the generic manual-browser dropdown (`MANUAL_OPTIONS` /
+  `#refreshSections`) defaults to `SKIPPY_NOTES`, since notes are just manual sections under that
+  reserved manual name (see `#saveNote`). What was actually missing was the voice/text retrieval
+  *command*: "Skippy, read back my recent notes" (`NOTE_RETRIEVAL_PHRASES` in `App.js`) is now
+  checked at the top of `#askSkippy`, shared between voice and typed input. It fetches the last
+  `RECENT_NOTES_COUNT` (5) sections from `list_sections_by_manual(SKIPPY_NOTES)` — the backend's
+  `StableBTreeMap` iterates by ascending auto-increment id, so the tail of the returned `Vec` is
+  already the most recent notes, no timestamp parsing needed — and speaks them back directly,
+  skipping OpenRouter entirely (same "nothing for the LLM to add" reasoning as the bare-trigger
+  acknowledgment patch from Phase 5.3).
 - **Phase 5.5 — Workspaces: multi-project lifecycle & export** (Pillar 10, new 2026-06-20):
   `workspace_id`-segmented history, Active/Archived status, a workspace switcher UI, and
   human-readable (Markdown/text, not JSON) export before hard-delete. Sequenced ahead of RAG below
