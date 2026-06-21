@@ -46,6 +46,11 @@ pub struct DocumentSection {
     pub section: String,
     pub title: String,
     pub content: String,
+    /// RAG embedding vector (Pillar 6), pre-normalized to unit length at insert
+    /// time so similarity search is a plain dot product. `None` for entries
+    /// that aren't part of the semantic search corpus (e.g. notes saved via
+    /// the plain `add_manual_section`/`#saveNote` path).
+    pub embedding: Option<Vec<f32>>,
 }
 
 impl Storable for DocumentSection {
@@ -65,6 +70,26 @@ impl Storable for DocumentSection {
         max_size: MAX_DOCUMENT_SECTION_SIZE,
         is_fixed_size: false,
     };
+}
+
+/// One chunk of an uploaded document, embedding already computed by the proxy
+/// (Pillar 6) — input to the bulk `add_manual_chunks`, so a multi-chunk
+/// document upload is one `#[update]` call/consensus round instead of N.
+#[derive(CandidType, Deserialize, Clone, Debug)]
+pub struct NewChunk {
+    pub section: String,
+    pub title: String,
+    pub content: String,
+    pub embedding: Vec<f32>,
+}
+
+/// A `search_similar_chunks` result, paired with its cosine similarity score
+/// so the caller (the frontend) can apply its own "is this actually a good
+/// match" threshold rather than the canister silently deciding for it.
+#[derive(CandidType, Deserialize, Clone, Debug)]
+pub struct ScoredSection {
+    pub score: f32,
+    pub section: DocumentSection,
 }
 
 /// A single turn in a Principal's rolling conversation history with Skippy.
@@ -302,9 +327,136 @@ fn take_next_id() -> u64 {
 fn add_manual_section(manual_name: String, section: String, title: String, content: String) -> u64 {
     assert_whitelisted();
     let id = take_next_id();
-    let doc = DocumentSection { id, manual_name, section, title, content };
+    let doc = DocumentSection { id, manual_name, section, title, content, embedding: None };
     MANUAL_SECTIONS.with(|s| s.borrow_mut().insert(id, doc));
     id
+}
+
+/// Bulk insert for the Neo Skin upload pipeline (Pillar 6) — one call for an
+/// entire document's worth of chunks instead of N sequential
+/// `add_manual_section`-style calls, each of which would be its own
+/// consensus round trip.
+#[update]
+fn add_manual_chunks(manual_name: String, chunks: Vec<NewChunk>) -> Vec<u64> {
+    assert_whitelisted();
+    MANUAL_SECTIONS.with(|s| {
+        let mut s = s.borrow_mut();
+        chunks
+            .into_iter()
+            .map(|chunk| {
+                let id = take_next_id();
+                let doc = DocumentSection {
+                    id,
+                    manual_name: manual_name.clone(),
+                    section: chunk.section,
+                    title: chunk.title,
+                    content: chunk.content,
+                    embedding: Some(normalize(chunk.embedding)),
+                };
+                s.insert(id, doc);
+                id
+            })
+            .collect()
+    })
+}
+
+fn normalize(v: Vec<f32>) -> Vec<f32> {
+    let norm = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+    if norm == 0.0 {
+        v
+    } else {
+        v.into_iter().map(|x| x / norm).collect()
+    }
+}
+
+/// Brute-force cosine similarity over every embedded chunk in the global
+/// library (Pillar 6's "global, not siloed" RAG design — no manual_name
+/// filter). Embeddings are stored pre-normalized (see `normalize` above), so
+/// similarity here is a plain dot product. A `#[query]`, not an `#[update]` —
+/// read-only, no consensus needed, and a brute-force scan over a
+/// personal-reference-manual-scale corpus is trivially within a query call's
+/// instruction budget; no ANN/HNSW indexing needed at this scale.
+#[query]
+fn search_similar_chunks(query_embedding: Vec<f32>, top_k: u32) -> Vec<ScoredSection> {
+    assert_whitelisted();
+    let query = normalize(query_embedding);
+    let mut scored: Vec<ScoredSection> = MANUAL_SECTIONS.with(|s| {
+        s.borrow()
+            .iter()
+            .filter_map(|entry| {
+                let section = entry.value().clone();
+                let embedding = section.embedding.as_ref()?;
+                if embedding.len() != query.len() {
+                    return None; // mismatched dimension (different embedding model/config) — skip rather than panic
+                }
+                let score = embedding.iter().zip(query.iter()).map(|(a, b)| a * b).sum::<f32>();
+                Some(ScoredSection { score, section })
+            })
+            .collect()
+    });
+    scored.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+    scored.truncate(top_k as usize);
+    scored
+}
+
+/// Literal substring search, complementary to `search_similar_chunks` —
+/// pure embedding similarity is bad at "does any document literally mention
+/// X" exact recall (a vague question doesn't share vocabulary with the
+/// source text), so the frontend also sends word stems from the query here.
+/// This runs server-side specifically so it scales with real document sizes
+/// (a single 500-page manual can be 1000+ chunks, and the corpus is global
+/// across every uploaded manual, not just one) — it's a cheap O(n) string
+/// scan with no embedding math, so it stays fast regardless of corpus size,
+/// and only the (typically small) set of actual hits crosses the wire,
+/// instead of the frontend fetching a huge slice just to scan it itself.
+#[query]
+fn search_manuals_by_keyword(stems: Vec<String>) -> Vec<DocumentSection> {
+    assert_whitelisted();
+    let needles: Vec<String> = stems
+        .into_iter()
+        .map(|s| s.to_lowercase())
+        .filter(|s| !s.is_empty())
+        .collect();
+    if needles.is_empty() {
+        return Vec::new();
+    }
+    MANUAL_SECTIONS.with(|s| {
+        s.borrow()
+            .iter()
+            .filter(|entry| {
+                let section = entry.value();
+                let haystack = format!(
+                    "{} {} {}",
+                    section.manual_name.to_lowercase(),
+                    section.title.to_lowercase(),
+                    section.content.to_lowercase()
+                );
+                needles.iter().any(|n| haystack.contains(n.as_str()))
+            })
+            .map(|entry| entry.value().clone())
+            .take(50) // cap the worst case (a very common stem) — TOP_K trims further on the frontend
+            .collect()
+    })
+}
+
+/// Bulk delete-by-manual for the Knowledge Manager (Pillar 6's RAG manual
+/// hygiene patch) — one atomic call instead of the frontend collecting ids
+/// via `list_sections_by_manual` and calling `delete_manual_section` per id.
+#[update]
+fn delete_manual(manual_name: String) -> u64 {
+    assert_whitelisted();
+    MANUAL_SECTIONS.with(|s| {
+        let mut s = s.borrow_mut();
+        let ids: Vec<u64> = s
+            .iter()
+            .filter(|entry| entry.value().manual_name == manual_name)
+            .map(|entry| *entry.key())
+            .collect();
+        for id in &ids {
+            s.remove(id);
+        }
+        ids.len() as u64
+    })
 }
 
 #[query]

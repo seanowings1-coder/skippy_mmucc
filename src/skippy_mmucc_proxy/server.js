@@ -1,6 +1,9 @@
 import express from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
+import multer from 'multer';
+import pdfParse from 'pdf-parse';
+import mammoth from 'mammoth';
 import { Actor, HttpAgent } from '@icp-sdk/core/agent';
 import { Readable } from 'node:stream';
 import { fileURLToPath } from 'node:url';
@@ -28,6 +31,23 @@ const BRAIN_MODELS = {
   heavy_hitter: OPENROUTER_MODEL_HEAVY_HITTER,
   tactical: OPENROUTER_MODEL_TACTICAL,
 };
+
+// RAG (Pillar 6) — OpenRouter added a unified /embeddings endpoint covering
+// OpenAI/Mistral/Qwen/etc. embedding models, so this reuses OPENROUTER_API_KEY
+// rather than needing a separate OpenAI key. 512 dims (via the request's
+// `dimensions` param) trades a little quality for a lot less stable-memory
+// and per-query compute versus the full 1536 — plenty for a reference-manual
+// corpus at this app's scale.
+const OPENROUTER_EMBEDDING_MODEL =
+  process.env.OPENROUTER_EMBEDDING_MODEL || 'openai/text-embedding-3-small';
+const EMBEDDING_DIMENSIONS = 512;
+
+// Tavily (Pillar 6's Steel Rain / Dumbass Web Loop) — a fixed, trusted
+// third-party search endpoint, never an arbitrary user/LLM-supplied URL, so
+// this closes the SSRF risk flagged when Pillar 6 was first specified.
+// include_raw_content is deliberately omitted from every Tavily call below
+// so raw HTML is never returned, satisfying "zero scraping" by construction.
+const TAVILY_API_KEY = process.env.TAVILY_API_KEY;
 
 const DFX_NETWORK = process.env.DFX_NETWORK || 'local';
 const IC_HOST = process.env.IC_HOST || 'http://127.0.0.1:4943';
@@ -99,6 +119,109 @@ function systemPromptFor(mode, brain) {
   return brain === 'heavy_hitter' ? base : base + BREVITY_SUFFIX;
 }
 
+// Shared by /embed (per-turn query embedding) and /chunk-and-embed (Neo Skin
+// document ingestion) — one OpenRouter call handles the whole batch either way.
+async function embedTexts(texts) {
+  const response = await fetch('https://openrouter.ai/api/v1/embeddings', {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${OPENROUTER_API_KEY}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      model: OPENROUTER_EMBEDDING_MODEL,
+      input: texts,
+      dimensions: EMBEDDING_DIMENSIONS,
+    }),
+  });
+  if (!response.ok) {
+    const detail = await response.text();
+    throw new Error(`OpenRouter embeddings error: ${response.status} ${detail}`);
+  }
+  const data = await response.json();
+  return data.data.map((d) => d.embedding);
+}
+
+// Plain length-based chunking with a paragraph/sentence-boundary preference —
+// no tokenizer dependency needed for a reference-manual-scale corpus. Returns
+// overlapping chunks so context isn't lost right at a cut point.
+function chunkText(text, chunkSize = 1500, overlap = 150) {
+  const clean = text.replace(/\r\n/g, '\n').trim();
+  const chunks = [];
+  let start = 0;
+  while (start < clean.length) {
+    let end = Math.min(start + chunkSize, clean.length);
+    if (end < clean.length) {
+      const breakPoint = Math.max(clean.lastIndexOf('\n', end), clean.lastIndexOf('. ', end));
+      if (breakPoint > start + chunkSize * 0.5) {
+        end = breakPoint + 1;
+      }
+    }
+    const chunk = clean.slice(start, end).trim();
+    if (chunk) chunks.push(chunk);
+    if (end >= clean.length) break;
+    start = end - overlap;
+  }
+  return chunks;
+}
+
+// Neo Skin uploads (Pillar 6) — memory storage, not disk: files are parsed
+// once and discarded, never need to persist on the proxy's own filesystem.
+// 20MB covers a genuinely large reference manual; well past express.json()'s
+// 100kb default, which is the right ceiling for tiny chat-turn JSON bodies
+// but far too small for a whole document.
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 20 * 1024 * 1024 } });
+
+// Extracts plain text from whichever format the Neo Skin upload UI accepts.
+// Legacy binary .doc (pre-2007 Word) is deliberately NOT supported — mammoth
+// only understands the modern .docx (OOXML) format; .doc needs a much
+// heavier parser for little practical benefit here.
+async function extractText(buffer, filename) {
+  const ext = filename.toLowerCase().split('.').pop();
+  switch (ext) {
+    case 'txt':
+    case 'md':
+      return buffer.toString('utf-8');
+    case 'pdf':
+      return (await pdfParse(buffer)).text;
+    case 'docx':
+      return (await mammoth.extractRawText({ buffer })).value;
+    default:
+      throw new Error(
+        `Unsupported file type ".${ext}" — supported: .txt, .md, .pdf, .docx (legacy .doc isn't supported; re-save as .docx, .pdf, or .txt).`,
+      );
+  }
+}
+
+// Tavily (Pillar 6) — a fixed, trusted third-party endpoint, called with only
+// the query string; never a URL derived from user/LLM input, which is what
+// closes the SSRF risk flagged when this pillar was first specified.
+// include_raw_content is deliberately omitted so raw HTML is never returned.
+async function tavilySearch(query) {
+  const response = await fetch('https://api.tavily.com/search', {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${TAVILY_API_KEY}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      query,
+      search_depth: 'basic',
+      max_results: 3,
+      include_answer: true,
+    }),
+  });
+  if (!response.ok) {
+    const detail = await response.text();
+    throw new Error(`Tavily error: ${response.status} ${detail}`);
+  }
+  const data = await response.json();
+  return {
+    answer: data.answer || '',
+    results: (data.results || []).map(({ title, url, content }) => ({ title, url, content })),
+  };
+}
+
 const app = express();
 app.use(cors());
 app.use(express.json());
@@ -133,6 +256,45 @@ app.post('/respond', requireSession, async (req, res) => {
     systemPrompt = `You are speaking with ${req.skippySession.name}. ${systemPrompt}`;
   }
 
+  // Pillar 6 — the frontend already decided what's relevant (ran the
+  // similarity search/threshold check itself, see CLAUDE.md), so this just
+  // injects whatever it found. Citation format is the minimal bracketed tag
+  // already specified for Pillar 6 — no long disclaimers.
+  const ragContext = Array.isArray(req.body?.ragContext) ? req.body.ragContext : [];
+  const webContext =
+    req.body?.webContext && typeof req.body.webContext === 'object' ? req.body.webContext : null;
+  const ragMiss = req.body?.ragMiss === true;
+
+  if (ragContext.length > 0) {
+    const block = ragContext
+      .filter((c) => c && typeof c.content === 'string')
+      .map((c) => `[${c.manual_name}] ${c.title}: ${c.content}`)
+      .join('\n\n');
+    systemPrompt +=
+      `\n\nRelevant knowledge base excerpts — cite the bracketed manual name when you use one. ` +
+      `Only state facts, numbers, or rules that actually appear in these excerpts — if they don't ` +
+      `contain the specific answer, say so explicitly (still in character) rather than guessing or ` +
+      `inventing a plausible-sounding number. Never use a bracketed citation tag unless you're ` +
+      `actually drawing from that excerpt for this answer:\n${block}`;
+  }
+
+  if (webContext) {
+    const block = [webContext.answer, ...(webContext.results || []).map((r) => `${r.title} (${r.url}): ${r.content}`)]
+      .filter(Boolean)
+      .join('\n\n');
+    systemPrompt += `\n\nLive web search results — cite with a "[Web]" tag when you use these:\n${block}`;
+  }
+
+  // Dumbass Web Loop (default/professional modes only — Steel Rain/tactical
+  // never waits for permission, see App.js). No separate canned reply: the
+  // persona itself, in character, does the mocking and the asking in this
+  // one OpenRouter call, then waits for the next turn's "yes" before App.js
+  // actually fires a web search.
+  if (ragMiss && mode !== 'tactical' && !webContext) {
+    systemPrompt +=
+      '\n\nThe local knowledge base has nothing relevant to this question. Do NOT answer the substantive question yet — mock the user, in character, for not having this in your manuals, then explicitly ask whether they want you to search the web for it. Wait for their answer instead of guessing.';
+  }
+
   // Barge-in (App.js's #askSkippy aborts its fetch to /respond the instant a
   // new utterance arrives) only kills the browser-to-proxy connection by
   // itself — without this, the proxy kept awaiting the OpenRouter call to
@@ -141,6 +303,16 @@ app.post('/respond', requireSession, async (req, res) => {
   // normal completion is a harmless no-op since the fetch has already settled.
   const upstreamAbort = new AbortController();
   req.on('close', () => upstreamAbort.abort());
+  // A client disconnecting mid-request (not a clean end-of-stream — a real
+  // dropped connection) can make Node's own stream-destroy machinery emit an
+  // 'error' on `req` itself, separate from the AbortError our fetch() calls
+  // already catch. An EventEmitter's unhandled 'error' event is fatal by
+  // design (crashes the whole process) — confirmed live, 2026-06-20: this
+  // took the entire proxy down mid-session with no other symptom than every
+  // route going unreachable. We don't need to do anything with it (the
+  // 'close' handler above already covers real cleanup); this just stops it
+  // from being fatal.
+  req.on('error', () => {});
 
   try {
     const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
@@ -201,6 +373,16 @@ app.get('/speak', requireSession, async (req, res) => {
   // already incurred the moment the request was sent.
   const upstreamAbort = new AbortController();
   req.on('close', () => upstreamAbort.abort());
+  // A client disconnecting mid-request (not a clean end-of-stream — a real
+  // dropped connection) can make Node's own stream-destroy machinery emit an
+  // 'error' on `req` itself, separate from the AbortError our fetch() calls
+  // already catch. An EventEmitter's unhandled 'error' event is fatal by
+  // design (crashes the whole process) — confirmed live, 2026-06-20: this
+  // took the entire proxy down mid-session with no other symptom than every
+  // route going unreachable. We don't need to do anything with it (the
+  // 'close' handler above already covers real cleanup); this just stops it
+  // from being fatal.
+  req.on('error', () => {});
 
   try {
     const response = await fetch(
@@ -233,6 +415,110 @@ app.get('/speak', requireSession, async (req, res) => {
   }
 });
 
+// Pillar 6 — embeds the user's query text (or anything else the frontend
+// needs vectorized) so it can call the canister's search_similar_chunks
+// itself with its own authenticated identity. The proxy never calls the
+// canister directly for this (see CLAUDE.md's Phase 5.1 / Pillar 1 note on
+// why the proxy stays stateless re: the canister) — it only ever does the
+// genuinely Web2-only part, talking to OpenRouter.
+app.post('/embed', requireSession, async (req, res) => {
+  const texts = req.body?.texts;
+  if (!Array.isArray(texts) || texts.length === 0 || !texts.every((t) => typeof t === 'string')) {
+    return res.status(400).json({ error: 'Missing or invalid "texts" array in request body.' });
+  }
+  if (!OPENROUTER_API_KEY) {
+    return res.status(502).json({ error: 'OPENROUTER_API_KEY is not set.' });
+  }
+
+  try {
+    const embeddings = await embedTexts(texts);
+    res.json({ embeddings });
+  } catch (err) {
+    res.status(502).json({ error: err.message });
+  }
+});
+
+// Neo Skin document upload (Pillar 6) — extract + chunk + embed in one round
+// trip; the frontend persists the result to the canister itself via
+// add_manual_chunks, same proxy-stays-stateless reasoning as /embed above.
+// multipart/form-data (not JSON) since this needs to carry binary file
+// bytes (PDF/.docx), not just text, and express.json()'s small default
+// limit is the wrong ceiling for a whole document anyway.
+app.post('/chunk-and-embed', requireSession, upload.single('file'), async (req, res) => {
+  if (!req.file) {
+    return res.status(400).json({ error: 'Missing "file" in form data.' });
+  }
+  if (!OPENROUTER_API_KEY) {
+    return res.status(502).json({ error: 'OPENROUTER_API_KEY is not set.' });
+  }
+
+  let text;
+  try {
+    text = await extractText(req.file.buffer, req.file.originalname);
+  } catch (err) {
+    return res.status(400).json({ error: err.message });
+  }
+  if (!text || !text.trim()) {
+    return res.status(400).json({
+      error:
+        'No extractable text found in that file. This PDF likely has no real text layer (e.g. ' +
+        'a rasterized "print to PDF" export) — OCR isn\'t supported yet. Try opening it, ' +
+        'confirming you can select/copy its text in a PDF viewer, or copy the text into a ' +
+        '.txt file and upload that instead.',
+    });
+  }
+
+  const pieces = chunkText(text);
+  if (pieces.length === 0) {
+    return res.status(400).json({ error: 'No content to chunk.' });
+  }
+
+  try {
+    const embeddings = await embedTexts(pieces);
+    const chunks = pieces.map((content, i) => ({
+      section: `chunk-${i + 1}`,
+      title: content.split(/\s+/).slice(0, 8).join(' '),
+      content,
+      embedding: embeddings[i],
+    }));
+    res.json({ chunks });
+  } catch (err) {
+    res.status(502).json({ error: err.message });
+  }
+});
+
+// Steel Rain / Dumbass Web Loop (Pillar 6) — the only thing that ever
+// touches the open internet beyond OpenRouter/ElevenLabs, and only ever via
+// Tavily's fixed endpoint with a plain query string (see tavilySearch above
+// for why that closes the SSRF risk).
+app.post('/web-search', requireSession, async (req, res) => {
+  const query = req.body?.query;
+  if (!query) {
+    return res.status(400).json({ error: 'Missing "query" in request body.' });
+  }
+  if (!TAVILY_API_KEY) {
+    return res.status(502).json({ error: 'TAVILY_API_KEY is not set.' });
+  }
+
+  try {
+    const result = await tavilySearch(query);
+    res.json(result);
+  } catch (err) {
+    res.status(502).json({ error: err.message });
+  }
+});
+
+// Catches multer's file-size/type errors (e.g. over the 20MB limit on
+// /chunk-and-embed) so they come back as the same clean JSON shape as every
+// other error here, instead of Express's default HTML error page.
+app.use((err, req, res, next) => {
+  if (err instanceof multer.MulterError) {
+    return res.status(400).json({ error: `Upload error: ${err.message}` });
+  }
+  next(err);
+});
+
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`Skippy proxy listening on http://0.0.0.0:${PORT}`);
 });
+

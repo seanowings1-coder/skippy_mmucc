@@ -4,6 +4,19 @@ type DocumentSection = record {
     section : text;
     title : text;
     content : text;
+    embedding : opt vec float32;
+};
+
+type NewChunk = record {
+    section : text;
+    title : text;
+    content : text;
+    embedding : vec float32;
+};
+
+type ScoredSection = record {
+    score : float32;
+    section : DocumentSection;
 };
 
 type Message = record {
@@ -40,6 +53,10 @@ service : (principal, principal) -> {
     "get_manual_section": (nat64) -> (opt DocumentSection) query;
     "list_sections_by_manual": (text) -> (vec DocumentSection) query;
     "delete_manual_section": (nat64) -> (bool);
+    "add_manual_chunks": (text, vec NewChunk) -> (vec nat64);
+    "search_similar_chunks": (vec float32, nat32) -> (vec ScoredSection) query;
+    "search_manuals_by_keyword": (vec text) -> (vec DocumentSection) query;
+    "delete_manual": (text) -> (nat64);
 
     "login": () -> (variant { Ok : text; Err : text });
     "validate_session": (text) -> (opt SessionInfo) query;

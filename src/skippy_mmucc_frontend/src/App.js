@@ -60,6 +60,60 @@ const NOTE_RETRIEVAL_PHRASES = [
 ];
 const RECENT_NOTES_COUNT = 5;
 
+// Pillar 6 RAG retrieval tuning — see CLAUDE.md's Phase 5.6 entry for why
+// these specific defaults (512-dim embeddings, brute-force cosine search at
+// this app's scale). TOP_K caps what actually goes in the LLM prompt
+// (context safety) for BOTH retrieval paths below: pure embedding
+// similarity (search_similar_chunks) and literal keyword/stem matching
+// (search_manuals_by_keyword) — the latter runs server-side specifically so
+// it scales with real document sizes (a single 500-page manual can be
+// 1000+ chunks, and the corpus is global across every uploaded manual);
+// an earlier version tried to approximate this by asking
+// search_similar_chunks for a huge top_k and scanning the result
+// client-side, which silently stopped covering the whole corpus once any
+// manual got large, and would have meant shipping huge embeddings-included
+// payloads over the wire for no benefit.
+const TOP_K = 4;
+const SIMILARITY_THRESHOLD = 0.3;
+
+// Crude English stemming (strip a trailing -ing/-ed/-es/-s if what's left is
+// still a real-looking word) — not real NLP, just enough so "remembering"/
+// "remembered" both match a document about "remember". Generic words like
+// "manual"/"document" are excluded so they stop acting as required magic
+// words — the point of this pass is letting *topical* words drive recall.
+const KEYWORD_STOPWORDS = new Set([
+  'about', 'that', 'this', 'what', 'does', 'have', 'your', 'tell', 'give',
+  'skippy', 'manual', 'manuals', 'document', 'documents', 'overview',
+  'review', 'subject', 'commander',
+]);
+
+function extractKeywordStems(text) {
+  const stems = text
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .filter((w) => w.length > 3 && !KEYWORD_STOPWORDS.has(w))
+    .map((w) => w.replace(/(ing|ed|es|s)$/, ''))
+    .filter((w) => w.length > 3);
+  return [...new Set(stems)];
+}
+
+// Direct override — skips RAG-miss detection and the Dumbass Loop's
+// permission dance entirely, in any mode (already spec'd in CLAUDE.md
+// Pillar 6, not new). "Steel rain"/tactical mode does this automatically on
+// a miss already; this phrase forces it even on a RAG *hit*.
+const WEB_OVERRIDE_PHRASES = [
+  'go to the web',
+  'search the web',
+  'look that up online',
+  'look this up online',
+];
+
+// Fixed phrase pattern, not a second classification call — same philosophy
+// as every other trigger-phrase check in this file. Only consulted when
+// pendingWebSearchQuery is actually set (see #askSkippy), so casual use of
+// these words outside that context never accidentally triggers anything.
+const WEB_SEARCH_AFFIRMATION_PHRASES = ['yes', 'yeah', 'go ahead', 'do it', 'please do', 'search'];
+
 // Pillar 3's persona/Brain Switching trigger phrases — plain substring
 // matching on the transcript, no secondary classification call. "behave"
 // and "be yourself" require a "skippy" lead-in elsewhere in the same chunk
@@ -132,13 +186,25 @@ class App {
   // spoken/typed trigger phrase is too much noise: toggle on, then everything
   // typed just saves silently as a note, no Skippy reply, no TTS.
   manualNoteMode = false;
+  // Dumbass Web Loop (Pillar 6, default/professional modes only) — holds the
+  // *original* question while Skippy waits for permission to search the
+  // web, so a follow-up "yes" searches for that, not for the literal "yes".
+  pendingWebSearchQuery = null;
   // Pillar 10 — private per-Principal project partitions for history.
   // activeWorkspaceId is a bigint (candid nat64), matching every other
   // server-issued id already flowing through this file unconverted.
   workspaces = [];
   activeWorkspaceId = null;
   selectedManual = NOTES_MANUAL;
+  // Mutable copy — Neo Skin uploads (Pillar 6) can introduce manual names
+  // beyond the 3 baked-in defaults. Known gap: this resets to the defaults
+  // on a fresh page load, since there's no backend "list distinct manual
+  // names" query yet — uploaded manuals are still fully there and searchable
+  // (search_similar_chunks is global, not filtered by this dropdown), just
+  // not relisted here until you re-upload or until that query gets added.
+  manualOptions = [...MANUAL_OPTIONS];
   sections = [];
+  manualBrowserOpen = false;
   statusMessage = '';
   recognition = null;
   stopRequested = false;
@@ -280,6 +346,7 @@ class App {
     this.history = [];
     this.workspaces = [];
     this.activeWorkspaceId = null;
+    this.pendingWebSearchQuery = null;
     this.operationalMode = 'default';
     this.profileName = '';
     this.profileVoiceId = '';
@@ -407,6 +474,7 @@ class App {
 
   #switchWorkspace = async (id) => {
     this.activeWorkspaceId = id;
+    this.pendingWebSearchQuery = null;
     this.history = await this.backendActor.get_history(id);
     this.#render();
   };
@@ -711,6 +779,30 @@ class App {
   // phrase like "Skippy, behave" ("I don't want to wait for him to finish
   // before I can switch modes"). mySeq lets a late-arriving response from a
   // since-superseded request detect that it's stale and discard itself.
+  #embed = async (texts) => {
+    const response = await fetch(`${PROXY_URL}/embed`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Skippy-Session': this.sessionToken },
+      body: JSON.stringify({ texts }),
+    });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || 'Embedding request failed.');
+    return data.embeddings;
+  };
+
+  // Tavily, via the proxy's fixed /web-search route — see CLAUDE.md Pillar 6
+  // for why this (not arbitrary URL fetching) is what closes the SSRF risk.
+  #webSearch = async (query) => {
+    const response = await fetch(`${PROXY_URL}/web-search`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Skippy-Session': this.sessionToken },
+      body: JSON.stringify({ query }),
+    });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || 'Web search failed.');
+    return data;
+  };
+
   #askSkippy = async (text) => {
     this.#stopSpeaking();
     this.currentAbortController?.abort();
@@ -743,6 +835,117 @@ class App {
 
     this.#render();
 
+    // Pillar 6 — RAG retrieval + web search happen here, before the single
+    // /respond call, so the LLM always gets its context (or the Dumbass
+    // Loop's permission-ask) in one round trip with one visible status, not
+    // a second hidden network hop the user can't see.
+    let ragContext = [];
+    let webContext = null;
+    let ragMiss = false;
+    let effectiveText = text;
+
+    const isWebOverride = WEB_OVERRIDE_PHRASES.some((phrase) => lowerText.includes(phrase));
+    const isAffirmation =
+      this.pendingWebSearchQuery &&
+      WEB_SEARCH_AFFIRMATION_PHRASES.some((phrase) => lowerText.includes(phrase));
+
+    if (isAffirmation) {
+      // The user is saying "yes" to the *previous* turn's permission ask —
+      // search for the original question, not for the bare word "yes".
+      effectiveText = this.pendingWebSearchQuery;
+      this.pendingWebSearchQuery = null;
+      try {
+        webContext = await this.#webSearch(effectiveText);
+      } catch (err) {
+        console.error('[Skippy] web search failed:', err);
+      }
+    } else if (isWebOverride) {
+      // Direct override — skips RAG-miss detection and the permission dance
+      // entirely, in any mode.
+      this.pendingWebSearchQuery = null;
+      try {
+        webContext = await this.#webSearch(text);
+      } catch (err) {
+        console.error('[Skippy] web search failed:', err);
+      }
+    } else {
+      this.pendingWebSearchQuery = null; // any other new utterance clears a stale pending ask
+      try {
+        const [embedding] = await this.#embed([text]);
+        const queryStems = extractKeywordStems(text);
+        // Two independent, complementary retrieval paths, run in parallel:
+        // semantic similarity (small, bounded payload regardless of corpus
+        // size — search_similar_chunks always returns at most TOP_K) and
+        // literal keyword/stem matching (done server-side in
+        // search_manuals_by_keyword so it scales to real document sizes —
+        // see CLAUDE.md's Phase 5.6 entry on why this isn't done by fetching
+        // a huge slice and scanning it here instead).
+        const [scored, keywordHits] = await Promise.all([
+          this.backendActor.search_similar_chunks(embedding, TOP_K),
+          queryStems.length > 0
+            ? this.backendActor.search_manuals_by_keyword(queryStems)
+            : Promise.resolve([]),
+        ]);
+        console.log(
+          '[Skippy RAG] semantic matches:',
+          scored.map((s) => ({ score: s.score, title: s.section.title })),
+        );
+        console.log('[Skippy RAG] keyword hits:', keywordHits.map((s) => s.title));
+
+        const merged = [];
+        const seenIds = new Set();
+        for (const s of scored) {
+          if (s.score >= SIMILARITY_THRESHOLD && !seenIds.has(s.section.id)) {
+            merged.push(s.section);
+            seenIds.add(s.section.id);
+          }
+        }
+        for (const section of keywordHits) {
+          if (!seenIds.has(section.id) && merged.length < TOP_K) {
+            merged.push(section);
+            seenIds.add(section.id);
+          }
+        }
+        const goodMatches = merged.slice(0, TOP_K);
+        if (goodMatches.length > 0) {
+          ragContext = goodMatches.map((section) => ({
+            manual_name: section.manual_name,
+            title: section.title,
+            content: section.content,
+          }));
+        } else {
+          ragMiss = true;
+          if (mode === 'tactical') {
+            // Steel Rain: instantly fire the web search, zero confirmation.
+            try {
+              webContext = await this.#webSearch(text);
+            } catch (err) {
+              console.error('[Skippy] web search failed:', err);
+            }
+          }
+          // Default/professional: webContext stays null here — the
+          // conditional system-prompt block (server.js) makes Skippy mock
+          // and ask permission instead of guessing.
+        }
+      } catch (err) {
+        // Treat an infrastructure failure (clock drift, network blip, etc.)
+        // the same as a genuine RAG miss rather than silently leaving the
+        // model with zero context AND zero instructions — otherwise it has
+        // nothing to go on and improvises its own (often wrong) explanation
+        // for why it "can't" answer, instead of following the actual
+        // mock-and-ask-permission / Steel Rain protocol.
+        console.error('[Skippy] RAG search failed, treating as a miss:', err);
+        ragMiss = true;
+        if (mode === 'tactical') {
+          try {
+            webContext = await this.#webSearch(text);
+          } catch (webErr) {
+            console.error('[Skippy] web search failed:', webErr);
+          }
+        }
+      }
+    }
+
     try {
       const response = await fetch(`${PROXY_URL}/respond`, {
         method: 'POST',
@@ -751,10 +954,13 @@ class App {
           'X-Skippy-Session': this.sessionToken,
         },
         body: JSON.stringify({
-          text,
+          text: effectiveText,
           history: this.history.map(({ role, content }) => ({ role, content })),
           mode,
           brain,
+          ragContext,
+          webContext,
+          ragMiss: ragMiss && !webContext,
         }),
         signal,
       });
@@ -767,10 +973,17 @@ class App {
         return;
       }
 
+      // This reply was Skippy mocking + asking permission (Dumbass Loop),
+      // not an actual answer — remember the original question so a "yes"
+      // next turn searches for *that*.
+      if (ragMiss && !webContext && mode !== 'tactical') {
+        this.pendingWebSearchQuery = effectiveText;
+      }
+
       this.lastBrain = data.brain || '';
       this.lastModel = data.model || '';
       this.statusMessage = '';
-      this.#recordTurn(text, data.reply);
+      this.#recordTurn(effectiveText, data.reply);
       this.#render();
       this.#speak(data.reply);
     } catch (err) {
@@ -965,6 +1178,12 @@ class App {
     this.sections = await this.backendActor.list_sections_by_manual(
       this.selectedManual,
     );
+    this.manualBrowserOpen = true;
+    this.#render();
+  };
+
+  #closeManualBrowser = () => {
+    this.manualBrowserOpen = false;
     this.#render();
   };
 
@@ -982,6 +1201,81 @@ class App {
     }
     await this.backendActor.delete_manual_section(id);
     await this.#refreshSections();
+  };
+
+  // Knowledge Manager bulk delete (Pillar 6's RAG manual hygiene patch) —
+  // one atomic backend call, distinct from #deleteSection's per-entry delete.
+  #deleteManual = async () => {
+    if (
+      !window.confirm(
+        `Permanently delete the entire "${this.selectedManual}" manual and everything in it? This cannot be undone.`,
+      )
+    ) {
+      return;
+    }
+    await this.backendActor.delete_manual(this.selectedManual);
+    this.manualOptions = this.manualOptions.filter((m) => m !== this.selectedManual);
+    if (this.manualOptions.length === 0) this.manualOptions = [NOTES_MANUAL];
+    this.selectedManual = this.manualOptions[0];
+    await this.#refreshSections();
+  };
+
+  // Neo Skin upload (Pillar 6) — reads the file client-side, sends the raw
+  // text to the proxy's /chunk-and-embed (chunking + the one external
+  // OpenRouter embeddings call), then persists the result to the canister
+  // itself with its own identity, same stateless-proxy pattern as every
+  // other canister write in this file.
+  #uploadManualFile = async (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    const manualName = window.prompt(
+      'Manual name for this upload (e.g. MMUCC_V6):',
+      this.selectedManual,
+    );
+    e.target.value = ''; // always reset so re-selecting the same file fires another change event
+    if (!manualName || !manualName.trim()) return;
+    const name = manualName.trim();
+
+    this.statusMessage = `Chunking & embedding "${file.name}"...`;
+    this.#render();
+
+    try {
+      // multipart/form-data, not JSON — the proxy needs the original file
+      // bytes to parse PDF/.docx itself (server.js's extractText), and this
+      // also sidesteps express.json()'s small default body-size limit,
+      // which a real document upload would otherwise exceed. Deliberately
+      // no explicit Content-Type header: fetch sets the multipart boundary
+      // itself when given a FormData body, which a manual header would break.
+      const formData = new FormData();
+      formData.append('file', file);
+      const response = await fetch(`${PROXY_URL}/chunk-and-embed`, {
+        method: 'POST',
+        headers: { 'X-Skippy-Session': this.sessionToken },
+        body: formData,
+      });
+      const data = await response.json();
+      if (!response.ok) {
+        this.statusMessage = data.error || 'Failed to chunk/embed the document.';
+        this.#render();
+        return;
+      }
+
+      await this.backendActor.add_manual_chunks(name, data.chunks);
+      if (!this.manualOptions.includes(name)) {
+        this.manualOptions = [...this.manualOptions, name];
+      }
+      this.selectedManual = name;
+      // Deliberately no #refreshSections() here — a successful upload should
+      // only ever show a status message, never auto-dump the document's full
+      // content onto the screen. Viewing it is the explicit "Open" button's
+      // job (select a manual, then open it), not an automatic side effect.
+      this.statusMessage = `Uploaded ${data.chunks.length} chunk(s) into "${name}".`;
+      this.#render();
+    } catch (err) {
+      this.statusMessage = `Upload failed: ${err.message}`;
+      this.#render();
+    }
   };
 
   #statusText() {
@@ -1186,24 +1480,36 @@ class App {
 
         <section class="manual-browser">
           <select @change=${this.#handleManualChange} .value=${this.selectedManual}>
-            ${MANUAL_OPTIONS.map(
+            ${this.manualOptions.map(
               (name) => html`<option value=${name}>${name}</option>`,
             )}
           </select>
-          <button @click=${this.#refreshSections}>Refresh</button>
+          <button @click=${this.#refreshSections}>Open</button>
+          ${this.manualBrowserOpen
+            ? html`<button @click=${this.#closeManualBrowser}>Close</button>`
+            : ''}
+          <button @click=${this.#deleteManual}>Delete entire manual</button>
+          <label class="upload-manual">
+            Upload (.txt/.md/.pdf/.docx) →
+            <input type="file" accept=".txt,.md,.pdf,.docx" @change=${this.#uploadManualFile} />
+          </label>
 
-          <ul class="note-list">
-            ${this.sections.map(
-              (section) => html`
-                <li>
-                  <strong>${section.title}</strong>
-                  <span class="section-id">(${section.section})</span>
-                  <button @click=${() => this.#deleteSection(section.id)}>Delete</button>
-                  <p>${section.content}</p>
-                </li>
-              `,
-            )}
-          </ul>
+          ${this.manualBrowserOpen
+            ? html`
+                <ul class="note-list">
+                  ${this.sections.map(
+                    (section) => html`
+                      <li>
+                        <strong>${section.title}</strong>
+                        <span class="section-id">(${section.section})</span>
+                        <button @click=${() => this.#deleteSection(section.id)}>Delete</button>
+                        <p>${section.content}</p>
+                      </li>
+                    `,
+                  )}
+                </ul>
+              `
+            : ''}
         </section>
       </main>
     `;

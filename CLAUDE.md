@@ -174,6 +174,15 @@ Storage substrate already exists (section 4's generic `manual_name`-keyed store)
   every loaded manual can't balloon the LLM context window.
 - **Neo Skin upload UI**: cross-platform (PC + mobile) file upload (`.txt`/documents) pushing
   content through a parsing pipeline into the canister, expanding the reference library on the fly.
+  Supports `.txt`/`.md`/`.pdf`/`.docx` (proxy-side extraction via `pdf-parse`/`mammoth`; legacy
+  binary `.doc` isn't supported). **Known limitation, confirmed 2026-06-20**: PDFs with no real
+  text layer (e.g. some browser "print to PDF" exports rasterize the page instead of embedding
+  selectable text — confirmed file-specific, not universal to all such exports, via two independent
+  extraction libraries against real Gmail-export PDFs) return "no extractable text" with no
+  workaround in the app today. **Possible future enhancement, not yet planned/scheduled**: OCR
+  support (e.g. Tesseract) to handle image-only PDFs — deliberately deferred for now since it's a
+  real scope/dependency increase with inherently lower accuracy than real text extraction; the
+  user's chosen workaround until then is copying the text into a `.txt` file and uploading that.
 - **Steel Rain (Tactical Mode) emergency/utility web fallback**: scope is general-purpose, not
   limited to disaster scenarios — any situation needing immediate, uninflated data instantly
   (medical/security crises, technical specs like torque values, safety rules, etc). If the query
@@ -436,13 +445,83 @@ numbers below are execution order. Each phase folds in its later-added hygiene/t
   sites (main reply, bare-trigger ack, note read-back) to run *before* `#render()` instead of
   after, so the transcript reflects the turn that just completed instead of lagging one render
   behind.
-- **Phase 5.6 — RAG engine + multi-mode web intelligence** (Pillar 6). **+ RAG manual hygiene
-  patch**: a "Knowledge Manager" UI to view and permanently delete specific manuals — the backend
-  capability this needed (`delete_manual_section(id)`) already shipped early, as part of Phase
-  5.4's note-deletion patch, so this is UI-only when it comes up: "delete by manual" just means
-  collecting matching ids via `list_sections_by_manual` then calling `delete_manual_section` per
-  id, since `manual_name` isn't the primary key. Knowledge base stays global across workspaces
-  (Pillar 6's "global, not siloed" note) with a strict top-k retrieval limit.
+- **Phase 5.6 — RAG engine + multi-mode web intelligence** (Pillar 6). **Status: implemented,
+  several real bugs found and fixed this session, but not yet confirmed end-to-end by the user**
+  (last live attempt was mid-debugging when the session paused — Steel Rain instant-search,
+  the Dumbass Loop permission dance, and the direct override phrase all still need a clean
+  real-browser pass next session). Backend: `DocumentSection` gained `embedding: Option<Vec<f32>>`;
+  `add_manual_chunks`/`search_similar_chunks`/`delete_manual` (brute-force pre-normalized cosine
+  similarity, `#[query]`, no ANN indexing needed at this scale) per the original plan. Proxy:
+  `OPENROUTER_EMBEDDING_MODEL` (`openai/text-embedding-3-small`, 512 dims), `/embed`,
+  `/chunk-and-embed`, `/web-search` (Tavily — fixed endpoint + plain query string only, closing the
+  SSRF risk flagged when this pillar was first specified), `/respond` context injection with the
+  citation-tag format and the conditional Dumbass-Loop instruction block. Frontend: Knowledge
+  Manager (upload, per-manual delete, RAG pipeline in `#askSkippy`, `pendingWebSearchQuery` for the
+  permission dance, direct override phrases). `list_sections_by_manual`/`delete_manual_section`
+  (Phase 5.4) needed no changes — `manual_name` isn't the primary key, so "delete by manual" is
+  just `delete_manual` now, one atomic call. Knowledge base stays global across workspaces
+  (Pillar 6's "global, not siloed" note).
+  **Bugs found and fixed during this session's testing (roughly in order hit):**
+  - **Upload payload size**: `express.json()`'s 100kb default limit rejected any real document.
+    Reworked the upload path to multipart (`multer`, memory storage, 20MB limit) instead of
+    JSON-encoded text, which also enabled real binary format support: `.txt`/`.md`/`.pdf` (via
+    `pdf-parse`) /`.docx` (via `mammoth`) — legacy binary `.doc` isn't supported. multer 1.x was
+    flagged by npm as having known vulnerabilities patched in 2.x; used 2.x instead.
+  - **Upload auto-dumped full document content on screen**: `#uploadManualFile` ended with an
+    unconditional `#refreshSections()`, which rendered every uploaded chunk's full text immediately
+    — surfaced when a real (sensitive) uploaded document appeared on-screen unprompted. Fixed by
+    dropping that auto-refresh (upload now only ever shows a status message) and gating the
+    section list behind an explicit `manualBrowserOpen` flag — "Open"/"Close" buttons now control
+    visibility deliberately, matching the existing "select a manual, then open it" mental model
+    rather than disclosing content as a side effect.
+  - **`SIMILARITY_THRESHOLD = 0.75` was far too strict** for `text-embedding-3-small` — real
+    query↔relevant-passage cosine similarities typically land around 0.3–0.6, not 0.75+ (that
+    range is closer to near-duplicate text), so almost every real question registered as a miss
+    regardless of upload success. Lowered to `0.3`.
+  - **Pure embedding similarity is bad at exact-recall** ("does any document literally mention
+    word X") — vague questions don't share vocabulary with the source text. Added a second,
+    independent retrieval path: client-side crude stemming (`extractKeywordStems`, strips
+    -ing/-ed/-es/-s, excludes generic words like "manual"/"document" so they stop acting as
+    required magic words) feeding a new backend `search_manuals_by_keyword` query that does a
+    literal case-insensitive substring scan across `manual_name`/`title`/`content`, capped at 50
+    results. Results from both paths are merged (deduped by id) and capped at `TOP_K` before
+    reaching the LLM prompt. **First attempt at this was wrong**: tried approximating "scan
+    everything" by asking `search_similar_chunks` for a huge `top_k` (50, then 1000) and filtering
+    client-side — broke down once a real manual (500+ pages, 1000+ chunks easily; the corpus is
+    global across every uploaded manual, not just one) exceeded that count, and would have meant
+    shipping huge embeddings-included payloads over the wire regardless. The dedicated server-side
+    keyword method scales correctly since it's a cheap O(n) string scan with no embedding math and
+    only ships back the (typically small) set of actual hits.
+  - **A RAG search failure (e.g. clock drift) was silently swallowed**, leaving the model with zero
+    context *and* no `ragMiss` signal — so it improvised its own "I'm just a language model, I
+    can't read documents" disclaimer instead of following the actual mock-and-ask-permission /
+    Steel Rain protocol. Now any retrieval failure is treated the same as a genuine miss.
+  - **System prompt hardened against fabricating cited facts**: even with real `ragContext`
+    present, the model sometimes invented inconsistent specific numbers (e.g. three different
+    dollar thresholds across turns) while still appending a `[ManualName]` citation tag. Added an
+    explicit instruction to only state facts that actually appear in the excerpts, admit when they
+    don't (in character), and never tag a citation unless genuinely drawing from it.
+  - **Proxy could crash entirely on a client disconnect mid-request**: a dropped connection could
+    make Node's stream-destroy machinery emit an unhandled `'error'` event on the request object
+    (separate from the `AbortError` the existing try/catch already handled), which is fatal by
+    default for an EventEmitter — confirmed live, took the whole proxy down with every route
+    failing and no other symptom. `--watch` only restarts on file changes, not crashes, so it
+    stayed dead silently. Fixed with a no-op `req.on('error', () => {})` in both `/respond` and
+    `/speak` (deliberately not a global `uncaughtException` handler — that would suppress Node's
+    default crash behavior process-wide and risk continuing in a corrupted state; the targeted
+    per-route fix addresses the actual confirmed mechanism).
+  - **Some PDFs have no real text layer** (confirmed file-specific, not universal, via two
+    independent extraction libraries against real test files — e.g. some browser "print to PDF"
+    exports rasterize the page instead of embedding selectable text). No code bug; OCR support is
+    a possible future enhancement, deliberately not scheduled — current workaround is copying the
+    text into a `.txt` file instead.
+  - **Recurring PocketIC clock drift** required multiple `--clean` restarts this session (see
+    [[feedback-sandbox-replica-lifecycle]]); likely WSL2 VM clock drift after host sleep/resume
+    rather than a PocketIC-specific bug — `wsl --shutdown` from PowerShell between sessions may
+    reduce recurrence, untested.
+  **Not yet done**: a clean, uninterrupted live verification pass (upload → RAG hit with citation →
+  Steel Rain instant web search → Dumbass Loop permission dance → direct override), and the
+  CLAUDE.md/memory closing ritual once that's confirmed.
 - **Phase 5.7 — Courier queue** (Pillar 7).
 - **Phase 5.8 — Unified Fuel & Quotas dashboard** (Pillar 8, expanded scope — see Pillar 8 above):
   ICP cycle gauge + OpenRouter balance + ElevenLabs usage via a single `/api/fuel` proxy endpoint,
