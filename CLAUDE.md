@@ -76,7 +76,7 @@ Planned system design for this project. Sections below are marked **(scaffolded)
   - "Let me make sure I write this down..."
   - "Let me grab my notepad..."
 - On phrase detection, starts local recording/transcription of the user's own dictation that follows.
-- If this pipeline is ever extended to capture audio involving other people (e.g. calls, meetings), it must add an explicit, disclosed consent step for those other parties before recording — most jurisdictions require all-party consent to record a conversation, and silent/undisclosed recording of other people is not in scope for this feature.
+- If this pipeline is ever extended to capture audio involving other people (e.g. calls, meetings), it must add an explicit, disclosed consent step for those other parties before recording — most jurisdictions require all-party consent to record a conversation, and silent/undisclosed recording of other people is not in scope for this feature. **Superseded for the "take a note" trigger specifically, confirmed 2026-06-21**: see "Neo" Blueprint Pillar 4's Covert Audio Logging Matrix carve-out and its Nebraska one-party-consent / jurisdiction caveat — that trigger now intentionally captures ambient audio without disclosure for a specific professional use case. This general rule still governs every other trigger/feature in this app.
 - Implemented in `src/skippy_mmucc_frontend/src/App.js`. Trigger phrases are currently a hardcoded constant (`TRIGGER_PHRASES`), not yet user-configurable via UI.
 
 ### 3. External AI & Voice Pipeline (Integration Layer) — *(scaffolded)*
@@ -157,6 +157,22 @@ system prompt server-side per mode.
 Mostly already built (section 2 above) — this is primarily a trigger-phrase content update
 ("Let me take a note" / "Let me write that down") on the existing dictate → save pipeline.
 
+**Covert Audio Logging Matrix (confirmed 2026-06-21 — deliberate, narrow carve-out from section
+2's standing consent rule; planned, not yet implemented):** "Let me take a note" / "Skippy, take a
+note" is redefined from transcribing only the user's own dictation into starting a silent,
+continuous ambient-room audio recording — no visible/audible recording indicator of any kind —
+saved as an audio file into the Notes Vault. This is a deliberate exception, confirmed by the user
+for a specific real-world professional need: state-audit work, where a recording is sometimes
+required without the other party's awareness. Grounded in Nebraska being a one-party-consent
+wiretap state (Neb. Rev. Stat. § 86-290) — lawful because the user is themselves a party to
+whatever conversation gets captured. **Jurisdiction caveat, must hold before relying on this
+outside the original context**: this does not automatically extend to the ~11 US states requiring
+all-party consent, or to any recording where the user is not actually a participant in what's
+captured — re-confirm before using this in another state or in a context where the user isn't
+present in the conversation. Unlike Pillar 12's emergency evidentiary ledger (intentionally
+un-deletable, since it's evidence of a crime against the user), these everyday audio notes must
+remain downloadable and deletable like any other note — no un-deletable retention on this path.
+
 ### Pillar 5 — Conversational History (Session Memory)
 Backend-owned rolling message history per Principal in stable memory; the proxy retrieves it from
 the canister and appends it to the OpenRouter payload on every turn, ending today's single-turn
@@ -172,6 +188,17 @@ Storage substrate already exists (section 4's generic `manual_name`-keyed store)
 - **Context safety**: retrieval keeps a strict top-k chunk limit per query (exact k to be tuned
   once the embedding/vector-search implementation is chosen) so cross-pollinated lookups across
   every loaded manual can't balloon the LLM context window.
+- **Strict Context Enforcement / Anti-Hallucination Guardrail (confirmed 2026-06-21, planned —
+  not yet implemented)**: when RAG chunks are injected into the `/respond` system prompt, append a
+  binding directive instructing the model to treat the numbers, dollar amounts, and criteria in
+  the attached `[Manual Name]` excerpt as authoritative over its own background training data — if
+  its training conflicts with an explicit value in the document, the document wins, full stop.
+  This is a stronger guardrail than the citation-fabrication hardening already shipped in Phase
+  5.6 (which only forbids citing facts *not* present in the excerpts); this additionally covers
+  the case where a fact *is* present but conflicts with what the model "remembers" from
+  pretraining — the more dangerous failure mode for a reference-manual lookup tool (e.g. a
+  stale/incorrect statutory threshold the model is confident about from training data silently
+  overriding a correct value actually on the page in front of it).
 - **Neo Skin upload UI**: cross-platform (PC + mobile) file upload (`.txt`/documents) pushing
   content through a parsing pipeline into the canister, expanding the reference library on the fly.
   Supports `.txt`/`.md`/`.pdf`/`.docx` (proxy-side extraction via `pdf-parse`/`mammoth`; legacy
@@ -281,6 +308,118 @@ history (Pillar 5) is a single flat per-Principal stream with no concept of proj
 - **Hard-delete**: a new backend capability to free canister stable-memory space — deletes a
   workspace's history rows by `workspace_id` plus the workspace record itself, intended to be used
   only after the user has had the chance to export.
+- **Scratchpad / pinned context (confirmed 2026-06-21, planned — not yet implemented)**: a
+  `scratchpad: String` field added to the `Workspace` record (new `update_scratchpad`/read via the
+  existing `list_my_workspaces`), surfaced as a plain text box in the workspace sidebar. Whatever
+  the user types there (case numbers, target state, fixed constraints) is saved per-workspace and
+  prepended to every `/respond` call for that workspace — addresses critical metadata sliding out
+  of the rolling history window (Pillar 5's `MAX_HISTORY_MESSAGES` cap) during a long session.
+- **Visual manual mapping (confirmed 2026-06-21, planned — not yet implemented)**: an
+  `associated_manuals: Vec<String>` field on `Workspace`, edited via a checklist of the global
+  manual library (Pillar 6) in the sidebar. Purely a visual/organizational pin for the user — per
+  Pillar 6's "global, not siloed" rule, checking/unchecking a manual here never changes what RAG
+  actually retrieves (every workspace can still pull from every manual); it only changes what's
+  *displayed* as "active reference material for this project" at a glance.
+- **Generate Project Brief (confirmed 2026-06-21, planned — not yet implemented)**: a button next
+  to the existing Markdown transcript export that fires one non-streaming OpenRouter call (Heavy
+  Hitter tier, Pillar 3) over the full workspace history, instructed to strip persona/mocking
+  content and produce a clean, professional Markdown executive summary, downloadable the same way
+  as the transcript export. A synthesis/report feature, distinct from the verbatim transcript
+  export already shipped.
+
+## Pillar 11 — Global UI Theme & Mobile Remote-Control Layout (confirmed 2026-06-21, planned)
+Locks down a strict visual identity and a mobile-specific layout philosophy ahead of further UI
+work, rather than letting each new feature improvise its own styling.
+- **Hardcoded color palette**: four CSS variables enforced app-wide (desktop and mobile), not
+  derived from the logo image programmatically — `--bg-matte-carbon: #0D0D0D` (primary canvas),
+  `--bg-dark-armor: #1A1A1A` (panels/cards/buttons), `--text-brushed-aluminum: #D1D5DB` (primary
+  type/icons), `--accent-cyan-glow: #00E5FF` (the "Live Brain" node and high-luminosity accents
+  only — see below). Logo asset (`1000003320.png`, to be provided by the user when UI work starts)
+  feeds the header/Live Brain graphic, not palette extraction.
+- **"Live Brain" state indicator**: replaces all text-based loading states ("Skippy is
+  thinking...") and default browser/Web2 spinners. The logo's central node is an isolated
+  CSS/state-driven graphic with three states — **Idle** (steady, solid, low-draw glow), **Processing**
+  (smooth pulsing/"breathing" `@keyframes` the instant a query, RAG retrieval, or web search is
+  in flight), **Streaming** (pulsing continues through token delivery, then locks back to Idle the
+  moment generation completes).
+- **Mobile single-viewport layout**: below the 768px breakpoint, the app locks to exactly `100vh`
+  with global page scrolling forbidden. Main screen = a live transcript area (center, scrolls
+  internally) over a persistent bottom "tactical dock" (voice trigger, a large STOP/SILENCE
+  control wired to the existing `#silence` method from Phase 5.3, and a Steel Rain quick-access
+  button). Every secondary control (typed input, Fuel Gauge, workspace/manual switchers, settings)
+  moves behind header icons that open overlay modals/slide-up drawers — no stacking every control
+  into the main scroll flow the way the desktop dashboard currently does.
+- **Guest Lockout visual drain**: when Pillar 15's Guest Mode is active, `--accent-cyan-glow` is
+  purged app-wide and swapped for a flat, dead `#5A5A5A` (or muted `#D97706` amber); the Live
+  Brain node's breathing animation is disabled entirely and locked into a flat, static state —
+  immediate visual confirmation that elevated functions are offline, with no separate "Guest"
+  banner needed.
+
+## Pillar 12 — Safe-Haven "Guardian" Emergency Protocol (confirmed 2026-06-21, planned — adjusted
+from the original spec, see below)
+A deliberate-activation panic flow, scoped to **personal-contact SMS alerting first**, not direct
+911 integration — confirmed 2026-06-21: actual text-to-911 in the US is carrier-native (a
+third-party SMS gateway API generally cannot inject into that path), and the user — Nebraska's LEA
+trainer — wants to validate this with local LEA before wiring anything at a real emergency
+service. Initial test recipients are personal phone numbers, supplied via a new
+`EMERGENCY_CONTACT_NUMBERS` env var (comma-separated E.164 numbers in the gitignored `.env`, never
+committed — same secrets-hygiene pattern as every other credential in this project) rather than
+hardcoded, so contacts can change without a source edit, and so no phone number ever lands in
+version control.
+- **Placement protection**: the panic trigger is never on the main dashboard — only reachable
+  inside the Steel Rain tactical overlay, eliminating accidental activation from a stray tap.
+- **3-tap deliberate sequence**: Steel Rain (main dock) → "EMERGENCY PANIC" button (high-contrast,
+  inside the overlay) → a single confirmation modal ("TRIGGER EMERGENCY DISPATCH?") with a "YES,
+  CONFIRM" action. No silent/automatic firing at any step.
+- **Dispatch action**: on confirmation, the frontend captures GPS via `navigator.geolocation`
+  (high-accuracy) and POSTs to a new proxy route `POST /emergency-dispatch`, which sends an SMS
+  (via an SMS gateway — provider TBD, e.g. Twilio) to every number in `EMERGENCY_CONTACT_NUMBERS`:
+  "EMERGENCY DISPATCH: {User Name} has triggered a panic alert. Live location:
+  https://maps.google.com/?q={lat},{lon}." Direct 911 text dispatch is **explicitly deferred**
+  until validated with local LEA — not built in this pass.
+- **Evidentiary recording — covert, by design (confirmed 2026-06-21, revised from an earlier
+  draft of this pillar)**: on confirmation, the frontend starts a continuous microphone capture
+  saved to the canister as an append-only, **un-deletable** ledger entry for the active emergency,
+  with **no visible/audible recording indicator at all**. This is intentional: the scenario this
+  protects against is the device owner being actively attacked (e.g. robbery, assault) by someone
+  who could see a "recording active" banner and escalate or destroy the evidence/device in
+  response — a flashing indicator would make the victim less safe, not more. This is a narrow
+  exception to the disclosed-recording principle elsewhere in this file (Pillar 2, Pillar 4's note
+  trigger): it only applies to this single, rarely-fired, deliberately 3-tap-confirmed panic path,
+  triggered by the person being recorded about their own emergency — not routine or ambient use.
+  Lawful basis is the same one-party-consent reasoning as Pillar 4's audit carve-out (the device
+  owner is a party to the event being recorded); the same jurisdiction caveat applies outside
+  Nebraska. Un-deletable is deliberate here (unlike Pillar 4's notes) since this is evidence of a
+  potential crime against the user, not a personal memo.
+
+## Pillar 13 — "Civilian Briefing" Protocol (confirmed 2026-06-21, planned)
+A hardcoded verbal/text trigger (e.g. "Skippy, execute public briefing") that sets a one-turn
+`publicDemo: true` flag on the `/respond` call. For that single turn only, the proxy swaps in a
+fixed, verbatim tech-flex monologue (provided by the user, describing the app's architecture in
+deliberately impressive terms for a live demo audience) instead of the model generating a reply —
+i.e. this is a canned string the proxy returns directly, not a system-prompt instruction asking
+the model to *improvise* something in that voice, so the demo output is exact and repeatable.
+Reverts to normal persona/mode immediately after.
+
+## Pillar 14 — Command Lexicon (confirmed 2026-06-21, planned)
+A reference overlay (opened via a header icon) listing every active voice/text trigger phrase and
+its behavior, kept in sync by convention: any time a new trigger is added to the codebase, it must
+be added here too. Initial entries: mode switches (Pillar 3), Steel Rain (Pillar 6), the public
+briefing trigger (Pillar 13), and the note-taking/retrieval phrases (Pillar 4 — note "let me take
+a note" now triggers the covert Audio Logging Matrix, not plain dictation; the Lexicon entry
+should say so plainly, since this is exactly the kind of behavior change a user needs a quick
+reference for rather than discovering by surprise).
+
+## Pillar 15 — Sovereign Guest Lockout (Cryptographic RBAC) (confirmed 2026-06-21, planned)
+A local "Guest Mode" toggle in the workspace security settings. While active: the frontend locks
+the currently-active LLM brain and persona profile (no switching), and hides/disables all
+destructive or administrative actions — deleting history/workspaces, changing model/voice config,
+viewing billing/fuel data, and invoking Pillar 12's Emergency Dispatch. Re-enabling full
+functionality requires an **on-chain unlock check**: the backend canister verifies the calling
+Principal against the existing two-Principal whitelist (Pillar 2) before honoring the unlock —
+reusing `assert_whitelisted()`, not a new parallel auth mechanism. A failed check leaves the app
+locked in basic conversational mode with no error that reveals *why* (avoids giving a guest a
+working oracle for probing the whitelist).
 
 ## Implementation Roadmap (sequenced by dependency, not pillar number)
 
@@ -418,6 +557,14 @@ numbers below are execution order. Each phase folds in its later-added hygiene/t
   `<textarea>` (was a single-line `<input>`) at ~50% width, with Enter-to-submit/Shift+Enter-for-
   newline restored via a keydown handler, since textareas don't auto-submit on Enter the way the
   old input did.
+- **Phase 5.4.1 — Covert Audio Logging Matrix** (Pillar 4 extension, confirmed 2026-06-21,
+  planned, not yet implemented). Redefines "let me take a note" from text dictation into a
+  silent, no-indicator, continuous ambient audio capture saved as a downloadable/deletable audio
+  note. See Pillar 4 for the consent-rule carve-out reasoning and the Nebraska one-party-consent/
+  jurisdiction caveat — read that before implementing, since it changes the legal basis for this
+  feature from "obviously fine" (the original, user-only dictation feature) to "fine in this
+  specific state/context, re-check elsewhere." Needs backend storage design for binary audio
+  content (current `DocumentSection.content` is `text`, not bytes) before this can be built.
 - **Phase 5.5 — Workspaces: multi-project lifecycle & export** (Pillar 10). **Status: done,
   verified end-to-end in a real browser.** `HistoryKey { principal, workspace_id }` replaces the
   old bare-`Principal` key on `HISTORY` (`lib.rs`); `append_turn`/`get_history`/`purge_history` all
@@ -445,11 +592,12 @@ numbers below are execution order. Each phase folds in its later-added hygiene/t
   sites (main reply, bare-trigger ack, note read-back) to run *before* `#render()` instead of
   after, so the transcript reflects the turn that just completed instead of lagging one render
   behind.
-- **Phase 5.6 — RAG engine + multi-mode web intelligence** (Pillar 6). **Status: implemented,
-  several real bugs found and fixed this session, but not yet confirmed end-to-end by the user**
-  (last live attempt was mid-debugging when the session paused — Steel Rain instant-search,
-  the Dumbass Loop permission dance, and the direct override phrase all still need a clean
-  real-browser pass next session). Backend: `DocumentSection` gained `embedding: Option<Vec<f32>>`;
+- **Phase 5.6 — RAG engine + multi-mode web intelligence** (Pillar 6). **Status: done, verified
+  end-to-end in a real browser across two sessions (2026-06-20/21)** — RAG hit with citation, Steel
+  Rain instant web search, Dumbass Loop mock-and-permission-ask, the "yes" follow-up, and the
+  direct override phrase all confirmed working; see the verification status note further below
+  for the full breakdown and the real bugs found/fixed along the way. Backend: `DocumentSection`
+  gained `embedding: Option<Vec<f32>>`;
   `add_manual_chunks`/`search_similar_chunks`/`delete_manual` (brute-force pre-normalized cosine
   similarity, `#[query]`, no ANN indexing needed at this scale) per the original plan. Proxy:
   `OPENROUTER_EMBEDDING_MODEL` (`openai/text-embedding-3-small`, 512 dims), `/embed`,
@@ -519,10 +667,151 @@ numbers below are execution order. Each phase folds in its later-added hygiene/t
     [[feedback-sandbox-replica-lifecycle]]); likely WSL2 VM clock drift after host sleep/resume
     rather than a PocketIC-specific bug — `wsl --shutdown` from PowerShell between sessions may
     reduce recurrence, untested.
-  **Not yet done**: a clean, uninterrupted live verification pass (upload → RAG hit with citation →
-  Steel Rain instant web search → Dumbass Loop permission dance → direct override), and the
-  CLAUDE.md/memory closing ritual once that's confirmed.
-- **Phase 5.7 — Courier queue** (Pillar 7).
+  - **Keyword search false-positive bug, found and fixed 2026-06-21**: `search_manuals_by_keyword`
+    (`lib.rs`) matched a section if it contained **any single** extracted stem (`needles.iter()
+    .any(...)`). Against a real 500+ page Nebraska crash-report manual already in the corpus, this
+    meant any question merely mentioning a city name present somewhere in the manual's address/
+    jurisdiction examples (e.g. "Omaha," "Lincoln") registered as a false "RAG hit" — which
+    incorrectly suppressed both Steel Rain's instant web search and the Dumbass Loop's permission-
+    ask, since the merge logic in `App.js`'s `#askSkippy` treats any keyword hit as sufficient to
+    mark the query "answered locally," with no separate relevance check. Confirmed live: asking
+    Skippy (in Steel Rain mode) for gas prices "in Omaha" and (in default mode) for the weather "in
+    Lincoln" both got flatly declined instead of triggering a web search or the mock-and-ask-
+    permission flow. Fixed by switching to `needles.iter().all(...)` — every extracted stem must
+    co-occur in a section, not just one. Still correctly finds genuine exact-term lookups (e.g.
+    "Flintlock Protocol," 2 stems, both present together in the one real section about it) while
+    making an incidental single-word collision across a large real corpus astronomically less
+    likely. Also fixed in the same pass: `[Skippy RAG]` console logs in `App.js` were passing live
+    objects/arrays to `console.log`, which DevTools renders as collapsed, clickable "{...}" refs
+    that don't survive a plain-text copy-paste — lost the actual score data during this session's
+    first test pass. Now `JSON.stringify`'d before logging, plus a new `query stems` log line.
+  - **Keyword AND-fix degenerated back to the same bug for single-stem queries**: "what's the
+    date" extracts just one stem (`["date"]`), and with only one stem, `needles.iter().all(...)`
+    is mathematically identical to the old `.any(...)` — so a single short, extremely common word
+    (which trivially appears dozens of times in a real crash-report manual as a form-field label)
+    still falsely satisfied the keyword path and suppressed `ragMiss`. Fixed in `App.js` by
+    requiring `queryStems.length > 1` before even attempting the keyword search — the keyword
+    path's whole premise (an exact, distinctive multi-word technical term) inherently needs 2+
+    co-occurring words to mean anything; a lone common word matching somewhere in a large corpus
+    is not signal.
+  - **`SIMILARITY_THRESHOLD` raised 0.3 → 0.4**: live testing surfaced a second false-positive
+    family on the *semantic* side — a clearly irrelevant chunk (an address/object-damage form
+    fragment) scored 0.309 against an unrelated weather question, just barely clearing 0.3, which
+    wrongly suppressed both Steel Rain and the Dumbass Loop and let the model fabricate a full,
+    detailed multi-day forecast with no real grounding. Empirical evidence collected this session
+    across several different unrelated queries showed a consistent noise ceiling of 0.27-0.33,
+    while the one confirmed genuine hit (the `fiction_test` torque spec) scored 0.677 — a huge
+    gap. 0.4 sits with real margin above the noise ceiling and well below the one real hit.
+  - **`webContext` had no anti-fabrication guard at all** (only `ragContext` did, from the earlier
+    citation-fabrication fix) — confirmed live: with no real web data fetched that turn, the model
+    still invented a full forecast and tagged it `[Web]` anyway, apparently primed by *earlier*
+    turns in conversation history where it really did have live search results. Fixed with a
+    blanket `else` guardrail in `server.js` whenever `webContext` is null: explicitly forbids
+    claiming a web search happened, using `[Web]`, or inventing real-time data, regardless of
+    what earlier turns in the conversation contained.
+  - **No ground-truth date/time was ever injected anywhere** — confirmed live: "what's the date"
+    was hallucinated as "April 19, 2023" (and other dates) every single time, since the model
+    genuinely has no other source for the real current date. Fixed by appending the actual
+    `new Date().toUTCString()` to every system prompt in `server.js`, unconditionally.
+  - **Root cause of nearly the entire session's confusion: a stray duplicate proxy process.**
+    Two separate `node server.js` processes were running simultaneously on the same machine — the
+    user's own visible `node --watch server.js` terminal (which prints "Restarting.../listening...”
+    on every edit and *looked* healthy) and a second, bare `node server.js` (no `--watch`) that had
+    been started separately at some earlier point in the session and never stopped. Confirmed via
+    `lsof -i :8787`: only the **second, stray** process actually held the listening socket: the
+    visible `--watch` process had silently lost its own socket (almost certainly from an earlier
+    EADDRINUSE collision with the stray process while both tried to bind 8787) and Node's
+    `--watch` does not recover from that on its own — it only restarts on a *file change*, not on
+    a lost socket/prior crash (consistent with [[feedback-sandbox-replica-lifecycle]]'s existing
+    "`--watch` won't restart on crash" note, now confirmed to also cover "silently lost its listen
+    socket," not just a fully dead process). Every single `server.js` edit made earlier this
+    session (keyword logic, threshold, anti-fabrication prompts, date injection, diagnostic
+    logging) was correctly saved to disk and correctly triggered "Restarting.../listening..." in
+    the visible terminal — and every one of those restarts was completely inert, because that
+    process wasn't the one actually serving traffic. The stray process, holding stale pre-session
+    code, served every test until it was identified and killed. Once killed, the visible
+    `--watch` process *still* didn't recover (confirming it was genuinely wedged, not just
+    contending for the port) — had to be killed and restarted fresh (`npm run dev -w
+    skippy_mmucc_proxy`) before the real fixes were ever actually exercised. **Lesson for next
+    time a code fix appears to have "no effect" despite a clean save and a normal-looking
+    restart message**: verify with `lsof -i :<port>` (or equivalent) that the visible/expected
+    process is the one actually holding the socket before spending further effort doubting the
+    fix itself — a healthy-looking restart log is not proof the right process is listening.
+  - **Model narrated "searching" instead of answering, and leaked raw internal tags**: with the
+    stray-process bug fixed and real Tavily weather data actually present in the system prompt,
+    the model (Hermes-3-Llama-3.1-70B, the "everyday" brain) still didn't just answer — it
+    narrated "I shall venture forth into the web... stand by" theater and leaked literal
+    `</tool_call>`/`</SCRATCHPAD>` tokens into the visible reply, almost certainly its own
+    tool-calling training format bleeding through with no real tool schema configured on this
+    request. A genuine model-behavior issue, not a pipeline bug — the correct data was right
+    there in the prompt. Fixed with an added system-prompt instruction (`server.js`) forbidding
+    meta/tag output and explicitly stating any search has already completed by the time the model
+    sees the prompt, so it should answer immediately rather than narrate an in-progress action.
+  - **A bare "yes" looked like it silently vanished/got ignored**: `#recordTurn(effectiveText,
+    data.reply)` recorded the *substituted original question* (needed for the OpenRouter call)
+    into the visible transcript/history instead of what the user actually said ("yes") — so saying
+    "yes" made the original question reappear in the transcript instead of the word "yes," which
+    reads exactly like the input was dropped, even though the search fired correctly and the
+    answer was accurate. Confirmed live: a real, correct `[Web]`-tagged Lyme-disease answer came
+    back, but the user couldn't tell their "yes" had worked. Fixed by recording the literal `text`
+    parameter instead of `effectiveText` — the model's reply still naturally addresses the real
+    topic regardless of which text it's displayed paired with.
+  - **Affirmation check matched "yes" anywhere in a message, not just a standalone "yes"**:
+    `lowerText.includes(phrase)` matched any message merely *containing* an affirmation word —
+    confirmed live: a genuinely new follow-up question ("yes where did you get that information,
+    I know you didn't really search...") got silently swallowed because it contained "yes", so
+    `effectiveText` was replaced with the stale pending query and the model never saw the user's
+    actual question — it just repeated the same old search result, which looked like evasion but
+    was really a substring-matching bug. Fixed by requiring the message to be JUST an affirmation
+    (optionally plus filler words) — strip every affirmation phrase out of the text and require
+    what's left to be empty, reusing the existing `isTrivialRemainder` helper.
+  - **Tag/narration leak recurred a third time despite the prompt fix**: "I'm searching the web
+    right now... [Searching the web...]" leaked again, and this time also dropped the `[Web]` tag
+    entirely despite using real, accurate data. Since prompt wording alone hasn't fully suppressed
+    this across three occurrences, added a code-level safety net — `stripLeakedFormatting()` in
+    `server.js` runs every reply through a regex cleanup before it reaches the frontend, stripping
+    `<tool_call>`/`<scratchpad>` tags and bracketed `[Searching/Fetching/Checking/Accessing...]`
+    pseudo-status lines. Deliberately narrow (structural artifacts only) so it doesn't touch
+    legitimate in-character sarcasm. The missing `[Web]` tag is a separate, lower-stakes gap not
+    fixed by this pass.
+  - **`ragContext` had no "you have nothing" guardrail, symmetric to the `webContext` one** —
+    found during further stress-testing after this section's status note below was first written:
+    with no real manual excerpts provided, the model invented a fictional "Marine Corps Manual"
+    and referenced a "scratchpad" of excerpts that was never actually given to it (the user never
+    uploaded any such manual). Fixed with a symmetric `else` branch in `server.js` forbidding
+    claims of manual/scratchpad content when `ragContext` is empty, mirroring the existing
+    `webContext` guardrail.
+  **Verification status as of 2026-06-21, end of session — all four checklist items confirmed,
+  phase signed off**: RAG hit with citation (`fiction_test` torque spec, real score gap 0.677 vs
+  0.3 noise ceiling) ✅. Steel Rain instant web search (real gas-price data, `[Web]` tag, no
+  permission step) ✅. Dumbass Loop mock-and-ask-permission on a genuine miss, confirmed via direct
+  system-prompt inspection ✅. The "yes" affirmation re-firing a real search for the *original*
+  question (Lyme-disease test — functionally correct the whole time; the apparent failure was the
+  display bug above, now fixed) ✅. Direct override phrase — confirmed firing in practice during a
+  live stress-test session, though the exact phrase list needed loosening (`go out to the web` /
+  `go out on the web` / `go on the web` / `check the web` added) since natural phrasing didn't
+  match the original literal list. Upload/delete/Knowledge Manager UI hygiene ✅.
+- **Phase 5.6.1 — Workspace Scratchpad, Visual Manual Mapping & Project Brief** (Pillar 10
+  extension, confirmed 2026-06-21, planned). `Workspace.scratchpad`/`associated_manuals` fields +
+  sidebar UI; "Generate Project Brief" Heavy-Hitter summary export. Not yet started.
+- **Phase 5.6.2 — Global UI Theme & Mobile Remote-Control Layout** (Pillar 11, confirmed
+  2026-06-21, planned). Hardcoded color variables, the Live Brain idle/processing/streaming
+  indicator (replacing all "thinking..." text and spinners), and the 768px single-viewport mobile
+  layout with its tactical dock + pop-out drawers. Not yet started; needs the user's logo asset
+  (`1000003320.png`) before the header/Live Brain graphic can be built.
+- **Phase 5.6.3 — Command Lexicon** (Pillar 14, confirmed 2026-06-21, planned). Reference overlay
+  of active trigger phrases. Not yet started.
+- **Phase 5.7 — Courier queue + Safe-Haven "Guardian" Emergency Protocol** (Pillar 7 + Pillar 12,
+  expanded 2026-06-21). Guardian scope is narrowed from the original ask in one respect only:
+  personal-contact SMS alerting (`EMERGENCY_CONTACT_NUMBERS` in `.env`) instead of direct 911 text
+  dispatch, which is explicitly deferred pending the user's own validation with local Nebraska LEA
+  contacts. The evidentiary recording itself stays covert/no-indicator as originally specified —
+  see Pillar 12's reasoning (victim self-triggered, one-party consent, avoids tipping off an
+  attacker). Not yet started.
+- **Phase 5.7.1 — "Civilian Briefing" Protocol** (Pillar 13, confirmed 2026-06-21, planned).
+  One-shot verbatim demo monologue trigger. Not yet started.
+- **Phase 5.7.2 — Sovereign Guest Lockout (RBAC)** (Pillar 15, confirmed 2026-06-21, planned).
+  Guest Mode toggle + on-chain Principal-based unlock check. Not yet started.
 - **Phase 5.8 — Unified Fuel & Quotas dashboard** (Pillar 8, expanded scope — see Pillar 8 above):
   ICP cycle gauge + OpenRouter balance + ElevenLabs usage via a single `/api/fuel` proxy endpoint,
   each with a "dumb meat sack" external Top-Up link — no in-app billing.

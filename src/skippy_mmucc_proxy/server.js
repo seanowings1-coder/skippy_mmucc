@@ -216,10 +216,35 @@ async function tavilySearch(query) {
     throw new Error(`Tavily error: ${response.status} ${detail}`);
   }
   const data = await response.json();
+  // Logged so the actual Tavily response is independently verifiable in the
+  // proxy terminal — the model has no way to truthfully self-report what a
+  // past webContext actually contained (it's injected into that turn's
+  // system prompt only, never persisted into the conversation history), so a
+  // follow-up "where did you get that" question gets answered from nothing
+  // but the model's own confabulation. This is the actual ground truth.
+  console.log(`[Skippy /web-search] query: "${query}"`, JSON.stringify(data));
   return {
     answer: data.answer || '',
     results: (data.results || []).map(({ title, url, content }) => ({ title, url, content })),
   };
+}
+
+// Defense-in-depth, added 2026-06-21: prompt instructions telling the model
+// not to narrate "searching..." or leak raw tool-call/scratchpad tags were
+// confirmed live, three separate times, to not fully suppress the behavior
+// (Hermes-3-Llama-3.1-70B's own tool-calling training format bleeding
+// through). Rather than keep re-wording the prompt a fourth time, strip the
+// mechanical leak patterns server-side as a safety net — this only targets
+// clearly-structural artifacts (bracketed pseudo-status lines, raw XML-ish
+// tags), not general roleplay/sarcasm, so it shouldn't touch legitimate
+// in-character text.
+function stripLeakedFormatting(text) {
+  return text
+    .replace(/<\/?(?:tool_call|scratchpad)[^>]*>/gi, '')
+    .replace(/\[(?:searching|fetching|checking|accessing)[^\]]*\]/gi, '')
+    .replace(/[ \t]{2,}/g, ' ')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
 }
 
 const app = express();
@@ -255,6 +280,25 @@ app.post('/respond', requireSession, async (req, res) => {
   if (req.skippySession.name) {
     systemPrompt = `You are speaking with ${req.skippySession.name}. ${systemPrompt}`;
   }
+  // Without this, any "what's the date/today" question is hallucinated by
+  // construction — the model has no other source of ground truth for the
+  // real current date/time. Confirmed live 2026-06-21: asked "what's the
+  // date," got back a confidently wrong "April 19, 2023."
+  systemPrompt += `\n\nThe current real-world date and time is ${new Date().toUTCString()}.`;
+  // Closes a confirmed model-behavior bug, 2026-06-21: given real Tavily
+  // weather data in the webContext block and a direct question, the model
+  // (Hermes-3-Llama-3.1-70B, the "everyday" brain) narrated "I shall venture
+  // forth into the web... stand by" theater instead of just answering with
+  // the data already in front of it — and separately leaked raw internal
+  // formatting tokens (`</tool_call>`, `</SCRATCHPAD>`) into the visible
+  // reply, almost certainly from its own tool-calling training format
+  // bleeding through with no actual tool schema configured on this request.
+  systemPrompt +=
+    `\n\nRespond only in plain conversational text — never output tags like "<tool_call>", ` +
+    `"<scratchpad>", or any other internal/meta formatting. Never narrate that you are about to ` +
+    `search, are currently searching, or will get back to the user later — any search has already ` +
+    `completed before you see this prompt, so if relevant results appear above, answer using them ` +
+    `immediately and directly, right now, in this reply.`;
 
   // Pillar 6 — the frontend already decided what's relevant (ran the
   // similarity search/threshold check itself, see CLAUDE.md), so this just
@@ -276,13 +320,44 @@ app.post('/respond', requireSession, async (req, res) => {
       `contain the specific answer, say so explicitly (still in character) rather than guessing or ` +
       `inventing a plausible-sounding number. Never use a bracketed citation tag unless you're ` +
       `actually drawing from that excerpt for this answer:\n${block}`;
+  } else {
+    // Closes the same fabrication gap the webContext `else` branch below
+    // already covers, but for manuals — confirmed live 2026-06-21: with no
+    // real ragContext this turn, the model invented a fictional "Marine
+    // Corps Manual" and referenced a "scratchpad" of excerpts that was never
+    // actually provided. No real manual by that name was ever uploaded.
+    systemPrompt +=
+      `\n\nYou have NOT been given any knowledge-base/manual excerpts this turn. Do not claim to ` +
+      `be quoting or referencing any manual, document, or "scratchpad" of excerpts, and do not ` +
+      `invent a manual name, under any circumstances — even if earlier turns in this conversation ` +
+      `did include real excerpts. If asked something a manual would normally cover, say in ` +
+      `character that you don't have it, rather than inventing a source.`;
   }
 
   if (webContext) {
     const block = [webContext.answer, ...(webContext.results || []).map((r) => `${r.title} (${r.url}): ${r.content}`)]
       .filter(Boolean)
       .join('\n\n');
-    systemPrompt += `\n\nLive web search results — cite with a "[Web]" tag when you use these:\n${block}`;
+    systemPrompt +=
+      `\n\nLive web search results — cite with a "[Web]" tag when you use these. Only state facts, ` +
+      `numbers, or specifics that actually appear in these results — if they don't contain the ` +
+      `specific answer (e.g. results about the wrong location, or no real answer at all), say so ` +
+      `explicitly (still in character) rather than inventing a plausible-sounding answer. Never use ` +
+      `the "[Web]" tag unless you're actually drawing from these results for this answer:\n${block}`;
+  } else {
+    // Closes a confirmed fabrication path, 2026-06-21: with no real webContext
+    // this turn, the model had no instruction either permitting or forbidding
+    // a "[Web]" tag — and, primed by earlier turns where it really did have
+    // live search results, it invented an entire multi-day weather forecast
+    // and tagged it "[Web]" anyway. This is a blanket guardrail independent
+    // of ragContext/ragMiss, since the failure here wasn't about manual
+    // content at all.
+    systemPrompt +=
+      `\n\nYou have NOT been given any live web search results this turn. Do not claim to have ` +
+      `searched the web, do not use a "[Web]" citation tag, and do not invent specific real-time ` +
+      `data (weather, prices, scores, news, etc.) under any circumstances — even if earlier turns ` +
+      `in this conversation did include real web results. If asked for live data you don't actually ` +
+      `have right now, say so explicitly, in character.`;
   }
 
   // Dumbass Web Loop (default/professional modes only — Steel Rain/tactical
@@ -294,6 +369,16 @@ app.post('/respond', requireSession, async (req, res) => {
     systemPrompt +=
       '\n\nThe local knowledge base has nothing relevant to this question. Do NOT answer the substantive question yet — mock the user, in character, for not having this in your manuals, then explicitly ask whether they want you to search the web for it. Wait for their answer instead of guessing.';
   }
+
+  // Diagnostic: print exactly what's being sent for this turn — added
+  // 2026-06-21 after several rounds of guessing wrongly about why the
+  // Dumbass Loop / no-web-data guardrails weren't being followed. This
+  // removes the guesswork: prints the literal flags and full system prompt
+  // that reached OpenRouter, so a compliance failure (model ignored a real
+  // instruction) is distinguishable from a code bug (instruction never sent).
+  console.log(
+    `[Skippy /respond] mode=${mode} brain=${brain} ragContext=${ragContext.length} webContext=${!!webContext} ragMiss=${ragMiss}\n--- system prompt ---\n${systemPrompt}\n--- user text ---\n${text}`,
+  );
 
   // Barge-in (App.js's #askSkippy aborts its fetch to /respond the instant a
   // new utterance arrives) only kills the browser-to-proxy connection by
@@ -338,10 +423,11 @@ app.post('/respond', requireSession, async (req, res) => {
     }
 
     const data = await response.json();
-    const reply = data.choices?.[0]?.message?.content;
-    if (!reply) {
+    const rawReply = data.choices?.[0]?.message?.content;
+    if (!rawReply) {
       return res.status(502).json({ error: 'OpenRouter returned no reply.' });
     }
+    const reply = stripLeakedFormatting(rawReply);
 
     // brain/model surfaced for the UI's debug indicator (CLAUDE.md Phase
     // 5.3) — easy to drop once Brain Switching is confirmed working.
@@ -521,4 +607,5 @@ app.use((err, req, res, next) => {
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`Skippy proxy listening on http://0.0.0.0:${PORT}`);
 });
+
 

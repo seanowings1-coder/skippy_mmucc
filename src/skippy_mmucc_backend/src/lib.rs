@@ -431,7 +431,19 @@ fn search_manuals_by_keyword(stems: Vec<String>) -> Vec<DocumentSection> {
                     section.title.to_lowercase(),
                     section.content.to_lowercase()
                 );
-                needles.iter().any(|n| haystack.contains(n.as_str()))
+                // ALL extracted stems must co-occur, not just any single one —
+                // confirmed live 2026-06-21: with OR matching, a single common
+                // word incidentally present in a large real manual (e.g. a city
+                // name turning up in an address/jurisdiction example) made every
+                // question mentioning it register as a false "hit," which wrongly
+                // suppressed Steel Rain's web search and the Dumbass Loop's
+                // permission-ask (both think local data already answered it).
+                // Requiring every stem to appear together still finds genuine
+                // exact-term lookups (e.g. "Flintlock Protocol" -> both stems
+                // co-occur in the one real section about it) while making an
+                // incidental single-word collision across a 500+ page corpus
+                // astronomically less likely.
+                needles.iter().all(|n| haystack.contains(n.as_str()))
             })
             .map(|entry| entry.value().clone())
             .take(50) // cap the worst case (a very common stem) — TOP_K trims further on the frontend

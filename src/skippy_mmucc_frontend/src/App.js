@@ -74,7 +74,17 @@ const RECENT_NOTES_COUNT = 5;
 // manual got large, and would have meant shipping huge embeddings-included
 // payloads over the wire for no benefit.
 const TOP_K = 4;
-const SIMILARITY_THRESHOLD = 0.3;
+// Raised from 0.3 to 0.4, 2026-06-21: live testing against a real ~500-page
+// manual showed every genuinely irrelevant chunk scoring 0.27-0.33 across
+// several unrelated questions (a noise ceiling, not a fluke), while the one
+// confirmed real hit scored 0.677 — a huge gap. At 0.3, a borderline-noise
+// match (e.g. an address/object-damage form fragment scoring 0.309 against a
+// weather question) was wrongly treated as a RAG hit, which suppressed both
+// Steel Rain's web search and the Dumbass Loop's permission-ask, leaving the
+// model free to fabricate an entire answer with no real grounding or
+// instruction either way. 0.4 sits with margin above the observed noise
+// ceiling and well below the one real hit.
+const SIMILARITY_THRESHOLD = 0.4;
 
 // Crude English stemming (strip a trailing -ing/-ed/-es/-s if what's left is
 // still a real-looking word) — not real NLP, just enough so "remembering"/
@@ -103,7 +113,11 @@ function extractKeywordStems(text) {
 // a miss already; this phrase forces it even on a RAG *hit*.
 const WEB_OVERRIDE_PHRASES = [
   'go to the web',
+  'go out to the web',
+  'go out on the web',
+  'go on the web',
   'search the web',
+  'check the web',
   'look that up online',
   'look this up online',
 ];
@@ -845,9 +859,25 @@ class App {
     let effectiveText = text;
 
     const isWebOverride = WEB_OVERRIDE_PHRASES.some((phrase) => lowerText.includes(phrase));
+    // Require the message to be JUST an affirmation (plus filler words), not
+    // merely *contain* one of the words anywhere — confirmed live 2026-06-21:
+    // a genuinely new follow-up question ("yes where did you get that
+    // information...") got silently swallowed and replaced with the stale
+    // pending query just because it happened to contain the word "yes," so
+    // the user's actual question was never even seen by the model. Strip
+    // every affirmation phrase out of the text and require what's left
+    // (after also stripping filler words) to be empty.
+    const hasAffirmationPhrase = WEB_SEARCH_AFFIRMATION_PHRASES.some((phrase) =>
+      lowerText.includes(phrase),
+    );
+    let affirmationRemainder = lowerText;
+    WEB_SEARCH_AFFIRMATION_PHRASES.forEach((phrase) => {
+      affirmationRemainder = affirmationRemainder.split(phrase).join('');
+    });
     const isAffirmation =
-      this.pendingWebSearchQuery &&
-      WEB_SEARCH_AFFIRMATION_PHRASES.some((phrase) => lowerText.includes(phrase));
+      Boolean(this.pendingWebSearchQuery) &&
+      hasAffirmationPhrase &&
+      isTrivialRemainder(affirmationRemainder);
 
     if (isAffirmation) {
       // The user is saying "yes" to the *previous* turn's permission ask —
@@ -880,17 +910,36 @@ class App {
         // search_manuals_by_keyword so it scales to real document sizes —
         // see CLAUDE.md's Phase 5.6 entry on why this isn't done by fetching
         // a huge slice and scanning it here instead).
+        // Require at least 2 stems before even trying the keyword path —
+        // confirmed live 2026-06-21: a single short, common word ("date")
+        // extracted from "what's the date" still matched 15 unrelated
+        // sections in a real ~500-page manual (it appears constantly as a
+        // form-field label), because the backend's all-stems-must-co-occur
+        // fix degenerates to a plain single-word substring match when there's
+        // only one stem — exactly the false-positive failure mode that fix
+        // was meant to close. The keyword path's whole premise (an exact,
+        // distinctive multi-word technical term, e.g. "Flintlock Protocol")
+        // inherently needs 2+ co-occurring words to mean anything; a lone
+        // common word matching somewhere in a large corpus is not signal.
         const [scored, keywordHits] = await Promise.all([
           this.backendActor.search_similar_chunks(embedding, TOP_K),
-          queryStems.length > 0
+          queryStems.length > 1
             ? this.backendActor.search_manuals_by_keyword(queryStems)
             : Promise.resolve([]),
         ]);
+        // Stringified rather than passed as a live object — DevTools collapses
+        // object/array args into clickable "{...}" refs that don't survive a
+        // plain-text copy-paste out of the console, which lost the actual score
+        // data during this session's testing.
         console.log(
           '[Skippy RAG] semantic matches:',
-          scored.map((s) => ({ score: s.score, title: s.section.title })),
+          JSON.stringify(scored.map((s) => ({ score: s.score, title: s.section.title }))),
         );
-        console.log('[Skippy RAG] keyword hits:', keywordHits.map((s) => s.title));
+        console.log(
+          '[Skippy RAG] keyword hits:',
+          JSON.stringify(keywordHits.map((s) => s.title)),
+        );
+        console.log('[Skippy RAG] query stems:', JSON.stringify(queryStems));
 
         const merged = [];
         const seenIds = new Set();
@@ -983,7 +1032,14 @@ class App {
       this.lastBrain = data.brain || '';
       this.lastModel = data.model || '';
       this.statusMessage = '';
-      this.#recordTurn(effectiveText, data.reply);
+      // Record what was actually said ("yes"), not effectiveText (the
+      // substituted original question sent to OpenRouter) — confirmed live
+      // 2026-06-21: recording effectiveText here made a real "yes" silently
+      // vanish from the visible transcript, replaced by the original
+      // question reappearing, which reads exactly like the "yes" was
+      // dropped/ignored even though it worked correctly. The reply already
+      // answers the real topic regardless of which text it's paired with.
+      this.#recordTurn(text, data.reply);
       this.#render();
       this.#speak(data.reply);
     } catch (err) {
