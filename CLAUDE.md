@@ -421,6 +421,52 @@ reusing `assert_whitelisted()`, not a new parallel auth mechanism. A failed chec
 locked in basic conversational mode with no error that reveals *why* (avoids giving a guest a
 working oracle for probing the whitelist).
 
+## Pillar 16 — Dynamic Persona Registry ("Tactical Roster") (confirmed 2026-06-22, implemented)
+A local, multi-entry roster of *other* people who might talk to Skippy during an already-
+authenticated session (e.g. a coworker, the wife, a guest) — Name/Callsign, a Voice Trigger Phrase
+(e.g. "it's Lisa"), and free-text Role/Significance, all configured by the device owner in a
+"Tactical Roster" drawer. Saying or typing a registered trigger phrase hot-swaps who Skippy
+addresses: the Role/Significance text gets folded into the system prompt so Skippy tailors tone
+and framing to that person's actual context.
+
+**Deliberately addressing/framing only — has no permission concept of its own, by design, not
+oversight.** The original ask included a "Permission Level (Sovereign vs. Restricted Space)" field
+intended to gate real access ("preventing coworkers from accessing personal vaults"). Flagged and
+removed before building: a voice trigger phrase is self-declared identity with zero cryptographic
+verification — anyone in the room who says (or has ever overheard) the phrase would get whatever
+permission level that profile carried, including Sovereign, with no passkey/biometric/anything
+backing it. The actual authenticated session never changes when a Roster phrase is heard — it's
+still running under whichever real Internet Identity Principal logged in via Pillar 2's whitelist,
+so a Roster entry structurally cannot gate canister/vault access regardless of what field values it
+carries. Same category of mistake as conflating Pillar 12's `EMERGENCY_CONTACT_NUMBERS` (an SMS
+recipient list) with an access whitelist — a list of names is not a security boundary by itself.
+
+**Confirmed correct design, user's own words (2026-06-22)**: "I will set the permissions ie guest
+mode but this feature should still work. So if I say hey skippy guest mode and walk away, Lisa can
+then say hey skippy it is lisa and skippy will then reference who lisa is BUT be restricted to the
+permissions I left skippy with when I walked away." I.e. Pillar 15's Guest Mode remains the *only*
+real permission boundary, completely independent of and unaffected by which Roster profile (if
+any) is currently active — switching personas never widens or narrows what Guest Mode already
+restricts.
+
+**Implemented, deployed, confirmed working live by the user 2026-06-22 ("the lisa protocol
+works").** No backend/canister changes — purely persona/context, no canister involvement at all.
+Frontend (`App.js`): `rosterProfiles` (array of `{ name, triggerPhrase, role }`, no Permission
+Level field), persisted in `localStorage` (device-local convenience config, not security-sensitive,
+not per-Principal canister data, unlike Pillar 3's existing per-Principal `PersonaProfile` for the
+*authenticated* user's own name/voice — this is a distinct mechanic for people who *aren't* the
+authenticated user). `activeRosterProfile` is in-memory only (resets on refresh — "who's currently
+talking" isn't worth surviving a reload the way Guest Mode's lock is). Trigger matching happens
+early in `#askSkippy`, using the same bare-trigger-vs-has-more-text pattern as every other trigger
+phrase in this app (`isTrivialRemainder`): a bare "it's Lisa" gets a spoken ack only; "it's Lisa,
+what's our ETA?" sets the active profile and falls through to answer the attached question with
+the new framing active. Proxy (`server.js`): `/respond` accepts an optional `rosterContext: {
+name, role }`, prepending a system-prompt line explicitly instructing the model that this changes
+who it's addressing and nothing else — any access/permission restriction already in effect stays
+exactly as it was. Added a "Tactical Roster" category to the Phase 5.6.3 Command Lexicon (can't
+list literal phrases statically since they're user-defined, so the entry explains the mechanism
+instead).
+
 ## Implementation Roadmap (sequenced by dependency, not pillar number)
 
 Tracks actual build order across turns — pillar numbers above are the spec's numbering, phase
@@ -792,27 +838,286 @@ numbers below are execution order. Each phase folds in its later-added hygiene/t
   `go out on the web` / `go on the web` / `check the web` added) since natural phrasing didn't
   match the original literal list. Upload/delete/Knowledge Manager UI hygiene ✅.
 - **Phase 5.6.1 — Workspace Scratchpad, Visual Manual Mapping & Project Brief** (Pillar 10
-  extension, confirmed 2026-06-21, planned). `Workspace.scratchpad`/`associated_manuals` fields +
-  sidebar UI; "Generate Project Brief" Heavy-Hitter summary export. Not yet started.
+  extension). **Status: DONE, fully live-verified 2026-06-21.** Backend: `Workspace` gained
+  `scratchpad`/`associated_manuals`, new `update_scratchpad`/`update_associated_manuals` methods
+  (`assert_workspace_owner`-gated). Proxy: `POST /project-brief` (Heavy Hitter model, persona-free
+  synthesis prompt). Frontend: "Scratchpad & pinned manuals" details section, "Generate Project
+  Brief" button. `#askSkippy` sends the active workspace's scratchpad on every `/respond` call.
+
+  **Bugs found and fixed during live verification:**
+  1. **Candid decode trap, the real first blocker**: `Workspace.scratchpad`/`associated_manuals`
+     were originally plain `String`/`Vec<String>`, not `Option`-wrapped. Confirmed live: Candid
+     only defaults a *missing* field to empty when that field's type is `Option<T>` — a bare
+     `String`/`Vec<T>` absent from already-stored bytes (any workspace created before this change)
+     fails to decode with a hard subtyping-error trap. This made `list_my_workspaces()` trap for
+     every returning user, which a too-broad `try/catch` in the frontend's `#completeLogin`
+     mislabeled as an auth rejection — showing the correct, already-whitelisted Principal on a
+     misleading "Not authorized" screen and burning a long stretch of (incorrectly) re-diagnosing
+     the Internet Identity whitelist instead. Fixed by making both fields `Option<String>`/
+     `Option<Vec<String>>` (`None` = empty) and splitting `#completeLogin`'s try/catch so a
+     failure *after* a successful `login()` no longer reverts `authState` back to `'rejected'`.
+  2. **lit-html doesn't support `${expr}` interpolation inside `<textarea>` elements** — confirmed
+     via a real lit-html dev-mode console warning. The scratchpad textarea's displayed value was
+     never actually reactive; it only ever showed whatever was literally typed. Fixed by switching
+     to a `.value=${...}` property binding instead of interpolating inside the tag body.
+  3. **Hardcoded `MMUCC_V6`/`ANSI_D16` placeholder manual names were always shown as pinnable**,
+     even though nothing had ever been uploaded under those names — misleading in a checklist
+     that's supposed to mean "real reference material for this project." Fixed by adding a new
+     backend query `list_manual_names()` (distinct `manual_name` values that actually have stored
+     content) and fetching it after login (`#refreshManualOptions`) instead of trusting a
+     hardcoded constant. `NOTES_MANUAL` (`SKIPPY_NOTES`) stays always-offered regardless, since
+     it's the built-in notes feature, not an uploaded manual.
+  4. **Manual-type metadata + two-level filter** (added after live feedback, not a bug fix): the
+     user's real workflow is browsing a potentially ~100-manual global library to find a handful
+     (e.g. ".NET code, Rust, SQL, MMUCC V6") to pin per project. Added an optional `category:
+     Option<String>` field to `DocumentSection` (Option-wrapped from day one this time, per bug #1
+     above), set once per upload and applied to every chunk of that document; a new
+     `manual_category_map()` query; and a category dropdown + name-filter text box in the pinned-
+     manuals checklist, AND-combined (pick a category to narrow, or leave it on "All categories"
+     for a plain global name search) — plus a "Currently pinned" chip summary always visible
+     regardless of filter state, and case-insensitive alpha sorting throughout.
+  5. **Upload rename prompt defaulted to the wrong value**: `window.prompt` for the manual name
+     defaulted to `this.selectedManual` (whatever manual happened to be selected in an unrelated
+     dropdown) instead of the actual file being uploaded — so it never matched what the user was
+     ingesting, forcing a manual retype every time. Fixed to default to `file.name`.
+  6. Upload success status message ("Uploaded N chunk(s)...") persisted on screen indefinitely.
+     Fixed with a self-cancelling `setTimeout` auto-clear (5s) that only fires if nothing newer has
+     since overwritten the message.
+  7. Layout: the category dropdown, name filter, and checklist were all rendering inline/run-on
+     (no stylesheet exists yet — Pillar 11's UI theme is still future work). Fixed with minimal
+     inline `display: block` styling so each control and the checklist start on their own line.
+  8. **The stray-duplicate-proxy-process bug recurred a second time this session** (see
+     [[feedback-sandbox-replica-lifecycle]] for the first occurrence in Phase 5.6) — confirmed via
+     `lsof -i :8787` showing two `node server.js` processes, only one of which actually held the
+     socket. This caused `/project-brief` to return Express's default HTML error page (the
+     unauthenticated/unmatched-route fallback), which the frontend tried to `JSON.parse()`,
+     surfacing as `Unexpected token '<', "<!DOCTYPE "... is not valid JSON`. Fixed the same way as
+     before: kill both, start one clean instance.
+  9. **Project Brief export upgraded from `.md` to real `.docx`** (user request, not a bug): added
+     the `docx` npm package (client-side only, no server dependency) plus a small custom
+     Markdown→Word converter (`markdownToDocxParagraphs` — handles `#`/`##`/`###` headings, `-`/`*`
+     bullets, `**bold**` inline runs; not a full Markdown parser, just enough for the persona-free
+     synthesis prompt's consistent output structure) and a metadata cover block
+     (`projectBriefMetadataParagraphs` — generated date/time, workspace name+ID, pinned scratchpad
+     notes, pinned manuals) prepended ahead of the synthesized content. The metadata block is
+     pulled directly from already-loaded frontend state, not the LLM call, so it's always exact.
 - **Phase 5.6.2 — Global UI Theme & Mobile Remote-Control Layout** (Pillar 11, confirmed
   2026-06-21, planned). Hardcoded color variables, the Live Brain idle/processing/streaming
   indicator (replacing all "thinking..." text and spinners), and the 768px single-viewport mobile
   layout with its tactical dock + pop-out drawers. Not yet started; needs the user's logo asset
   (`1000003320.png`) before the header/Live Brain graphic can be built.
-- **Phase 5.6.3 — Command Lexicon** (Pillar 14, confirmed 2026-06-21, planned). Reference overlay
-  of active trigger phrases. Not yet started.
+- **Phase 5.6.3 — Command Lexicon** (Pillar 14). **Status: DONE, live-verified 2026-06-21**
+  (frontend-only, hot-reloaded via Vite — no backend/proxy change). A
+  "❓ Commands" button next to the `<h1>` toggles a modal overlay (`lexiconOpen` state,
+  `#toggleLexicon`) listing `COMMAND_LEXICON_ENTRIES` — a static data array grouped by category
+  (Notes, Persona/Mode, Brain switching, Web search), each entry listing its exact trigger
+  phrase(s) and a plain-language description. Deliberately reflects only what's **actually
+  implemented today**, not the full pillar spec: Pillar 4's covert Audio Logging Matrix
+  (Phase 5.4.1) and Pillar 13's Civilian Briefing trigger aren't built yet, so the "let me take a
+  note" entry's description still says plain dictation — update that description (not add a new
+  entry) once Phase 5.4.1 ships, per Pillar 14's "kept in sync by convention" rule.
 - **Phase 5.7 — Courier queue + Safe-Haven "Guardian" Emergency Protocol** (Pillar 7 + Pillar 12,
   expanded 2026-06-21). Guardian scope is narrowed from the original ask in one respect only:
   personal-contact SMS alerting (`EMERGENCY_CONTACT_NUMBERS` in `.env`) instead of direct 911 text
   dispatch, which is explicitly deferred pending the user's own validation with local Nebraska LEA
   contacts. The evidentiary recording itself stays covert/no-indicator as originally specified —
   see Pillar 12's reasoning (victim self-triggered, one-party consent, avoids tipping off an
-  attacker). Not yet started.
-- **Phase 5.7.1 — "Civilian Briefing" Protocol** (Pillar 13, confirmed 2026-06-21, planned).
-  One-shot verbatim demo monologue trigger. Not yet started.
-- **Phase 5.7.2 — Sovereign Guest Lockout (RBAC)** (Pillar 15, confirmed 2026-06-21, planned).
-  Guest Mode toggle + on-chain Principal-based unlock check. Not yet started.
-- **Phase 5.8 — Unified Fuel & Quotas dashboard** (Pillar 8, expanded scope — see Pillar 8 above):
-  ICP cycle gauge + OpenRouter balance + ElevenLabs usage via a single `/api/fuel` proxy endpoint,
-  each with a "dumb meat sack" external Top-Up link — no in-app billing.
+  attacker).
+
+  **Courier Queue (Pillar 7): implemented, deployed, not yet live-verified (needs both users to
+  test — one queues, the other logs in to receive).** Backend: a new `CourierMessage` record
+  (`id`, `recipient`, `sender`, `content`, `created_at`) in a flat `StableBTreeMap<u64,
+  CourierMessage>` (`COURIER_QUEUE`, `MemoryId::new(7)`), `queue_courier_message(content) ->
+  nat64` and `pop_pending_courier_messages() -> vec CourierMessage`. Deliberately **no `recipient`
+  parameter** on `queue_courier_message` — with exactly two whitelisted Principals (Pillar 2),
+  "the other one" is always unambiguous given the caller, resolved entirely server-side
+  (`if caller == commander { partner } else { commander }`), so the frontend never needs to know
+  the other Principal's value. `pop_pending_courier_messages` is an `#[update]` (not `#[query]`)
+  since "delivered... then cleared" requires a mutation, done atomically in one call. Frontend:
+  `COURIER_TRIGGER_PHRASES` (`"tell my husband"`, `"tell my wife"`, `"pass this along"`, etc.) is a
+  leading-phrase match checked early in `#askSkippy` (same no-LLM-round-trip philosophy as
+  `#readBackNotes`/bare-trigger acknowledgments — a mechanical "message queued" confirmation has
+  nothing for the model to add); `extractCourierContent` strips the matched phrase (plus a
+  connector word like "that") to get the actual message, preserving original capitalization. On
+  the *recipient's* side, `#deliverPendingCourierMessages` runs once right after login (alongside
+  `#loadWorkspaces`/`#refreshManualOptions`), injecting any pending messages as Skippy's first
+  remark via `#recordTurn('', ...)` — no LLM call, since this is the sender's literal content, not
+  something to paraphrase. Added a "Courier" category to the Phase 5.6.3 Command Lexicon per its
+  own "kept in sync by convention" rule. **Not yet tested live**: needs both whitelisted
+  Principals (Commander + wife) to actually verify cross-session delivery, since one user queuing
+  a message to themselves would just resolve to the other Principal anyway and never be visible to
+  the sender's own next login.
+
+  **Guardian Emergency Protocol (Pillar 12): implemented, deployed, not yet live-verified.**
+  Expanded scope confirmed 2026-06-21 beyond the original ask — adds a live two-way audio relay
+  ("Live Comms") on top of the original GPS+SMS+evidentiary-recording spec, with one architectural
+  correction: the live spec originally had ambient audio streamed to/from the *canister*, which
+  conflicts with Pillar 1's already-confirmed reasoning (2MB message cap, no real streaming
+  support) — corrected so the **proxy** holds the live relay in memory, while the **canister**
+  only ever receives periodic finalized chunks for the permanent record. Two-way comms use plain
+  WebSockets through the existing proxy, not WebRTC — confirmed to deliberately avoid STUN/TURN
+  infrastructure scope. Twilio is wired to real credentials/env vars but the user explicitly
+  doesn't have an account yet — `sendSms()` no-ops with a console warning whenever
+  `TWILIO_ACCOUNT_SID`/`TWILIO_AUTH_TOKEN`/`TWILIO_FROM_NUMBER` are unset, so the whole pipeline
+  builds and is testable today with dummy numbers in `EMERGENCY_CONTACT_NUMBERS`
+  (`+15555550100,+15555550101`), and goes live the moment real Twilio creds are dropped into
+  `.env` — no code changes needed for that switch.
+
+  **Backend** (`lib.rs`): two new stores — `EmergencyEvent` (`id`, `owner`, `secure_token`,
+  `started_at`) and the append-only `EmergencyAudioChunk` (`id`, `emergency_id`, `data: Vec<u8>`,
+  `created_at`), `MemoryId::new(8)`/`MemoryId::new(9)`. `start_emergency(secure_token) -> nat64`
+  records the event (token generated by the *proxy*, not here, since the proxy needs it
+  immediately to stand up its in-memory buffer before the canister is ever involved).
+  `append_emergency_audio_chunk(emergency_id, data) -> nat64` and the owner-scoped
+  `list_emergency_audio_chunks`/`list_my_emergencies` queries round it out. **No delete method
+  exists for `EmergencyAudioChunk`, deliberately** — per the pillar spec, this is potential
+  evidence of a crime against the user, unlike Pillar 4's everyday (deletable) audio notes.
+
+  **Proxy** (`server.js`): `sendSms()` (plain Basic-Auth REST call to Twilio, no SDK dependency —
+  same "plain fetch over a vendor SDK" style as `tavilySearch`). `POST /emergency-dispatch`
+  (behind `requireSession`) generates the secure token, registers an in-memory `activeEmergencies`
+  entry, sends the whitelist SMS (live-ops link + Google Maps link) and, only if
+  `EMERGENCY_911_ENABLED=true` (defaults false, per the existing deferral) and a number is
+  configured, a separate plain-text-only message to 911 with no live-ops link, per spec.
+  `GET /live-ops/:token` serves a **public, unauthenticated by design** self-contained HTML/JS
+  page (the token *is* the authorization) — confirmed UX (2026-06-21): a strict
+  **push-to-talk "walkie-talkie" interface**, never a continuous-call look, with a prominent
+  "Hold to Speak" button (press-and-hold `MediaRecorder` capture) and explicit on-screen copy
+  clarifying these are short relayed audio bursts, not a live call. **Quick-tap presets**
+  ("Help is on the way," "Police have been notified," "Stay quiet," "Can't hear you") are
+  confirmed sent as **small JSON text events, not audio** — the device renders them via the
+  browser's built-in `speechSynthesis` (same zero-external-dependency Economy-voice fallback used
+  elsewhere in this app), so the most safety-critical message path never depends on
+  ElevenLabs/OpenRouter being reachable. Live audio playback on the listener page is **sequential
+  `<audio>` element playback per chunk**, not true gapless `MediaSource` buffering — a known,
+  deliberate v1 simplification (small gaps between chunks), not a bug. A raw WebSocket relay
+  (`/emergency-ws`, attached via `server.on('upgrade', ...)` alongside Express on the same port)
+  is a dumb two-way pipe per active emergency: device→listeners audio is broadcast live; the
+  proxy never inspects "open comms vs. go dark" — that's purely a frontend decision about whether
+  to actually play incoming audio through the speaker. Every `FINALIZE_INTERVAL_MS` (10s), the
+  proxy bundles whatever's buffered and hands it back to the *device* (not the canister — the
+  proxy never calls the canister directly, per Pillar 1's implementation note) as a `finalize`
+  text event so the frontend forwards it to `append_emergency_audio_chunk` with its own
+  already-authenticated identity. **Known gap, not yet implemented**: the original live spec said
+  the proxy "encrypts" finalized chunks before persisting them — not yet built (no key-management
+  design decided); chunks are currently persisted as plain bytes. Revisit before relying on this
+  for real sensitive evidentiary use.
+
+  **Client-Side Encryption architecture (concept only, confirmed 2026-06-21 — explicitly NOT to
+  be built until the user says so; this is a design writeup, not a task queue):** goal is for the
+  canister to be a genuine zero-knowledge vault for `EmergencyAudioChunk.data` — it should only
+  ever hold ciphertext, never plaintext audio and never the key itself.
+  - **Where encryption happens**: the **frontend**, never the proxy. The proxy already sees
+    plaintext audio in-memory for the live relay (unavoidable for any real-time audio relay — not
+    a new exposure this introduces), but per Pillar 1's implementation note it never holds the
+    user's genuine authenticated identity, so it must never hold the encryption key either. The
+    frontend receives each `finalize` event already containing raw bytes (today's flow) and would
+    encrypt them (AES-256-GCM, fresh random 96-bit IV per chunk, standard practice — never reuse
+    an IV with the same key) before calling `append_emergency_audio_chunk`. `EmergencyAudioChunk`
+    would need one new field, `iv: Vec<u8>`, alongside the now-ciphertext `data`.
+  - **The hard problem — where the key comes from, tied to "my authenticated Internet Identity"
+    specifically**: Internet Identity is WebAuthn/passkey-based by design, which deliberately
+    never exposes raw private key material to the page — there's no JS-accessible "II secret" to
+    directly derive a symmetric key from, so "derived from my II identity" can't mean literally
+    reading out passkey material. Two real candidate designs:
+    1. **IC's native vetKD (verifiably encrypted threshold key derivation)** — the IC's own
+       purpose-built answer to exactly this problem: a system canister feature that lets a calling
+       Principal deterministically (re-)derive a per-user symmetric key, encrypted in transit via
+       threshold cryptography, such that the *canister* coordinating the derivation never learns
+       the key in the clear either. This is the architecturally "correct" fit for "key protected
+       by my authenticated Identity, zero-knowledge canister" — **but its maturity/availability
+       needs to be verified against this project's current `ic-cdk`/replica version before
+       committing to it**; not yet confirmed working in this codebase's setup.
+    2. **Pragmatic fallback if vetKD isn't ready**: a user-chosen vault passphrase (separate from
+       II login, set once), run through a client-side KDF (Argon2id or PBKDF2 with a strong
+       iteration count) to derive the AES-256-GCM key. The canister stores a small verification
+       artifact (e.g. a fixed known-plaintext encrypted under the derived key) so the frontend can
+       confirm a re-entered passphrase is correct without the canister ever seeing the passphrase
+       or key. This satisfies "zero-knowledge vault" but is honestly a second secret the user
+       manages themselves, not literally "derived from" II — flag this gap explicitly rather than
+       overclaiming it meets the original ask if vetKD turns out not to be viable.
+  - **Decryption** (for the owner reviewing/downloading their own ledger later): happens
+    client-side only, after re-deriving the same key by whichever mechanism above is chosen. The
+    canister never participates in decryption, consistent with "zero-knowledge vault."
+  - **Open question to resolve before implementation, not before**: confirm vetKD's real
+    availability/stability for this project's stack; if it's not viable, get the user's explicit
+    sign-off on the passphrase-fallback design (and its honest "not literally II-derived"
+    caveat) before writing any code.
+
+  **Frontend** (`App.js`): placement protection — since Pillar 11's dedicated Steel Rain overlay
+  view doesn't exist yet, the "EMERGENCY PANIC" button is gated on `operationalMode === 'tactical'`
+  instead, today's equivalent of the same intent (never visible from the default dashboard).
+  3-tap flow: Steel Rain → EMERGENCY PANIC button → a confirmation modal ("TRIGGER EMERGENCY
+  DISPATCH?" / "YES, CONFIRM"). On confirm: `navigator.geolocation.getCurrentPosition`
+  (high-accuracy) → `POST /emergency-dispatch` → `start_emergency(token)` → enters Ghost Mode.
+  **Ghost Mode**: a full-viewport `position: fixed` black `<div>` (z-index 9999, no controls,
+  nothing visible) plus `#speak()` gains an early return whenever `ghostMode && !commsOpen` —
+  covers both the dedicated open-comms/go-dark acknowledgments *and* Skippy's ordinary replies to
+  unrelated questions asked mid-emergency, since the whole premise is zero sound regardless of
+  what's being said. A real OS-level hardware speaker mute isn't accessible to a web page; this
+  achieves the realistic browser-side equivalent (the web app itself produces zero sound) — noted
+  here explicitly as a real constraint, not silently glossed over. Mic capture via
+  `MediaRecorder.start(2000)` (2s chunks) streamed up over the same `/emergency-ws` WebSocket
+  (`role=device`), proxied through Vite's existing `/skippy-api` rewrite (added `ws: true` to that
+  proxy entry in `vite.config.js` — needed for the upgrade request to pass through). Voice
+  triggers: `"Skippy, open comms"` (unmute + announce), `"Skippy, go dark"` (re-mute, deliberately
+  **no** `#speak()` call — speaking the confirmation aloud would defeat the silence it just
+  enabled), `"Skippy, stand down"` (ends the emergency, tears down the stream, exits Ghost Mode).
+  **"Stand down" was not specified in the original spec** — chosen to fit this app's existing
+  Commander/tactical theme; flag to the user for confirmation/renaming if they want different
+  wording. Added an "Emergency (only while active)" category to the Phase 5.6.3 Command Lexicon.
+
+  **Not yet tested live at all** — needs a real browser with mic/GPS permissions: the full 3-tap
+  flow, GPS capture, dummy-number SMS dispatch (check the proxy console for the "Twilio not
+  configured" warning + the would-be message text), Ghost Mode's black screen, mic streaming,
+  visiting the `/live-ops/:token` link from a second device/browser, Hold-to-Speak relay back to
+  the first device, quick-tap presets, and all three voice triggers.
+- **Phase 5.7.1 — "Civilian Briefing" Protocol** (Pillar 13). **Status: DONE, confirmed live by
+  the user 2026-06-22 ("the civilian briefing works. Good.").** Frontend:
+  `CIVILIAN_BRIEFING_PHRASES` (`"execute public briefing"`, `"explain what you are to the group"`),
+  checked early in `#askSkippy`; sets `publicDemo: true` on that single `/respond` call only (no
+  persistent state — the very next turn has no flag at all). Proxy: `/respond` short-circuits
+  before any OpenRouter call when `publicDemo === true`, returning the user's fixed verbatim
+  monologue (`CIVILIAN_BRIEFING_MONOLOGUE` in `server.js`) directly — a canned string, never an
+  LLM-generated improvisation, so demo output is exact and repeatable every time. Added a "Demo"
+  category to the Phase 5.6.3 Command Lexicon.
+- **Phase 5.7.2 — Sovereign Guest Lockout (RBAC)** (Pillar 15). **Status: implemented, deployed,
+  user-confirmed working 2026-06-22 ("guest mode is good").** Backend: `verify_unlock()` query
+  (`lib.rs`), just `assert_whitelisted()` under a dedicated name. Frontend: `guestMode` persisted
+  in `localStorage` (a refresh must not let a guest holding the device escape the lock — a bare
+  in-memory field would reset to false on reload). Mode/brain switching locked via an early return
+  in `#detectModeAndBrain`. Destructive/admin UI hidden or disabled while active: Archive, Delete
+  forever, Restore, Clear history, Emergency Panic, Fuel Gauge, Profile settings. **Unlock
+  mechanism**: the cached session identity stays the owner's the whole time Guest Mode is on — a
+  guest holding the unlocked device already has full access to whatever's cached in memory, so
+  re-checking it proves nothing. The real gate is forcing a *fresh* WebAuthn ceremony
+  (`authClient.login()` called again) before calling `verify_unlock()` with the resulting identity;
+  the canister whitelist check on top ensures it's specifically one of the two whitelisted
+  Principals, not just any successfully authenticated identity (e.g. a guest's own unrelated II
+  anchor). **Friction asymmetry, confirmed deliberate 2026-06-22**: enabling is a single
+  click/phrase with zero confirmation (`GUEST_MODE_TRIGGER_PHRASES = ['guest mode', 'enable guest
+  mode']`, checked early in `#askSkippy`, gives a spoken confirmation) — the user explicitly
+  rejected an initial `window.confirm()` step ("I want to be able to just click guest mode and walk
+  away"). Unlocking stays the deliberate, manual, re-authentication-gated path with no shortcuts.
+  **Not yet live-verified beyond the UI confirmation** — the actual unlock-via-fresh-WebAuthn flow
+  (correct re-auth + correct rejection of a non-whitelisted identity) hasn't been explicitly walked
+  through turn-by-turn.
+- **Phase 5.7.3 — Dynamic Persona Registry ("Tactical Roster")** (Pillar 16, added mid-session
+  2026-06-22, not in the original spec). **Status: DONE, confirmed live by the user ("the lisa
+  protocol works").** See Pillar 16 above for the full design, including why the original
+  "Permission Level" field was dropped before building.
+- **Phase 5.8 — Unified Fuel & Quotas dashboard** (Pillar 8, expanded scope — see Pillar 8 above).
+  **Status: implemented, deployed, partially live-verified 2026-06-22** (ICP cycles + OpenRouter
+  balance confirmed showing real values; ElevenLabs readout 401s — see below, not a code bug).
+  Backend: `get_cycle_balance()` query wrapping `ic_cdk::api::canister_cycle_balance()`, gated by
+  the same two-Principal whitelist (no separate admin concept built — Pillar 8's spec flagged that
+  as a future scoping question, simplest correct choice with exactly two users today). Proxy: a
+  single `GET /api/fuel` (behind `requireSession`) fetching OpenRouter's `/api/v1/credits` and
+  ElevenLabs' `/v1/user/subscription` in one combined response. Frontend: a "Fuel & Quotas" details
+  section with cycles/OpenRouter $/ElevenLabs character count, each with a "Top Up" link to the
+  provider's real billing page (the "dumb meat sack" protocol — reads only, never writes/spends).
+  **Known issue, not a code bug**: the ElevenLabs API key is scoped without the `user_read`
+  permission (confirmed via direct curl: `401 missing_permissions`), so that one readout errors
+  while cycles/OpenRouter work fine. User action item: enable `user_read` on the key in the
+  ElevenLabs dashboard.
 - **Phase 5.9 — Wasm64** (Pillar 9, deprioritized).

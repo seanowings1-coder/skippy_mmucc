@@ -35,6 +35,10 @@ export default defineConfig({
         target: "http://127.0.0.1:8787",
         changeOrigin: true,
         rewrite: (path) => path.replace(/^\/skippy-api/, ""),
+        // Pillar 12's Guardian Emergency Protocol opens a WebSocket to the
+        // proxy's /emergency-ws — needs ws:true so Vite proxies the upgrade
+        // request too, same same-origin reasoning as the rest of this block.
+        ws: true,
       },
     },
   },

@@ -1,6 +1,7 @@
 import { html, render } from 'lit-html';
 import { AuthClient } from '@dfinity/auth-client';
 import { HttpAgent, Actor } from '@dfinity/agent';
+import { Document, Packer, Paragraph, TextRun, HeadingLevel } from 'docx';
 import { idlFactory } from 'declarations/skippy_mmucc_backend/skippy_mmucc_backend.did.js';
 import { canisterId as BACKEND_CANISTER_ID } from 'declarations/skippy_mmucc_backend';
 
@@ -33,6 +34,18 @@ import { canisterId as BACKEND_CANISTER_ID } from 'declarations/skippy_mmucc_bac
 // calls are unaffected since those go through Vite's same-origin "/api"
 // proxy instead. No path/hash suffix is needed — the legacy protocol is
 // triggered by the popup detecting window.opener, not by the URL.
+// Tried and confirmed NOT viable (2026-06-21): tunneling the local replica
+// (e.g. a free Cloudflare quick tunnel) to get a real HTTPS origin for
+// mobile bench testing. Free `trycloudflare.com` quick tunnels only route a
+// single fixed hostname per tunnel — no wildcard-subdomain support — so
+// `<canister-id>.<tunnel-hostname>` never resolves (NXDOMAIN), and that's
+// exactly the subdomain form this whole mechanism depends on. Fixing this
+// for real needs either a paid Cloudflare account with a custom domain on a
+// *named* tunnel (wildcard DNS), or — the actually-correct fix, not a
+// workaround — just testing against production, where mainnet
+// `identity.ic0.app` has no local-subdomain-routing problem at all. Decided
+// 2026-06-21: defer full mobile/Guardian-Protocol hardware testing to
+// production rather than keep fighting tunnel routing for a local dev test.
 const IDENTITY_PROVIDER =
   process.env.DFX_NETWORK === 'ic'
     ? undefined // falls back to @dfinity/auth-client's mainnet default
@@ -59,6 +72,65 @@ const NOTE_RETRIEVAL_PHRASES = [
   'read my notes back',
 ];
 const RECENT_NOTES_COUNT = 5;
+
+// Pillar 7 (Courier Queue) — leading-phrase trigger, fixed patterns rather
+// than a second LLM classification call (same philosophy as every other
+// trigger check in this file). No name/identity resolution needed here at
+// all: with exactly two whitelisted Principals (Pillar 2), "the other one"
+// is always unambiguous given the sender — resolved server-side in
+// queue_courier_message, never client-side.
+const COURIER_TRIGGER_PHRASES = [
+  'tell my husband',
+  'tell my wife',
+  'tell my partner',
+  'tell the commander',
+  'let my husband know',
+  'let my wife know',
+  'let my partner know',
+  'pass this along',
+  'pass that along',
+];
+
+// Strips the matched leading trigger phrase (plus a connector word like
+// "that"/"to say") off the *original-case* text, so the queued message
+// content keeps its natural capitalization. Returns null if no trigger
+// phrase was found.
+function extractCourierContent(lowerText, originalText) {
+  for (const phrase of COURIER_TRIGGER_PHRASES) {
+    const idx = lowerText.indexOf(phrase);
+    if (idx !== -1) {
+      return originalText
+        .slice(idx + phrase.length)
+        .replace(/^[,:\s]*(that|to say|saying)?[,:\s]*/i, '')
+        .trim();
+    }
+  }
+  return null;
+}
+
+// Pillar 12 (Guardian Emergency Protocol) — voice overrides, only
+// meaningful while an emergency is active (checked at the call site, not
+// here, same as WEB_SEARCH_AFFIRMATION_PHRASES only mattering with a
+// pending query). No phrase was specified in the original spec for ending
+// the emergency entirely, so "stand down" was chosen to fit this app's
+// existing Commander/tactical theme — flagged for the user to confirm or
+// rename if they want something else.
+const OPEN_COMMS_PHRASES = ['open comms', 'comms open'];
+const GO_DARK_PHRASES = ['go dark'];
+const STAND_DOWN_PHRASES = ['stand down', 'end emergency', 'end emergency dispatch'];
+
+// Pillar 15 (Sovereign Guest Lockout) — confirmed 2026-06-22: enabling is a
+// single voice/text/button action with no confirmation step (the owner is
+// deliberately about to hand off the device and wants zero friction, not a
+// second "yes" to click); only the unlock side stays a deliberate manual
+// process (a fresh WebAuthn re-authentication — see #unlockGuestMode).
+const GUEST_MODE_TRIGGER_PHRASES = ['guest mode', 'enable guest mode'];
+
+// Pillar 13 ("Civilian Briefing" Protocol) — one-shot, fixed phrase trigger.
+// Sets publicDemo:true on the single /respond call containing the phrase;
+// the proxy returns its canned monologue directly (no LLM call), and the
+// next turn reverts to normal persona/mode with no lingering state here.
+const CIVILIAN_BRIEFING_PHRASES = ['execute public briefing', 'explain what you are to the group'];
 
 // Pillar 6 RAG retrieval tuning — see CLAUDE.md's Phase 5.6 entry for why
 // these specific defaults (512-dim embeddings, brute-force cosine search at
@@ -165,8 +237,110 @@ function isTrivialRemainder(remainder) {
   return remainder.replace(FILLER_WORDS_PATTERN, '').replace(/[^a-z0-9]/gi, '').length === 0;
 }
 
+// Pillar 14 (Phase 5.6.3) — reference data for the Command Lexicon overlay.
+// Reflects only triggers actually implemented as of 2026-06-21; Pillar 4's
+// covert Audio Logging Matrix (Phase 5.4.1) and Pillar 13's Civilian
+// Briefing trigger are planned but not yet built, so "let me take a note"
+// below still describes today's real (plain dictation) behavior, not the
+// future covert-recording one — update this entry's description, not just
+// add a new one, once Phase 5.4.1 actually ships.
+const COMMAND_LEXICON_ENTRIES = [
+  {
+    category: 'Notes',
+    phrases: TRIGGER_PHRASES,
+    description:
+      'Starts voice dictation of your own notes; the recorded speech is saved as a text note in the Notes Vault (SKIPPY_NOTES). Plain dictation today — not yet the covert ambient-audio capture planned for Phase 5.4.1.',
+  },
+  {
+    category: 'Notes',
+    phrases: NOTE_RETRIEVAL_PHRASES,
+    description: `Reads back your last ${RECENT_NOTES_COUNT} saved notes directly — skips the LLM entirely.`,
+  },
+  {
+    category: 'Persona / Mode',
+    phrases: ["Skippy, be yourself"],
+    description: 'Switches to default mode (full sarcasm/snark).',
+  },
+  {
+    category: 'Persona / Mode',
+    phrases: ["Skippy, behave"],
+    description: 'Switches to professional mode (persona toned down).',
+  },
+  {
+    category: 'Persona / Mode',
+    phrases: STEEL_RAIN_PHRASES,
+    description:
+      'Switches to tactical mode AND selects the Tactical (fastest/cheapest) brain together. If local manuals have no match, fires a live web search instantly with no permission step.',
+  },
+  {
+    category: 'Brain switching',
+    phrases: [THINKING_HAT_PHRASE],
+    description:
+      'One-shot: swaps to the Heavy Hitter (most capable) model for just this message, then reverts to whichever brain/mode was active before. Model only — persona/mode is unaffected.',
+  },
+  {
+    category: 'Web search',
+    phrases: WEB_OVERRIDE_PHRASES,
+    description:
+      'Direct override — skips the local-knowledge-base check and any permission step, fires a live web search immediately regardless of mode.',
+  },
+  {
+    category: 'Web search',
+    phrases: WEB_SEARCH_AFFIRMATION_PHRASES,
+    description:
+      'Only meaningful right after Skippy mocks you and asks permission to search the web (default/professional mode, local knowledge base miss) — confirms the pending search and answers your original question.',
+  },
+  {
+    category: 'Courier',
+    phrases: COURIER_TRIGGER_PHRASES,
+    description:
+      'Queues whatever you say after the phrase as a message for the other whitelisted user — delivered as Skippy\'s first remark the next time they log in, then cleared.',
+  },
+  {
+    category: 'Emergency (only while active)',
+    phrases: OPEN_COMMS_PHRASES,
+    description:
+      'Unmutes the speaker and lets your whitelist contacts speak/send presets through the device. Only meaningful during an active Guardian Emergency dispatch.',
+  },
+  {
+    category: 'Emergency (only while active)',
+    phrases: GO_DARK_PHRASES,
+    description:
+      'Re-mutes the speaker and returns to silent Ghost Mode streaming. Only meaningful during an active Guardian Emergency dispatch.',
+  },
+  {
+    category: 'Emergency (only while active)',
+    phrases: STAND_DOWN_PHRASES,
+    description: 'Ends the active emergency: stops streaming, exits Ghost Mode, restores the normal screen.',
+  },
+  {
+    category: 'Demo',
+    phrases: CIVILIAN_BRIEFING_PHRASES,
+    description:
+      'One-shot: returns a fixed, verbatim tech-flex monologue instead of a normal reply, for live demo audiences. Reverts to normal persona immediately after.',
+  },
+  {
+    category: 'Security',
+    phrases: GUEST_MODE_TRIGGER_PHRASES,
+    description:
+      'Instantly enables Guest Mode (also available as a button in Workspace security) — no confirmation step. Locks the current brain/persona and hides destructive/admin actions until manually unlocked via re-authentication.',
+  },
+  {
+    category: 'Tactical Roster',
+    phrases: ['(any phrase you register in the Tactical Roster drawer, e.g. "it\'s lisa")'],
+    description:
+      'Switches who Skippy is addressing for tone/framing only — never changes active permissions. Guest Mode restrictions stay exactly as they were regardless of which Roster profile is active.',
+  },
+];
+
 const NOTES_MANUAL = 'SKIPPY_NOTES';
-const MANUAL_OPTIONS = [NOTES_MANUAL, 'MMUCC_V6', 'ANSI_D16'];
+// NOTES_MANUAL is always offered (it's the built-in notes feature, writable
+// even before any note exists). Every other entry is populated dynamically
+// from list_manual_names() — confirmed live 2026-06-21: hardcoding
+// 'MMUCC_V6'/'ANSI_D16' here made them appear as always-checkable options
+// (including in the Pillar 10 "pinned manuals" checklist) even though
+// nothing had ever actually been uploaded under those names.
+const MANUAL_OPTIONS = [NOTES_MANUAL];
 
 const SpeechRecognitionImpl =
   window.SpeechRecognition || window.webkitSpeechRecognition;
@@ -191,6 +365,76 @@ function stripMarkdown(text) {
     .trim();
 }
 
+// Splits a line on **bold** markers into alternating plain/bold TextRuns —
+// not a full Markdown parser, just enough for the consistent #/##/-/**
+// structure the persona-free Project Brief system prompt is instructed to
+// produce (Phase 5.6.1).
+function boldAwareTextRuns(line) {
+  return line
+    .split(/(\*\*.*?\*\*)/g)
+    .filter((part) => part !== '')
+    .map((part) =>
+      part.startsWith('**') && part.endsWith('**')
+        ? new TextRun({ text: part.slice(2, -2), bold: true })
+        : new TextRun(part),
+    );
+}
+
+// Cover-page metadata block prepended to a generated Project Brief, pulled
+// from already-loaded frontend state — not part of the LLM synthesis call,
+// so it's always exact/current rather than something the model could get
+// wrong or omit.
+function projectBriefMetadataParagraphs(workspace) {
+  const manuals = workspace?.associated_manuals?.[0] ?? [];
+  const scratchpad = workspace?.scratchpad?.[0] || '(none)';
+  return [
+    new Paragraph({ heading: HeadingLevel.HEADING_1, children: [new TextRun('Project Brief')] }),
+    new Paragraph({
+      children: [new TextRun({ text: 'Generated: ', bold: true }), new TextRun(new Date().toLocaleString())],
+    }),
+    new Paragraph({
+      children: [
+        new TextRun({ text: 'Workspace: ', bold: true }),
+        new TextRun(`${workspace?.name ?? '(unknown)'} (#${workspace?.id?.toString() ?? '?'})`),
+      ],
+    }),
+    new Paragraph({
+      children: [new TextRun({ text: 'Pinned notes: ', bold: true }), new TextRun(scratchpad)],
+    }),
+    new Paragraph({
+      children: [
+        new TextRun({ text: 'Pinned manuals: ', bold: true }),
+        new TextRun(manuals.length ? manuals.join(', ') : '(none)'),
+      ],
+    }),
+    new Paragraph({ children: [] }),
+  ];
+}
+
+function markdownToDocxParagraphs(markdown) {
+  return markdown
+    .split('\n')
+    .filter((line) => !/^\s*(---+|\*\*\*+)\s*$/.test(line)) // horizontal rules
+    .map((line) => {
+      const trimmed = line.trim();
+      const heading = /^(#{1,3})\s+(.*)$/.exec(trimmed);
+      if (heading) {
+        const level = { 1: HeadingLevel.HEADING_1, 2: HeadingLevel.HEADING_2, 3: HeadingLevel.HEADING_3 }[
+          heading[1].length
+        ];
+        return new Paragraph({ heading: level, children: boldAwareTextRuns(heading[2]) });
+      }
+      const bullet = /^[-*]\s+(.*)$/.exec(trimmed);
+      if (bullet) {
+        return new Paragraph({ bullet: { level: 0 }, children: boldAwareTextRuns(bullet[1]) });
+      }
+      if (trimmed === '') {
+        return new Paragraph({ children: [] });
+      }
+      return new Paragraph({ children: boldAwareTextRuns(trimmed) });
+    });
+}
+
 class App {
   // 'idle' | 'listening' | 'dictating'
   state = 'idle';
@@ -210,15 +454,64 @@ class App {
   workspaces = [];
   activeWorkspaceId = null;
   selectedManual = NOTES_MANUAL;
-  // Mutable copy — Neo Skin uploads (Pillar 6) can introduce manual names
-  // beyond the 3 baked-in defaults. Known gap: this resets to the defaults
-  // on a fresh page load, since there's no backend "list distinct manual
-  // names" query yet — uploaded manuals are still fully there and searchable
-  // (search_similar_chunks is global, not filtered by this dropdown), just
-  // not relisted here until you re-upload or until that query gets added.
+  // Real manual names come from list_manual_names() via #refreshManualOptions
+  // (called after login) — see that method. Defaults to just NOTES_MANUAL
+  // until that first fetch completes.
   manualOptions = [...MANUAL_OPTIONS];
+  // Pillar 10 extension (Phase 5.6.1) — narrows the "pinned manuals"
+  // checklist by name as the manual library grows past a handful of
+  // entries (confirmed live 2026-06-21: total library can reach ~100
+  // manuals even though any one workspace typically pins under 6).
+  manualFilterText = '';
+  // manual_name -> category, fetched via manual_category_map() in
+  // #refreshManualOptions. Lets the pinned-manuals checklist filter by type
+  // (e.g. "code", "manual") before sub-filtering by name, or skip straight
+  // to a name-only global search by leaving the category filter on "All".
+  manualCategories = new Map();
+  manualCategoryFilter = '';
   sections = [];
   manualBrowserOpen = false;
+  // Pillar 14, Phase 5.6.3 — a reference overlay of every active voice/text
+  // trigger phrase, kept in sync by convention: any time a new trigger is
+  // added to the codebase, add an entry to COMMAND_LEXICON_ENTRIES too.
+  lexiconOpen = false;
+  // Pillar 12 (Guardian Emergency Protocol). emergencyConfirmOpen gates the
+  // 3-tap deliberate-activation modal; emergencyActive/ghostMode/commsOpen
+  // track the live state once triggered. token/id/ws/recorder/stream are
+  // the live session's plumbing, torn down on "Skippy, stand down."
+  emergencyConfirmOpen = false;
+  emergencyActive = false;
+  ghostMode = false;
+  commsOpen = false;
+  emergencyToken = null;
+  emergencyId = null;
+  emergencyWs = null;
+  emergencyRecorder = null;
+  emergencyStream = null;
+  // Pillar 8 (Fuel & Quotas Dashboard) — read-only balances, refreshed once
+  // after login and on-demand via a manual button. "Dumb meat sack"
+  // protocol: this app never writes/spends on the user's behalf.
+  cycleBalance = null;
+  fuelData = null;
+  // Pillar 15 (Sovereign Guest Lockout) — persisted in localStorage (not a
+  // plain in-memory field) deliberately: a guest holding the unlocked device
+  // could otherwise escape the lock by simply refreshing the page, since a
+  // bare field would reset to false on reload. Unlocking requires a fresh
+  // WebAuthn re-authentication ceremony (see #unlockGuestMode) — the actual
+  // security boundary, since the cached session identity in memory is still
+  // the owner's regardless of who's physically holding the device.
+  guestMode = localStorage.getItem('skippy_guest_mode') === 'true';
+  guestUnlockError = '';
+  // "Tactical Roster" — persona/addressing context only, deliberately with
+  // no permission concept of its own (see CLAUDE.md's Pillar 16 note): the
+  // only real access boundary in this app is Guest Mode above, which a
+  // Roster match never touches. Persisted in localStorage (device-local
+  // convenience config, not security-sensitive, not per-Principal canister
+  // data). `activeRosterProfile` itself is in-memory only — it resets on
+  // refresh, since "who's currently talking" isn't a state worth surviving
+  // a reload the way guestMode's lock is.
+  rosterProfiles = JSON.parse(localStorage.getItem('skippy_roster_profiles') || '[]');
+  activeRosterProfile = null;
   statusMessage = '';
   recognition = null;
   stopRequested = false;
@@ -333,21 +626,130 @@ class App {
       if ('Ok' in result) {
         this.sessionToken = result.Ok;
         this.authState = 'ready';
-        await this.#loadWorkspaces();
-        const profileOpt = await this.backendActor.get_my_persona_profile();
-        const profile = profileOpt[0];
-        this.profileName = profile?.name?.[0] || '';
-        this.profileVoiceId = profile?.voice_id?.[0] || '';
       } else {
         this.authState = 'rejected';
         this.authError = result.Err;
+        this.#render();
+        return;
       }
     } catch (err) {
       // The canister traps (rather than returning Err) for a non-whitelisted
       // caller — see assert_whitelisted() in lib.rs.
       this.authState = 'rejected';
       this.authError = err.message;
+      this.#render();
+      return;
     }
+
+    // login() already succeeded above (authState is 'ready') — anything
+    // that fails from here on is a separate app-level problem, not an auth
+    // rejection. Confirmed live 2026-06-21: a decode bug in list_my_workspaces
+    // (unrelated to the whitelist) was thrown here and the old single
+    // try/catch mislabeled it as "not authorized," showing the correct,
+    // working Principal on a misleading rejection screen.
+    try {
+      await this.#loadWorkspaces();
+      await this.#refreshManualOptions();
+      const profileOpt = await this.backendActor.get_my_persona_profile();
+      const profile = profileOpt[0];
+      this.profileName = profile?.name?.[0] || '';
+      this.profileVoiceId = profile?.voice_id?.[0] || '';
+      await this.#deliverPendingCourierMessages();
+      await this.#refreshFuel();
+    } catch (err) {
+      console.error('[Skippy] post-login setup failed:', err);
+      this.statusMessage = `Logged in, but failed to load workspace data: ${err.message}`;
+    }
+    this.#render();
+  };
+
+  // Pillar 15 — confirmed 2026-06-22: no confirmation step. The owner is
+  // deliberately handing off the device right now and wants this to be a
+  // single click/phrase, not a second "yes" to click through. `text` is only
+  // passed by the voice/text trigger path below — it's what gives a spoken
+  // confirmation, matching the existing Guardian-trigger pattern
+  // (#standDownEmergency/#openComms/#goDark); a plain button click passes
+  // nothing and just flips the state silently (the UI's own "🔒 Guest Mode
+  // active" banner is confirmation enough for a manual tap).
+  #enableGuestMode = (text) => {
+    this.guestMode = true;
+    this.guestUnlockError = '';
+    localStorage.setItem('skippy_guest_mode', 'true');
+    if (text !== undefined) {
+      const reply = 'Guest Mode enabled. Brain and persona locked, destructive and admin actions hidden.';
+      this.#recordTurn(text, reply);
+      this.#speak(reply);
+    }
+    this.#render();
+  };
+
+  // The cached session identity in `this.identity`/`this.backendActor` is
+  // still the owner's the whole time Guest Mode is active — a guest holding
+  // the unlocked device already has full access to that in-memory session,
+  // so simply re-checking it proves nothing. The actual gate is forcing a
+  // *fresh* WebAuthn ceremony here (a new authClient.login() call), which a
+  // guest can't pass without the owner's real passkey/biometric/security
+  // key, regardless of what's cached in the page. The canister whitelist
+  // check on top of that closes the other gap: without it, a guest with
+  // their own unrelated Internet Identity anchor could pass *a* WebAuthn
+  // ceremony (their own) and we'd have no way to tell that apart from the
+  // owner's — assert_whitelisted() ensures it's specifically one of the two
+  // authorized Principals, not just "any successfully authenticated identity."
+  #unlockGuestMode = () => {
+    this.guestUnlockError = '';
+    this.authClient.login({
+      identityProvider: IDENTITY_PROVIDER,
+      onSuccess: async () => {
+        try {
+          const freshIdentity = this.authClient.getIdentity();
+          const agent = await HttpAgent.create({ identity: freshIdentity });
+          if (process.env.DFX_NETWORK !== 'ic') {
+            await agent.fetchRootKey().catch(() => {});
+          }
+          const verifyActor = Actor.createActor(idlFactory, { agent, canisterId: BACKEND_CANISTER_ID });
+          await verifyActor.verify_unlock();
+          this.guestMode = false;
+          localStorage.removeItem('skippy_guest_mode');
+        } catch (err) {
+          // Deliberately generic — per Pillar 15, a failed check shouldn't
+          // hand a guest a working oracle for probing the whitelist by
+          // revealing the canister's actual rejection detail.
+          console.error('[Skippy] guest unlock verification failed:', err);
+          this.guestUnlockError = 'Unlock failed.';
+        }
+        this.#render();
+      },
+      onError: () => {
+        this.guestUnlockError = 'Unlock failed.';
+        this.#render();
+      },
+    });
+  };
+
+  #addRosterProfile = (e) => {
+    e.preventDefault();
+    const form = e.target;
+    const name = form.elements.rosterName.value.trim();
+    const triggerPhrase = form.elements.rosterTrigger.value.trim().toLowerCase();
+    const role = form.elements.rosterRole.value.trim();
+    if (!name || !triggerPhrase) return;
+    this.rosterProfiles = [...this.rosterProfiles, { name, triggerPhrase, role }];
+    localStorage.setItem('skippy_roster_profiles', JSON.stringify(this.rosterProfiles));
+    form.reset();
+    this.#render();
+  };
+
+  #deleteRosterProfile = (triggerPhrase) => {
+    this.rosterProfiles = this.rosterProfiles.filter((p) => p.triggerPhrase !== triggerPhrase);
+    localStorage.setItem('skippy_roster_profiles', JSON.stringify(this.rosterProfiles));
+    if (this.activeRosterProfile?.triggerPhrase === triggerPhrase) {
+      this.activeRosterProfile = null;
+    }
+    this.#render();
+  };
+
+  #clearActiveRosterProfile = () => {
+    this.activeRosterProfile = null;
     this.#render();
   };
 
@@ -475,6 +877,35 @@ class App {
   // settles on one Active workspace to actually display/chat in. Shared by
   // login and by delete (since deleting the last active workspace needs the
   // exact same "make sure something Active exists" fallback).
+  // Confirmed live 2026-06-21: replaces the old hardcoded MMUCC_V6/ANSI_D16
+  // placeholders with whatever manuals actually have content, fetched fresh
+  // from the canister. NOTES_MANUAL is always kept available regardless,
+  // since it's the built-in notes feature, not an uploaded manual.
+  #refreshManualOptions = async () => {
+    const realNames = await this.backendActor.list_manual_names();
+    const merged = new Set([NOTES_MANUAL, ...realNames]);
+    this.manualOptions = [...merged].sort((a, b) =>
+      a.localeCompare(b, undefined, { sensitivity: 'base' }),
+    );
+    if (!this.manualOptions.includes(this.selectedManual)) {
+      this.selectedManual = this.manualOptions[0];
+    }
+    const categoryPairs = await this.backendActor.manual_category_map();
+    this.manualCategories = new Map(
+      categoryPairs.filter(([, category]) => category).map(([name, category]) => [name, category]),
+    );
+  };
+
+  #handleManualFilterInput = (e) => {
+    this.manualFilterText = e.target.value;
+    this.#render();
+  };
+
+  #handleManualCategoryFilter = (e) => {
+    this.manualCategoryFilter = e.target.value;
+    this.#render();
+  };
+
   #loadWorkspaces = async () => {
     this.workspaces = await this.backendActor.list_my_workspaces();
     let active = this.workspaces.find((w) => 'Active' in w.status);
@@ -532,6 +963,82 @@ class App {
     }
     await this.backendActor.delete_workspace(this.activeWorkspaceId);
     await this.#loadWorkspaces();
+  };
+
+  #activeWorkspace = () => this.workspaces.find((w) => w.id === this.activeWorkspaceId);
+
+  // Pillar 10 extension (Phase 5.6.1) — pinned per-workspace context, saved
+  // on submit rather than tracked reactively (same DOM-read-on-submit
+  // pattern as #saveProfile) so typing in this box doesn't fight with the
+  // mic's own re-renders firing on every interim speech result.
+  #saveScratchpad = async (e) => {
+    e.preventDefault();
+    const value = e.target.elements.scratchpadText.value;
+    await this.backendActor.update_scratchpad(this.activeWorkspaceId, value);
+    this.workspaces = await this.backendActor.list_my_workspaces();
+    this.statusMessage = 'Scratchpad saved.';
+    this.#render();
+  };
+
+  // Pillar 10 extension (Phase 5.6.1) — purely a visual/organizational pin;
+  // per Pillar 6's "global, not siloed" rule, this never changes what RAG
+  // actually retrieves, only what's displayed as "active for this project."
+  #toggleAssociatedManual = async (manualName, checked) => {
+    const workspace = this.#activeWorkspace();
+    const current = new Set(workspace?.associated_manuals?.[0] ?? []);
+    if (checked) current.add(manualName);
+    else current.delete(manualName);
+    await this.backendActor.update_associated_manuals(this.activeWorkspaceId, [...current]);
+    this.workspaces = await this.backendActor.list_my_workspaces();
+    this.#render();
+  };
+
+  // Pillar 10 extension (Phase 5.6.1) — a separate synthesis call (proxy
+  // /project-brief), distinct from #exportWorkspace's verbatim transcript
+  // dump. Downloads the result the same blob-download way as the export.
+  #generateProjectBrief = async () => {
+    if (this.history.length === 0) {
+      window.alert('Nothing to summarize yet — this workspace has no conversation history.');
+      return;
+    }
+    const workspace = this.#activeWorkspace();
+    this.statusMessage = 'Generating project brief (this can take a moment)...';
+    this.#render();
+    try {
+      const response = await fetch(`${PROXY_URL}/project-brief`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Skippy-Session': this.sessionToken },
+        body: JSON.stringify({
+          history: this.history.map(({ role, content }) => ({ role, content })),
+          title: workspace?.name || 'Workspace',
+        }),
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || 'Failed to generate brief.');
+
+      const doc = new Document({
+        sections: [
+          {
+            children: [
+              ...projectBriefMetadataParagraphs(workspace),
+              ...markdownToDocxParagraphs(data.brief),
+            ],
+          },
+        ],
+      });
+      const blob = await Packer.toBlob(doc);
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      const slug = (workspace?.name || 'workspace').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+      link.download = `${slug || 'skippy-workspace'}-brief-${new Date().toISOString()}.docx`;
+      link.click();
+      URL.revokeObjectURL(url);
+      this.statusMessage = 'Project brief downloaded.';
+    } catch (err) {
+      this.statusMessage = `Couldn't generate project brief: ${err.message}`;
+    }
+    this.#render();
   };
 
   #unlockAudioPlayback() {
@@ -740,6 +1247,16 @@ class App {
   // operational mode (Everyday Brain); otherwise stay on whatever mode/brain
   // was already active.
   #detectModeAndBrain(text) {
+    // Pillar 15 — Guest Mode locks the brain/persona that was active the
+    // moment it was enabled; no trigger phrase (voice or typed) can change
+    // either while it's on.
+    if (this.guestMode) {
+      return {
+        mode: this.operationalMode,
+        brain: this.operationalMode === 'tactical' ? 'tactical' : 'everyday',
+      };
+    }
+
     const lower = text.toLowerCase();
 
     if (lower.includes(THINKING_HAT_PHRASE)) {
@@ -828,6 +1345,56 @@ class App {
     if (NOTE_RETRIEVAL_PHRASES.some((phrase) => lowerText.includes(phrase))) {
       await this.#readBackNotes(text, mySeq);
       return;
+    }
+
+    if (!this.guestMode && GUEST_MODE_TRIGGER_PHRASES.some((phrase) => lowerText.includes(phrase))) {
+      this.#enableGuestMode(text);
+      return;
+    }
+
+    // "Tactical Roster" — persona/addressing only. Switching who Skippy is
+    // addressing never touches this.guestMode or anything it gates; a
+    // matched profile only ever changes prompt framing (see rosterContext
+    // in the /respond call below).
+    const matchedRoster = this.rosterProfiles.find((p) => lowerText.includes(p.triggerPhrase));
+    if (matchedRoster) {
+      this.activeRosterProfile = matchedRoster;
+      const remainder = lowerText.replace(matchedRoster.triggerPhrase, '');
+      if (isTrivialRemainder(remainder)) {
+        const ack = `Noted. I'm now speaking with ${matchedRoster.name}.`;
+        this.#recordTurn(text, ack);
+        this.#render();
+        this.#speak(ack);
+        return;
+      }
+      // Has more attached (e.g. "Skippy, it's Lisa, what's our ETA?") —
+      // fall through and answer it normally with the new context active.
+    }
+
+    const isPublicDemo = CIVILIAN_BRIEFING_PHRASES.some((phrase) => lowerText.includes(phrase));
+
+    const courierContent = extractCourierContent(lowerText, text);
+    if (courierContent !== null) {
+      await this.#queueCourierMessage(text, courierContent, mySeq);
+      return;
+    }
+
+    // Pillar 12 — only meaningful while an emergency is actually active,
+    // same "only matters in context" gating as the web-search affirmation
+    // phrases above.
+    if (this.emergencyActive) {
+      if (STAND_DOWN_PHRASES.some((phrase) => lowerText.includes(phrase))) {
+        this.#standDownEmergency(text);
+        return;
+      }
+      if (OPEN_COMMS_PHRASES.some((phrase) => lowerText.includes(phrase))) {
+        this.#openComms(text);
+        return;
+      }
+      if (GO_DARK_PHRASES.some((phrase) => lowerText.includes(phrase))) {
+        this.#goDark(text);
+        return;
+      }
     }
 
     this.statusMessage = 'Skippy is thinking...';
@@ -1010,6 +1577,18 @@ class App {
           ragContext,
           webContext,
           ragMiss: ragMiss && !webContext,
+          // Pillar 10 extension (Phase 5.6.1) — pinned per-workspace context,
+          // prepended server-side so it doesn't slide out of the rolling
+          // history window during a long session.
+          scratchpad: this.#activeWorkspace()?.scratchpad?.[0] || '',
+          publicDemo: isPublicDemo,
+          // "Tactical Roster" (Pillar 16) — addressing/framing only, never a
+          // permission signal. Guest Mode's restrictions (already enforced
+          // client-side by what UI is hidden, and independent of this field)
+          // stay exactly as they were regardless of who's being addressed.
+          rosterContext: this.activeRosterProfile
+            ? { name: this.activeRosterProfile.name, role: this.activeRosterProfile.role }
+            : null,
         }),
         signal,
       });
@@ -1074,6 +1653,65 @@ class App {
     this.#speak(reply);
   };
 
+  // Pillar 7 (Courier Queue) — queues a message for "the other" whitelisted
+  // Principal and acknowledges locally, same no-LLM-round-trip philosophy as
+  // #readBackNotes/bare-trigger acknowledgments above: there's nothing for
+  // the model to add to a mechanical "message queued" confirmation.
+  #queueCourierMessage = async (originalText, content, mySeq) => {
+    if (!content) {
+      const reply = "Tell them what, exactly? You have to actually include a message, genius.";
+      this.statusMessage = '';
+      this.#recordTurn(originalText, reply);
+      this.#render();
+      this.#speak(reply);
+      return;
+    }
+    this.statusMessage = 'Queuing message...';
+    this.#render();
+    await this.backendActor.queue_courier_message(content);
+    if (mySeq !== this.requestSeq) return; // superseded by a newer utterance
+
+    const reply = "Message queued. I'll pass it along the moment they show their face.";
+    this.statusMessage = '';
+    this.#recordTurn(originalText, reply);
+    this.#render();
+    this.#speak(reply);
+  };
+
+  // Pillar 7 — called once right after login. Delivers any messages the
+  // other whitelisted Principal queued since this Principal's last session,
+  // injected as Skippy's first remark, then cleared (pop_pending_courier_
+  // messages is atomic on the backend side). No LLM call — this is the
+  // sender's literal content, not something to paraphrase or react to.
+  #deliverPendingCourierMessages = async () => {
+    const pending = await this.backendActor.pop_pending_courier_messages();
+    if (pending.length === 0) return;
+    const reply = pending
+      .map((m) => `Before I forget — someone wanted me to pass this along: "${m.content}"`)
+      .join(' ');
+    this.#recordTurn('', reply);
+  };
+
+  // Pillar 8 — read-only, refreshed once after login and on demand via the
+  // dashboard's "Refresh" button. Failures are caught per-source so one
+  // down provider doesn't blank out the other two readouts.
+  #refreshFuel = async () => {
+    try {
+      this.cycleBalance = await this.backendActor.get_cycle_balance();
+    } catch (err) {
+      console.error('[Skippy fuel] cycle balance failed:', err);
+    }
+    try {
+      const response = await fetch(`${PROXY_URL}/api/fuel`, {
+        headers: { 'X-Skippy-Session': this.sessionToken },
+      });
+      this.fuelData = await response.json();
+    } catch (err) {
+      console.error('[Skippy fuel] /api/fuel failed:', err);
+    }
+    this.#render();
+  };
+
   // Dedicated silent stop, distinct from barging in with a new utterance:
   // sending a fresh message (even "stop") still gets its own reply, since
   // it's just normal conversation content. This instead only kills whatever
@@ -1084,6 +1722,170 @@ class App {
     this.currentAbortController?.abort();
     ++this.requestSeq; // discard any late-arriving response from the aborted request
     this.statusMessage = 'Silenced.';
+    this.#render();
+  };
+
+  // Pillar 12 (Guardian Emergency Protocol). Placement protection: only
+  // rendered while operationalMode === 'tactical' (see #render) — there's no
+  // dedicated Steel Rain overlay view yet (Pillar 11 hasn't been built), so
+  // this is today's equivalent of "only reachable from inside Steel Rain."
+  #openEmergencyConfirm = () => {
+    this.emergencyConfirmOpen = true;
+    this.#render();
+  };
+
+  #closeEmergencyConfirm = () => {
+    this.emergencyConfirmOpen = false;
+    this.#render();
+  };
+
+  // 3rd tap. GPS + dispatch + entering Ghost Mode all happen here, in one
+  // deliberate action — no further confirmation steps per the spec.
+  #triggerEmergencyDispatch = async () => {
+    this.emergencyConfirmOpen = false;
+    this.statusMessage = 'Acquiring location...';
+    this.#render();
+
+    let position;
+    try {
+      position = await new Promise((resolve, reject) =>
+        navigator.geolocation.getCurrentPosition(resolve, reject, { enableHighAccuracy: true, timeout: 10000 }),
+      );
+    } catch (err) {
+      this.statusMessage = `Couldn't get GPS location: ${err.message}. Dispatch aborted.`;
+      this.#render();
+      return;
+    }
+
+    try {
+      const response = await fetch(`${PROXY_URL}/emergency-dispatch`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Skippy-Session': this.sessionToken },
+        body: JSON.stringify({
+          lat: position.coords.latitude,
+          lon: position.coords.longitude,
+        }),
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || 'Dispatch failed.');
+
+      this.emergencyToken = data.token;
+      this.emergencyId = await this.backendActor.start_emergency(data.token);
+      this.emergencyActive = true;
+      this.ghostMode = true;
+      this.commsOpen = false;
+      this.statusMessage = '';
+      this.#render();
+      await this.#startGuardianStream();
+    } catch (err) {
+      this.statusMessage = `Emergency dispatch failed: ${err.message}`;
+      this.#render();
+    }
+  };
+
+  // Opens the device-role WebSocket to the proxy's live relay and starts
+  // streaming mic audio up in periodic chunks. The proxy buffers/relays
+  // live (Pillar 1's reasoning — streamed audio doesn't fit the canister's
+  // 2MB message cap) and periodically hands back a "finalize" event with
+  // everything since the last tick, which gets forwarded to the canister's
+  // append-only evidentiary ledger from here (the proxy never calls the
+  // canister directly, per Pillar 1's implementation note).
+  #startGuardianStream = async () => {
+    try {
+      this.emergencyStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    } catch (err) {
+      this.statusMessage = `Couldn't access the microphone: ${err.message}`;
+      this.#render();
+      return;
+    }
+
+    const wsScheme = location.protocol === 'https:' ? 'wss' : 'ws';
+    const ws = new WebSocket(
+      `${wsScheme}://${location.host}${PROXY_URL}/emergency-ws?token=${this.emergencyToken}&role=device`,
+    );
+    this.emergencyWs = ws;
+
+    ws.onmessage = async (event) => {
+      if (typeof event.data !== 'string') {
+        // A relayed push-to-talk burst from a listener — only ever played
+        // through the speaker when comms are explicitly open; Ghost Mode's
+        // whole premise is zero sound/light otherwise.
+        if (this.commsOpen) {
+          const audio = new Audio(URL.createObjectURL(event.data));
+          audio.play().catch(() => {});
+        }
+        return;
+      }
+      let parsed;
+      try {
+        parsed = JSON.parse(event.data);
+      } catch {
+        return;
+      }
+      if (parsed.type === 'finalize') {
+        const bytes = Uint8Array.from(atob(parsed.data), (c) => c.charCodeAt(0));
+        this.backendActor.append_emergency_audio_chunk(this.emergencyId, bytes).catch((err) => {
+          console.error('[Skippy emergency] failed to persist audio chunk:', err);
+        });
+      } else if (parsed.type === 'preset' && this.commsOpen) {
+        window.speechSynthesis?.speak(new SpeechSynthesisUtterance(parsed.text));
+      }
+    };
+
+    ws.onopen = () => {
+      const recorder = new MediaRecorder(this.emergencyStream);
+      recorder.ondataavailable = async (e) => {
+        if (e.data.size > 0 && ws.readyState === WebSocket.OPEN) {
+          ws.send(await e.data.arrayBuffer());
+        }
+      };
+      recorder.start(2000); // 2s chunks, continuously, until #stopGuardianStream
+      this.emergencyRecorder = recorder;
+    };
+  };
+
+  #stopGuardianStream = () => {
+    if (this.emergencyRecorder && this.emergencyRecorder.state !== 'inactive') {
+      this.emergencyRecorder.stop();
+    }
+    this.emergencyRecorder = null;
+    this.emergencyStream?.getTracks().forEach((t) => t.stop());
+    this.emergencyStream = null;
+    this.emergencyWs?.close();
+    this.emergencyWs = null;
+  };
+
+  // "Skippy, stand down" — no phrase was specified in the original spec for
+  // ending the emergency; this one was chosen to fit the existing tactical
+  // theme. Flagged for the user to confirm/rename if they'd prefer another.
+  #standDownEmergency = (text) => {
+    this.#stopGuardianStream();
+    this.emergencyActive = false;
+    this.ghostMode = false;
+    this.commsOpen = false;
+    this.emergencyToken = null;
+    this.emergencyId = null;
+    const reply = 'Standing down. Emergency dispatch ended.';
+    this.statusMessage = '';
+    this.#recordTurn(text, reply);
+    this.#render();
+    this.#speak(reply);
+  };
+
+  #openComms = (text) => {
+    this.commsOpen = true;
+    const reply = 'Comms open.';
+    this.#recordTurn(text, reply);
+    this.#render();
+    this.#speak(reply);
+  };
+
+  // Deliberately no #speak() here — speaking "Going dark" out loud right as
+  // Ghost Mode's whole point is silence would defeat the purpose. Logged to
+  // the transcript only.
+  #goDark = (text) => {
+    this.commsOpen = false;
+    this.#recordTurn(text, 'Going dark.');
     this.#render();
   };
 
@@ -1109,6 +1911,10 @@ class App {
 
   #speak = (text) => {
     if (this.voiceMuted) return;
+    // Ghost Mode's whole premise is zero sound — Skippy's own replies to
+    // unrelated questions asked mid-emergency must stay silent too, not
+    // just the dedicated open-comms/go-dark acknowledgments.
+    if (this.ghostMode && !this.commsOpen) return;
     const cleanText = stripMarkdown(text);
     this.#stopSpeaking();
 
@@ -1248,6 +2054,11 @@ class App {
     this.#render();
   };
 
+  #toggleLexicon = () => {
+    this.lexiconOpen = !this.lexiconOpen;
+    this.#render();
+  };
+
   // Generic by design (matches delete_manual_section on the backend) — works
   // for any manual section, not just notes, so the same button will cover
   // Phase 5.6's Knowledge Manager later.
@@ -1286,12 +2097,21 @@ class App {
     if (!file) return;
 
     const manualName = window.prompt(
-      'Manual name for this upload (e.g. MMUCC_V6):',
-      this.selectedManual,
+      'Manual name for this upload (defaults to the file name — edit if you want something else):',
+      file.name,
     );
-    e.target.value = ''; // always reset so re-selecting the same file fires another change event
-    if (!manualName || !manualName.trim()) return;
+    if (!manualName || !manualName.trim()) {
+      e.target.value = '';
+      return;
+    }
     const name = manualName.trim();
+    const category = (
+      window.prompt(
+        'Category/type for this manual (e.g. code, manual, reference) — optional, helps filtering later:',
+        '',
+      ) || ''
+    ).trim();
+    e.target.value = ''; // always reset so re-selecting the same file fires another change event
 
     this.statusMessage = `Chunking & embedding "${file.name}"...`;
     this.#render();
@@ -1317,7 +2137,8 @@ class App {
         return;
       }
 
-      await this.backendActor.add_manual_chunks(name, data.chunks);
+      await this.backendActor.add_manual_chunks(name, category ? [category] : [], data.chunks);
+      if (category) this.manualCategories.set(name, category);
       if (!this.manualOptions.includes(name)) {
         this.manualOptions = [...this.manualOptions, name];
       }
@@ -1326,8 +2147,19 @@ class App {
       // only ever show a status message, never auto-dump the document's full
       // content onto the screen. Viewing it is the explicit "Open" button's
       // job (select a manual, then open it), not an automatic side effect.
-      this.statusMessage = `Uploaded ${data.chunks.length} chunk(s) into "${name}".`;
+      const successMessage = `Uploaded ${data.chunks.length} chunk(s) into "${name}".`;
+      this.statusMessage = successMessage;
       this.#render();
+      // Auto-clear after a few seconds rather than leaving an upload
+      // confirmation on screen indefinitely — but only if nothing else has
+      // since overwritten it (e.g. the user immediately asked Skippy
+      // something, which has its own status messages we shouldn't stomp on).
+      setTimeout(() => {
+        if (this.statusMessage === successMessage) {
+          this.statusMessage = '';
+          this.#render();
+        }
+      }, 5000);
     } catch (err) {
       this.statusMessage = `Upload failed: ${err.message}`;
       this.#render();
@@ -1355,6 +2187,9 @@ class App {
             Not authorized. Your Principal is not on the whitelist:
           </p>
           <p class="principal">${this.principalText}</p>
+          ${this.authError
+            ? html`<p class="status" style="word-break: break-all;">Error detail: ${this.authError}</p>`
+            : ''}
           <p class="status">
             Add it to <code>COMMANDER_PRINCIPAL</code> or
             <code>PARTNER_PRINCIPAL</code> in <code>.env</code>, then
@@ -1392,7 +2227,41 @@ class App {
 
     let body = html`
       <main>
-        <h1>Skippy Voice Notes</h1>
+        ${this.ghostMode
+          ? html`<div style="position: fixed; inset: 0; background: black; z-index: 9999;"></div>`
+          : ''}
+        <h1>Skippy Voice Notes <button @click=${this.#toggleLexicon} aria-label="Command Lexicon">❓ Commands</button></h1>
+
+        ${this.lexiconOpen
+          ? html`
+              <div
+                style="position: fixed; inset: 0; background: rgba(0,0,0,0.5); display: flex; align-items: center; justify-content: center; z-index: 1000;"
+                @click=${this.#toggleLexicon}
+              >
+                <div
+                  style="background: white; color: black; max-width: 600px; max-height: 80vh; overflow-y: auto; padding: 16px 24px; border-radius: 4px;"
+                  @click=${(e) => e.stopPropagation()}
+                >
+                  <h2>Command Lexicon</h2>
+                  <p>Every active voice/text trigger phrase and what it does.</p>
+                  ${[...new Set(COMMAND_LEXICON_ENTRIES.map((e) => e.category))].map(
+                    (category) => html`
+                      <h3>${category}</h3>
+                      ${COMMAND_LEXICON_ENTRIES.filter((e) => e.category === category).map(
+                        (entry) => html`
+                          <p>
+                            <strong>"${entry.phrases.join('" / "')}"</strong><br />
+                            ${entry.description}
+                          </p>
+                        `,
+                      )}
+                    `,
+                  )}
+                  <button @click=${this.#toggleLexicon}>Close</button>
+                </div>
+              </div>
+            `
+          : ''}
 
         <section class="workspace-switcher">
           <select @change=${this.#handleWorkspaceChange} .value=${this.activeWorkspaceId?.toString() ?? ''}>
@@ -1401,13 +2270,16 @@ class App {
               .map((w) => html`<option value=${w.id.toString()}>${w.name}</option>`)}
           </select>
           <button @click=${this.#createWorkspace}>+ New workspace</button>
-          <button @click=${this.#archiveActiveWorkspace}>Archive</button>
+          <button @click=${this.#archiveActiveWorkspace} ?disabled=${this.guestMode}>Archive</button>
           <button @click=${this.#exportWorkspace} ?disabled=${this.history.length === 0}>
             Export (.md)
           </button>
-          <button @click=${this.#deleteActiveWorkspaceForever}>Delete forever</button>
+          <button @click=${this.#generateProjectBrief} ?disabled=${this.history.length === 0}>
+            Generate Project Brief
+          </button>
+          <button @click=${this.#deleteActiveWorkspaceForever} ?disabled=${this.guestMode}>Delete forever</button>
 
-          ${this.workspaces.some((w) => 'Archived' in w.status)
+          ${this.workspaces.some((w) => 'Archived' in w.status) && !this.guestMode
             ? html`
                 <details class="archived-workspaces">
                   <summary>Archived workspaces</summary>
@@ -1441,7 +2313,7 @@ class App {
           <button @click=${this.#toggleVoiceMuted}>
             ${this.voiceMuted ? '🔇 Muted (text only)' : '🔊 Mute'}
           </button>
-          <button @click=${this.#clearHistory} ?disabled=${this.history.length === 0}>
+          <button @click=${this.#clearHistory} ?disabled=${this.history.length === 0 || this.guestMode}>
             Clear history
           </button>
           <button @click=${this.#logout}>Log out</button>
@@ -1471,19 +2343,211 @@ class App {
           ? html`<p class="status">Last brain: ${this.lastBrain} (${this.lastModel})</p>`
           : ''}
 
-        <details class="persona-settings">
-          <summary>Profile (name &amp; voice)</summary>
-          <form @submit=${this.#saveProfile}>
+        ${this.operationalMode === 'tactical' && !this.emergencyActive && !this.guestMode
+          ? html`
+              <button
+                style="background: #b91c1c; color: white; font-weight: bold; padding: 12px; width: 100%;"
+                @click=${this.#openEmergencyConfirm}
+              >
+                EMERGENCY PANIC
+              </button>
+            `
+          : ''}
+        ${this.emergencyConfirmOpen
+          ? html`
+              <div style="position: fixed; inset: 0; background: rgba(0,0,0,0.7); display: flex; align-items: center; justify-content: center; z-index: 2000;">
+                <div style="background: white; color: black; padding: 24px; border-radius: 4px; max-width: 320px; text-align: center;">
+                  <h2>TRIGGER EMERGENCY DISPATCH?</h2>
+                  <p>This sends your live GPS location and a live audio link to your emergency contacts, and starts silent ambient recording.</p>
+                  <button
+                    style="background: #b91c1c; color: white; font-weight: bold; padding: 12px 24px;"
+                    @click=${this.#triggerEmergencyDispatch}
+                  >
+                    YES, CONFIRM
+                  </button>
+                  <button @click=${this.#closeEmergencyConfirm}>Cancel</button>
+                </div>
+              </div>
+            `
+          : ''}
+        ${this.emergencyActive
+          ? html`<p class="status">🚨 Emergency dispatch active. Say "Skippy, stand down" to end it.</p>`
+          : ''}
+
+        ${this.guestMode
+          ? ''
+          : html`
+              <details class="fuel-gauge">
+                <summary>Fuel &amp; Quotas</summary>
+                <p>
+                  ICP Cycles: ${this.cycleBalance != null ? `${(Number(this.cycleBalance) / 1e12).toFixed(2)}T` : '...'}
+                  <a href="https://nns.ic0.app/" target="_blank" rel="noopener">Top Up</a>
+                </p>
+                <p>
+                  OpenRouter: ${this.fuelData?.openrouter?.error
+                    ? `error: ${this.fuelData.openrouter.error}`
+                    : this.fuelData?.openrouter
+                      ? `$${(this.fuelData.openrouter.totalCredits - this.fuelData.openrouter.totalUsage).toFixed(2)} remaining`
+                      : '...'}
+                  <a href="https://openrouter.ai/credits" target="_blank" rel="noopener">Top Up</a>
+                </p>
+                <p>
+                  ElevenLabs: ${this.fuelData?.elevenlabs?.error
+                    ? `error: ${this.fuelData.elevenlabs.error}`
+                    : this.fuelData?.elevenlabs
+                      ? `${this.fuelData.elevenlabs.characterCount}/${this.fuelData.elevenlabs.characterLimit} characters`
+                      : '...'}
+                  <a href="https://elevenlabs.io/app/subscription" target="_blank" rel="noopener">Top Up</a>
+                </p>
+                <button @click=${this.#refreshFuel}>Refresh</button>
+              </details>
+
+              <details class="persona-settings">
+                <summary>Profile (name &amp; voice)</summary>
+                <form @submit=${this.#saveProfile}>
+                  <label>
+                    Name
+                    <input name="profileName" type="text" .value=${this.profileName} placeholder="Commander" />
+                  </label>
+                  <label>
+                    ElevenLabs Voice ID
+                    <input name="profileVoiceId" type="text" .value=${this.profileVoiceId} placeholder="(default voice)" />
+                  </label>
+                  <button type="submit">Save profile</button>
+                </form>
+              </details>
+            `}
+
+        <details class="workspace-context">
+          <summary>Scratchpad &amp; pinned manuals</summary>
+          <form @submit=${this.#saveScratchpad}>
             <label>
-              Name
-              <input name="profileName" type="text" .value=${this.profileName} placeholder="Commander" />
+              Pinned notes (case numbers, constraints — included on every reply this session)
+              <textarea name="scratchpadText" rows="3" .value=${this.#activeWorkspace()?.scratchpad?.[0] ?? ''}></textarea>
             </label>
-            <label>
-              ElevenLabs Voice ID
-              <input name="profileVoiceId" type="text" .value=${this.profileVoiceId} placeholder="(default voice)" />
-            </label>
-            <button type="submit">Save profile</button>
+            <button type="submit">Save scratchpad</button>
           </form>
+          <fieldset class="manual-mapping">
+            <legend>Manuals pinned to this project (visual reminder only — every manual stays searchable everywhere)</legend>
+            ${(() => {
+              const pinned = this.#activeWorkspace()?.associated_manuals?.[0] ?? [];
+              return pinned.length
+                ? html`
+                    <p class="pinned-chips">
+                      ${pinned.map(
+                        (manualName) => html`
+                          <span class="chip">
+                            ${manualName}
+                            <button
+                              type="button"
+                              aria-label="Unpin ${manualName}"
+                              @click=${() => this.#toggleAssociatedManual(manualName, false)}
+                            >
+                              ×
+                            </button>
+                          </span>
+                        `,
+                      )}
+                    </p>
+                  `
+                : html`<p class="status">No manuals pinned yet.</p>`;
+            })()}
+            <label style="display: block; margin-top: 8px;">
+              Category/type
+              <select .value=${this.manualCategoryFilter} @change=${this.#handleManualCategoryFilter}>
+                <option value="">All categories (global search by name)</option>
+                ${[...new Set(this.manualCategories.values())]
+                  .sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' }))
+                  .map((category) => html`<option value=${category}>${category}</option>`)}
+              </select>
+            </label>
+            <input
+              type="text"
+              style="display: block; margin-top: 8px;"
+              placeholder="Filter manuals by name (e.g. rust, sql, mmucc)..."
+              .value=${this.manualFilterText}
+              @input=${this.#handleManualFilterInput}
+            />
+            <div style="margin-top: 8px;">
+              ${this.manualOptions
+                .filter(
+                  (manualName) =>
+                    !this.manualCategoryFilter ||
+                    this.manualCategories.get(manualName) === this.manualCategoryFilter,
+                )
+                .filter((manualName) =>
+                  manualName.toLowerCase().includes(this.manualFilterText.trim().toLowerCase()),
+                )
+                .map(
+                  (manualName) => html`
+                  <label style="display: block;">
+                    <input
+                      type="checkbox"
+                      .checked=${(this.#activeWorkspace()?.associated_manuals?.[0] ?? []).includes(manualName)}
+                      @change=${(e) => this.#toggleAssociatedManual(manualName, e.target.checked)}
+                    />
+                    ${manualName}
+                    ${this.manualCategories.has(manualName)
+                      ? html`<span class="manual-category-tag">[${this.manualCategories.get(manualName)}]</span>`
+                      : ''}
+                  </label>
+                `,
+                )}
+            </div>
+          </fieldset>
+        </details>
+
+        <details class="workspace-security">
+          <summary>Workspace security</summary>
+          ${this.guestMode
+            ? html`
+                <p class="status">🔒 Guest Mode active — brain/persona locked, destructive and admin actions hidden.</p>
+                <button @click=${this.#unlockGuestMode}>Unlock (re-authenticate)</button>
+                ${this.guestUnlockError ? html`<p class="status">${this.guestUnlockError}</p>` : ''}
+              `
+            : html`<button @click=${() => this.#enableGuestMode()}>Enable Guest Mode</button>`}
+        </details>
+
+        <details class="tactical-roster">
+          <summary>Tactical Roster</summary>
+          <p class="status">
+            Addressing/tone only — never changes active permissions. Whatever Guest Mode (above)
+            currently restricts stays restricted no matter who's registered here.
+          </p>
+          ${this.activeRosterProfile
+            ? html`
+                <p class="status">
+                  Currently speaking with: <strong>${this.activeRosterProfile.name}</strong>
+                  ${this.activeRosterProfile.role ? ` (${this.activeRosterProfile.role})` : ''}
+                  <button @click=${this.#clearActiveRosterProfile}>Clear</button>
+                </p>
+              `
+            : ''}
+          <form @submit=${this.#addRosterProfile}>
+            <label>
+              Name/Callsign
+              <input name="rosterName" type="text" placeholder="Lisa" required />
+            </label>
+            <label>
+              Voice Trigger Phrase
+              <input name="rosterTrigger" type="text" placeholder="it's lisa" required />
+            </label>
+            <label>
+              Role/Significance
+              <input name="rosterRole" type="text" placeholder="Insurance adjuster" />
+            </label>
+            <button type="submit">+ Add profile</button>
+          </form>
+          <ul>
+            ${this.rosterProfiles.map(
+              (p) => html`
+                <li>
+                  <strong>${p.name}</strong> — "${p.triggerPhrase}"${p.role ? ` (${p.role})` : ''}
+                  <button @click=${() => this.#deleteRosterProfile(p.triggerPhrase)}>Delete</button>
+                </li>
+              `,
+            )}
+          </ul>
         </details>
 
         <div class="conversation-transcript">

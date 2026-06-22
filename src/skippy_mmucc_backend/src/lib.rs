@@ -20,6 +20,9 @@ const PARTNER_PRINCIPAL_MEMORY_ID: MemoryId = MemoryId::new(3);
 const HISTORY_MEMORY_ID: MemoryId = MemoryId::new(4);
 const PERSONA_PROFILES_MEMORY_ID: MemoryId = MemoryId::new(5);
 const WORKSPACES_MEMORY_ID: MemoryId = MemoryId::new(6);
+const COURIER_QUEUE_MEMORY_ID: MemoryId = MemoryId::new(7);
+const EMERGENCY_EVENTS_MEMORY_ID: MemoryId = MemoryId::new(8);
+const EMERGENCY_AUDIO_MEMORY_ID: MemoryId = MemoryId::new(9);
 
 // Rolling cap on a Principal's stored conversation: applied at write time so
 // both stable memory usage and the context forwarded to OpenRouter stay
@@ -51,6 +54,13 @@ pub struct DocumentSection {
     /// that aren't part of the semantic search corpus (e.g. notes saved via
     /// the plain `add_manual_section`/`#saveNote` path).
     pub embedding: Option<Vec<f32>>,
+    /// Document-level type/category (e.g. "code", "manual", "reference"),
+    /// chosen at upload time and applied identically to every chunk of one
+    /// document — same redundant-per-row pattern as `manual_name`. `Option`
+    /// from day one (see the `Workspace.scratchpad` decode bug this same
+    /// session for why a bare `String` field would break old records).
+    /// `None`/empty for uncategorized manuals and for plain notes.
+    pub category: Option<String>,
 }
 
 impl Storable for DocumentSection {
@@ -167,6 +177,21 @@ pub enum WorkspaceStatus {
 /// A user-defined project/context partition for conversation history
 /// (Pillar 10). Private per-Principal — never shared between the two
 /// whitelisted users, unlike the manual/RAG library (Pillar 6).
+///
+/// `scratchpad` (Pillar 10 extension, Phase 5.6.1): free text pinned to this
+/// workspace and prepended to every `/respond` call for it, so critical
+/// metadata (case numbers, constraints) doesn't slide out of the rolling
+/// history window. `associated_manuals` is purely a visual/organizational
+/// pin (a checklist of manual names) — it never changes what RAG actually
+/// retrieves (Pillar 6's "global, not siloed" rule still holds; every
+/// workspace can pull from every manual regardless of this list).
+///
+/// Both are `Option` rather than bare `String`/`Vec<String>` — confirmed
+/// live 2026-06-21: Candid's decode only defaults a *missing* field to its
+/// type's default when that field is `Option<T>` (decodes to `None`); a
+/// plain `String`/`Vec<T>` field absent from already-stored bytes (any
+/// `Workspace` record created before this change) fails to decode with a
+/// hard subtyping-error trap. `None` means "empty," same as before.
 #[derive(CandidType, Deserialize, Clone, Debug)]
 pub struct Workspace {
     pub id: u64,
@@ -174,6 +199,8 @@ pub struct Workspace {
     pub name: String,
     pub status: WorkspaceStatus,
     pub created_at: u64,
+    pub scratchpad: Option<String>,
+    pub associated_manuals: Option<Vec<String>>,
 }
 
 impl Storable for Workspace {
@@ -190,7 +217,115 @@ impl Storable for Workspace {
     }
 
     const BOUND: Bound = Bound::Bounded {
+        // Bumped from 2_000 — a scratchpad can hold a real paragraph of notes
+        // plus a list of manual names; 10kB is comfortably generous for both
+        // while still nowhere near the document-section bound.
+        max_size: 10_000,
+        is_fixed_size: false,
+    };
+}
+
+/// Pillar 7 (Courier Queue) — a pending cross-profile message, queued by one
+/// whitelisted Principal for the other. No `recipient` field needed: with
+/// exactly two whitelisted Principals (Pillar 2), "the other one" is always
+/// unambiguous given the sender, resolved server-side in
+/// `queue_courier_message` — the frontend never needs to know the other
+/// Principal's value at all.
+#[derive(CandidType, Deserialize, Clone, Debug)]
+pub struct CourierMessage {
+    pub id: u64,
+    pub recipient: Principal,
+    pub sender: Principal,
+    pub content: String,
+    pub created_at: u64,
+}
+
+impl Storable for CourierMessage {
+    fn to_bytes(&self) -> Cow<'_, [u8]> {
+        Cow::Owned(Encode!(self).unwrap())
+    }
+
+    fn into_bytes(self) -> Vec<u8> {
+        Encode!(&self).unwrap()
+    }
+
+    fn from_bytes(bytes: Cow<[u8]>) -> Self {
+        Decode!(bytes.as_ref(), Self).unwrap()
+    }
+
+    const BOUND: Bound = Bound::Bounded {
         max_size: 2_000,
+        is_fixed_size: false,
+    };
+}
+
+/// Pillar 12 (Guardian Emergency Protocol) — one triggered panic event. The
+/// `secure_token` is what the SMS link to whitelist contacts carries; the
+/// proxy resolves it to find the right in-memory live-audio buffer, never
+/// the canister directly (contacts viewing the live feed never call the
+/// canister at all — only the device owner's own authenticated session ever
+/// writes here, via `append_emergency_audio_chunk`).
+#[derive(CandidType, Deserialize, Clone, Debug)]
+pub struct EmergencyEvent {
+    pub id: u64,
+    pub owner: Principal,
+    pub secure_token: String,
+    pub started_at: u64,
+}
+
+impl Storable for EmergencyEvent {
+    fn to_bytes(&self) -> Cow<'_, [u8]> {
+        Cow::Owned(Encode!(self).unwrap())
+    }
+
+    fn into_bytes(self) -> Vec<u8> {
+        Encode!(&self).unwrap()
+    }
+
+    fn from_bytes(bytes: Cow<[u8]>) -> Self {
+        Decode!(bytes.as_ref(), Self).unwrap()
+    }
+
+    const BOUND: Bound = Bound::Bounded {
+        max_size: 500,
+        is_fixed_size: false,
+    };
+}
+
+/// Pillar 12 — one finalized chunk of the permanent evidentiary audio
+/// ledger. Append-only by design: unlike Pillar 4's everyday audio notes,
+/// this is potential evidence of a crime against the user, so no delete
+/// method is ever offered for this store (confirmed in the pillar spec).
+/// `data` is whatever the proxy hands the frontend to forward on — today
+/// that's the raw finalized chunk bytes; real encryption-at-rest (mentioned
+/// in the live spec) is a known gap, not yet implemented — see CLAUDE.md.
+#[derive(CandidType, Deserialize, Clone, Debug)]
+pub struct EmergencyAudioChunk {
+    pub id: u64,
+    pub emergency_id: u64,
+    pub data: Vec<u8>,
+    pub created_at: u64,
+}
+
+impl Storable for EmergencyAudioChunk {
+    fn to_bytes(&self) -> Cow<'_, [u8]> {
+        Cow::Owned(Encode!(self).unwrap())
+    }
+
+    fn into_bytes(self) -> Vec<u8> {
+        Encode!(&self).unwrap()
+    }
+
+    fn from_bytes(bytes: Cow<[u8]>) -> Self {
+        Decode!(bytes.as_ref(), Self).unwrap()
+    }
+
+    const BOUND: Bound = Bound::Bounded {
+        // A few seconds of compressed (e.g. Opus/WebM) audio comfortably
+        // fits well under 1MB; well clear of the 2MB IC message cap that's
+        // exactly why this is chunked+finalized periodically rather than
+        // streamed straight through, per Pillar 1's existing reasoning.
+        max_size: 1_000_000,
         is_fixed_size: false,
     };
 }
@@ -276,6 +411,21 @@ thread_local! {
             MEMORY_MANAGER.with(|m| m.borrow().get(WORKSPACES_MEMORY_ID)),
         ));
 
+    static COURIER_QUEUE: RefCell<StableBTreeMap<u64, CourierMessage, Memory>> =
+        RefCell::new(StableBTreeMap::init(
+            MEMORY_MANAGER.with(|m| m.borrow().get(COURIER_QUEUE_MEMORY_ID)),
+        ));
+
+    static EMERGENCY_EVENTS: RefCell<StableBTreeMap<u64, EmergencyEvent, Memory>> =
+        RefCell::new(StableBTreeMap::init(
+            MEMORY_MANAGER.with(|m| m.borrow().get(EMERGENCY_EVENTS_MEMORY_ID)),
+        ));
+
+    static EMERGENCY_AUDIO: RefCell<StableBTreeMap<u64, EmergencyAudioChunk, Memory>> =
+        RefCell::new(StableBTreeMap::init(
+            MEMORY_MANAGER.with(|m| m.borrow().get(EMERGENCY_AUDIO_MEMORY_ID)),
+        ));
+
     static PERSONA_PROFILES: RefCell<StableBTreeMap<Principal, PersonaProfile, Memory>> =
         RefCell::new(StableBTreeMap::init(
             MEMORY_MANAGER.with(|m| m.borrow().get(PERSONA_PROFILES_MEMORY_ID)),
@@ -327,7 +477,7 @@ fn take_next_id() -> u64 {
 fn add_manual_section(manual_name: String, section: String, title: String, content: String) -> u64 {
     assert_whitelisted();
     let id = take_next_id();
-    let doc = DocumentSection { id, manual_name, section, title, content, embedding: None };
+    let doc = DocumentSection { id, manual_name, section, title, content, embedding: None, category: None };
     MANUAL_SECTIONS.with(|s| s.borrow_mut().insert(id, doc));
     id
 }
@@ -337,7 +487,7 @@ fn add_manual_section(manual_name: String, section: String, title: String, conte
 /// `add_manual_section`-style calls, each of which would be its own
 /// consensus round trip.
 #[update]
-fn add_manual_chunks(manual_name: String, chunks: Vec<NewChunk>) -> Vec<u64> {
+fn add_manual_chunks(manual_name: String, category: Option<String>, chunks: Vec<NewChunk>) -> Vec<u64> {
     assert_whitelisted();
     MANUAL_SECTIONS.with(|s| {
         let mut s = s.borrow_mut();
@@ -352,6 +502,7 @@ fn add_manual_chunks(manual_name: String, chunks: Vec<NewChunk>) -> Vec<u64> {
                     title: chunk.title,
                     content: chunk.content,
                     embedding: Some(normalize(chunk.embedding)),
+                    category: category.clone(),
                 };
                 s.insert(id, doc);
                 id
@@ -487,6 +638,51 @@ fn delete_manual_section(id: u64) -> bool {
     MANUAL_SECTIONS.with(|s| s.borrow_mut().remove(&id)).is_some()
 }
 
+/// Distinct manual names that actually have at least one stored section —
+/// used by the frontend to populate manual pickers/checklists with real
+/// content instead of a hardcoded guess-list (confirmed live 2026-06-21: the
+/// old frontend constant included `MMUCC_V6`/`ANSI_D16` as always-present
+/// options even though nothing had ever been uploaded under those names,
+/// which is misleading in the Pillar 10 "pinned manuals" checklist
+/// specifically — checking a manual there implies it's real reference
+/// material for the project).
+#[query]
+fn list_manual_names() -> Vec<String> {
+    assert_whitelisted();
+    let mut names: Vec<String> = MANUAL_SECTIONS.with(|s| {
+        s.borrow()
+            .iter()
+            .map(|entry| entry.value().manual_name.clone())
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect()
+    });
+    names.sort();
+    names
+}
+
+/// (manual_name, category) pairs for every manual that has a non-empty
+/// category set — lets the frontend filter the pinned-manuals checklist by
+/// type before sub-filtering by name. One category per manual_name (the
+/// first non-empty one found among its chunks; in practice every chunk of
+/// one upload shares the same category, set once at upload time).
+#[query]
+fn manual_category_map() -> Vec<(String, String)> {
+    assert_whitelisted();
+    let mut map = std::collections::BTreeMap::new();
+    MANUAL_SECTIONS.with(|s| {
+        for entry in s.borrow().iter() {
+            let doc = entry.value();
+            if let Some(category) = &doc.category {
+                if !category.is_empty() {
+                    map.entry(doc.manual_name.clone()).or_insert_with(|| category.clone());
+                }
+            }
+        }
+    });
+    map.into_iter().collect()
+}
+
 #[query]
 fn list_sections_by_manual(manual_name: String) -> Vec<DocumentSection> {
     assert_whitelisted();
@@ -570,9 +766,33 @@ fn create_workspace(name: String) -> u64 {
         name,
         status: WorkspaceStatus::Active,
         created_at: ic_cdk::api::time(),
+        scratchpad: None,
+        associated_manuals: None,
     };
     WORKSPACES.with(|w| w.borrow_mut().insert(id, workspace));
     id
+}
+
+/// Pillar 10 extension (Phase 5.6.1) — overwrites the workspace's pinned
+/// scratchpad text. A plain set, not an append, matching the sidebar text
+/// box's own save semantics (the whole field is edited and re-saved).
+#[update]
+fn update_scratchpad(workspace_id: u64, scratchpad: String) {
+    let caller = assert_whitelisted();
+    let mut workspace = assert_workspace_owner(caller, workspace_id);
+    workspace.scratchpad = Some(scratchpad);
+    WORKSPACES.with(|w| w.borrow_mut().insert(workspace_id, workspace));
+}
+
+/// Pillar 10 extension (Phase 5.6.1) — overwrites the full list of manual
+/// names visually pinned to this workspace. Purely organizational: does not
+/// affect what RAG actually retrieves (Pillar 6's "global, not siloed" rule).
+#[update]
+fn update_associated_manuals(workspace_id: u64, manuals: Vec<String>) {
+    let caller = assert_whitelisted();
+    let mut workspace = assert_workspace_owner(caller, workspace_id);
+    workspace.associated_manuals = Some(manuals);
+    WORKSPACES.with(|w| w.borrow_mut().insert(workspace_id, workspace));
 }
 
 #[query]
@@ -677,6 +897,142 @@ fn set_persona_profile(name: String, voice_id: String) {
 fn get_my_persona_profile() -> Option<PersonaProfile> {
     let caller = assert_whitelisted();
     PERSONA_PROFILES.with(|p| p.borrow().get(&caller))
+}
+
+/// Pillar 7 — queues a message for "the other" whitelisted Principal. With
+/// exactly two whitelisted Principals, the recipient is always unambiguous
+/// given the sender: whichever of commander/partner isn't the caller.
+#[update]
+fn queue_courier_message(content: String) -> u64 {
+    let caller = assert_whitelisted();
+    let commander = COMMANDER_PRINCIPAL.with(|c| *c.borrow().get());
+    let partner = PARTNER_PRINCIPAL.with(|c| *c.borrow().get());
+    let recipient = if caller == commander { partner } else { commander };
+    let id = take_next_id();
+    let message = CourierMessage {
+        id,
+        recipient,
+        sender: caller,
+        content,
+        created_at: ic_cdk::api::time(),
+    };
+    COURIER_QUEUE.with(|q| q.borrow_mut().insert(id, message));
+    id
+}
+
+/// Pillar 7 — delivers and clears every pending message addressed to the
+/// caller in one atomic call, per spec ("delivered... then cleared"). An
+/// `#[update]`, not `#[query]`, since it mutates the queue.
+#[update]
+fn pop_pending_courier_messages() -> Vec<CourierMessage> {
+    let caller = assert_whitelisted();
+    COURIER_QUEUE.with(|q| {
+        let mut q = q.borrow_mut();
+        let pending: Vec<CourierMessage> = q
+            .iter()
+            .filter(|entry| entry.value().recipient == caller)
+            .map(|entry| entry.value().clone())
+            .collect();
+        for message in &pending {
+            q.remove(&message.id);
+        }
+        pending
+    })
+}
+
+fn assert_emergency_owner(caller: Principal, emergency_id: u64) -> EmergencyEvent {
+    let event = EMERGENCY_EVENTS.with(|e| e.borrow().get(&emergency_id));
+    match event {
+        Some(e) if e.owner == caller => e,
+        _ => ic_cdk::trap("Emergency event not found or not owned by caller."),
+    }
+}
+
+/// Pillar 12 — records a triggered panic event for the permanent record.
+/// `secure_token` is generated by the *proxy* (not here), since the proxy
+/// needs it immediately to set up its own in-memory live-audio buffer
+/// before the canister is ever involved — this call just persists the
+/// association for the owner's own evidentiary ledger.
+#[update]
+fn start_emergency(secure_token: String) -> u64 {
+    let caller = assert_whitelisted();
+    let id = take_next_id();
+    let event = EmergencyEvent {
+        id,
+        owner: caller,
+        secure_token,
+        started_at: ic_cdk::api::time(),
+    };
+    EMERGENCY_EVENTS.with(|e| e.borrow_mut().insert(id, event));
+    id
+}
+
+/// Pillar 12 — appends one finalized audio chunk to the permanent,
+/// append-only evidentiary ledger. No corresponding delete method exists
+/// for this store, deliberately — see `EmergencyAudioChunk`'s doc comment.
+#[update]
+fn append_emergency_audio_chunk(emergency_id: u64, data: Vec<u8>) -> u64 {
+    let caller = assert_whitelisted();
+    assert_emergency_owner(caller, emergency_id);
+    let id = take_next_id();
+    let chunk = EmergencyAudioChunk {
+        id,
+        emergency_id,
+        data,
+        created_at: ic_cdk::api::time(),
+    };
+    EMERGENCY_AUDIO.with(|a| a.borrow_mut().insert(id, chunk));
+    id
+}
+
+#[query]
+fn list_emergency_audio_chunks(emergency_id: u64) -> Vec<EmergencyAudioChunk> {
+    let caller = assert_whitelisted();
+    assert_emergency_owner(caller, emergency_id);
+    EMERGENCY_AUDIO.with(|a| {
+        a.borrow()
+            .iter()
+            .filter(|entry| entry.value().emergency_id == emergency_id)
+            .map(|entry| entry.value().clone())
+            .collect()
+    })
+}
+
+#[query]
+fn list_my_emergencies() -> Vec<EmergencyEvent> {
+    let caller = assert_whitelisted();
+    EMERGENCY_EVENTS.with(|e| {
+        e.borrow()
+            .iter()
+            .filter(|entry| entry.value().owner == caller)
+            .map(|entry| entry.value().clone())
+            .collect()
+    })
+}
+
+/// Pillar 8 (Fuel & Quotas Dashboard) — exposes the canister's own cycle
+/// balance for the Fuel Gauge UI. Gated by the same two-Principal whitelist
+/// rather than a separate admin concept — Pillar 8's spec flags that a real
+/// admin/owner distinction is a future scoping question; with exactly two
+/// users today, reusing assert_whitelisted() is the simplest correct choice.
+#[query]
+fn get_cycle_balance() -> u64 {
+    assert_whitelisted();
+    ic_cdk::api::canister_cycle_balance() as u64
+}
+
+/// Pillar 15 (Sovereign Guest Lockout) — the frontend's Guest Mode unlock
+/// gate. Deliberately just assert_whitelisted() wrapped in a dedicated name
+/// rather than a new auth mechanism: the real security boundary is the
+/// frontend forcing a *fresh* WebAuthn ceremony before calling this with the
+/// resulting identity (see #unlockGuestMode in App.js) — this check only
+/// adds "and it must be one of the two whitelisted Principals," not "any
+/// successfully authenticated identity" (e.g. a guest's own unrelated II
+/// anchor).
+#[query]
+fn verify_unlock() -> bool {
+    assert_whitelisted();
+    true
 }
 
 #[query]
