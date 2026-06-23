@@ -71,6 +71,27 @@ type EmergencyAudioChunk = record {
     created_at : nat64;
 };
 
+type EvolutionProfile = record {
+    snark_level : float32;
+    vendor_skepticism : float32;
+    technical_precision : float32;
+    proactive_interruption : float32;
+};
+
+type EvolutionDeltas = record {
+    snark_level_delta : float32;
+    vendor_skepticism_delta : float32;
+    technical_precision_delta : float32;
+    proactive_interruption_delta : float32;
+};
+
+type EvolutionLogEntry = record {
+    id : nat64;
+    owner : principal;
+    timestamp : nat64;
+    summary : text;
+};
+
 service : (principal, principal) -> {
     "greet": (text) -> (text) query;
 
@@ -102,6 +123,10 @@ service : (principal, principal) -> {
 
     "set_persona_profile": (text, text) -> ();
     "get_my_persona_profile": () -> (opt PersonaProfile) query;
+
+    "get_my_evolution_profile": () -> (EvolutionProfile) query;
+    "record_evolution_event": (EvolutionDeltas, text) -> (nat64);
+    "list_my_evolution_log": (nat32) -> (vec EvolutionLogEntry) query;
 
     "queue_courier_message": (text) -> (nat64);
     "pop_pending_courier_messages": () -> (vec CourierMessage);

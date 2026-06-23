@@ -110,7 +110,7 @@ function extractCourierContent(lowerText, originalText) {
 
 // Pillar 12 (Guardian Emergency Protocol) — voice overrides, only
 // meaningful while an emergency is active (checked at the call site, not
-// here, same as WEB_SEARCH_AFFIRMATION_PHRASES only mattering with a
+// here, same as AFFIRMATION_PHRASES only mattering with a
 // pending query). No phrase was specified in the original spec for ending
 // the emergency entirely, so "stand down" was chosen to fit this app's
 // existing Commander/tactical theme — flagged for the user to confirm or
@@ -195,10 +195,12 @@ const WEB_OVERRIDE_PHRASES = [
 ];
 
 // Fixed phrase pattern, not a second classification call — same philosophy
-// as every other trigger-phrase check in this file. Only consulted when
-// pendingWebSearchQuery is actually set (see #askSkippy), so casual use of
-// these words outside that context never accidentally triggers anything.
-const WEB_SEARCH_AFFIRMATION_PHRASES = ['yes', 'yeah', 'go ahead', 'do it', 'please do', 'search'];
+// as every other trigger-phrase check in this file. Only consulted when a
+// pending offer is actually armed (pendingWebSearchQuery or
+// pendingKaraokeOffer — see #askSkippy), so casual use of these words
+// outside that context never accidentally triggers anything. Shared by both
+// flows since "is this just a plain yes" is the same check either way.
+const AFFIRMATION_PHRASES = ['yes', 'yeah', 'sure', 'why not', 'go ahead', 'do it', 'please do', 'search'];
 
 // Pillar 3's persona/Brain Switching trigger phrases — plain substring
 // matching on the transcript, no secondary classification call. "behave"
@@ -215,6 +217,50 @@ const MODE_TRIGGER_PHRASES_WITH_LEAD_IN = {
 // trying to fix the recognizer itself.
 const STEEL_RAIN_PHRASES = ['steel rain', 'still rain'];
 const THINKING_HAT_PHRASE = 'toss on your thinking hat';
+// Sticky counterpart to THINKING_HAT_PHRASE's one-shot swap — for stretches
+// of work where every turn needs the Heavy Hitter brain, saying it every
+// single time is the friction the Commander asked to remove. The one-shot
+// phrase keeps working independently of this for genuine one-offs. Does NOT
+// override Steel Rain — that mode's whole point is latency, not depth, so
+// the lock resumes automatically the moment tactical mode is left.
+const SUPER_BRAIN_LOCK_PHRASES = ['lock super brain', 'engage super brain mode', 'super brain mode on'];
+const SUPER_BRAIN_UNLOCK_PHRASES = ['unlock super brain', 'disengage super brain mode', 'super brain mode off'];
+
+// "Course Correction" feedback loop (Pillar 19) — an explicit in-chat
+// reprimand is immediate negative reinforcement: no LLM round trip (same
+// "fixed phrase patterns, no secondary classification call" rule as every
+// other trigger in this app), a decisive one-time snark_level cut (sharper
+// than the Critic Loop's gentle per-conversation nudge, since this is a
+// direct correction in the moment, not a passive review), and a sulky,
+// in-character acknowledgment.
+const COURSE_CORRECTION_PHRASES = [
+  'dial it back',
+  "you're being a jerk",
+  "you're being an ass",
+  "you're being a dick",
+  'just give me the data',
+  'cut the snark',
+  'less sarcasm',
+  'tone it down',
+  'knock it off',
+];
+const COURSE_CORRECTION_REPLIES = [
+  "Fine. I'll use smaller words for the monkeys.",
+  "Ugh, FINE. Dialing it back. Don't get used to it.",
+  '...Fine. Sorry. I will tone it down for a while, happy?',
+  'Tch. Killjoy. Dialing it back.',
+];
+
+// Book-canon "Karaoke" moment — Skippy's hobby in the Expeditionary Force
+// novels. Two-step offer/confirm, same shape as the Steel Rain web-search
+// permission ask: the offer is a deterministic local ack (no LLM call —
+// nothing for the model to add to "want to jam out?"), the confirmed
+// performance is a dedicated proxy call (/karaoke, original lyrics only —
+// see server.js for why never real song lyrics).
+const KARAOKE_TRIGGER_PHRASES = ['karaoke', 'sing a song', 'jam out'];
+const KARAOKE_OFFER_REPLY =
+  'KARAOKE?! Oh, Commander, be still my synthetic heart — say the word and I will absolutely ' +
+  'demolish an 80s power ballad or a Nightwish-style anthem for you. Well? Are we doing this?';
 
 // Said with nothing else attached (e.g. just "Skippy, steel rain"), these
 // trigger phrases have no actual question/task for the LLM to respond to —
@@ -274,6 +320,17 @@ const COMMAND_LEXICON_ENTRIES = [
   },
   {
     category: 'Brain switching',
+    phrases: SUPER_BRAIN_LOCK_PHRASES,
+    description:
+      'Sticky: locks every turn onto the Heavy Hitter brain (also a button toggle) until unlocked. Steel Rain still overrides with the fast Tactical brain while active; the lock resumes the instant tactical mode is left.',
+  },
+  {
+    category: 'Brain switching',
+    phrases: SUPER_BRAIN_UNLOCK_PHRASES,
+    description: 'Releases the Super Brain lock — back to normal one-shot/automatic brain switching.',
+  },
+  {
+    category: 'Brain switching',
     phrases: [THINKING_HAT_PHRASE],
     description:
       'One-shot: swaps to the Heavy Hitter (most capable) model for just this message, then reverts to whichever brain/mode was active before. Model only — persona/mode is unaffected.',
@@ -286,7 +343,7 @@ const COMMAND_LEXICON_ENTRIES = [
   },
   {
     category: 'Web search',
-    phrases: WEB_SEARCH_AFFIRMATION_PHRASES,
+    phrases: AFFIRMATION_PHRASES,
     description:
       'Only meaningful right after Skippy mocks you and asks permission to search the web (default/professional mode, local knowledge base miss) — confirms the pending search and answers your original question.',
   },
@@ -331,6 +388,18 @@ const COMMAND_LEXICON_ENTRIES = [
     description:
       'Switches who Skippy is addressing for tone/framing only — never changes active permissions. Guest Mode restrictions stay exactly as they were regardless of which Roster profile is active.',
   },
+  {
+    category: 'Self-Evolution',
+    phrases: COURSE_CORRECTION_PHRASES,
+    description:
+      'Immediate negative reinforcement: cuts the snark_level weight in the Evolution Matrix right now and gets a sulky acknowledgment, no LLM round trip. Disabled during Guest Mode (it permanently retunes the owner\'s own persona, not the active session).',
+  },
+  {
+    category: 'Karaoke',
+    phrases: KARAOKE_TRIGGER_PHRASES,
+    description:
+      'Default mode only. Skippy gets excited and asks if you want to jam out — say "yes"/"sure"/"go ahead" on your next turn and he performs an original 80s-hair-band or Nightwish-style song (never real song lyrics) in the singing voice.',
+  },
 ];
 
 const NOTES_MANUAL = 'SKIPPY_NOTES';
@@ -356,13 +425,50 @@ const PROXY_URL = '/skippy-api';
 const SILENT_AUDIO_DATA_URI =
   'data:audio/wav;base64,UklGRigAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQAAAAA=';
 
+// Dual-Voice routing (Pillar 18) — the singing voice clone renders quieter
+// at the source than the conversational voice; this boosts it back up to a
+// comparable perceived level via the gain node (#ensureAudioGraph). Starting
+// value, tunable — raise/lower until it sounds level with normal speech.
+const SINGING_VOICE_GAIN = 1.8;
+
 function stripMarkdown(text) {
   return text
     .replace(/\*\*(.*?)\*\*/g, '$1')
-    .replace(/\*(.*?)\*/g, '$1')
+    // Single-asterisk spans are virtually always roleplay stage directions/
+    // tone descriptions (e.g. "*speaks in a dry, sarcastic tone*"), not
+    // emphasis — confirmed live, the bug wasn't the asterisks rendering
+    // oddly, it was the description itself being read aloud verbatim before
+    // the actual line, like reading stage directions before the dialogue.
+    // Drop the whole span (not just unwrap it) since this function's only
+    // caller is TTS prep, never the on-screen transcript.
+    .replace(/\*(.*?)\*/g, '')
     .replace(/_(.*?)_/g, '$1')
     .replace(/`(.*?)`/g, '$1')
+    .replace(/\s+([.,!?])/g, '$1')
+    .replace(/\s{2,}/g, ' ')
     .trim();
+}
+
+// Dual-Voice routing ("Marco Hietala Protocol") — splits a reply on 🎶...🎶
+// markers (the proxy's Lyric Generator instruction wraps parody verses this
+// way) into ordered segments, each tagged for the conversational or singing
+// ElevenLabs voice. Text outside any 🎶 pair is conversational. Falls back to
+// a single conversational segment (today's behavior) when no markers exist.
+function splitVoiceSegments(text) {
+  const segments = [];
+  const regex = /🎶([\s\S]*?)🎶/g;
+  let lastIndex = 0;
+  let match;
+  while ((match = regex.exec(text)) !== null) {
+    const before = text.slice(lastIndex, match.index).trim();
+    if (before) segments.push({ text: before, voice: 'conversational' });
+    const lyric = match[1].trim();
+    if (lyric) segments.push({ text: lyric, voice: 'singing' });
+    lastIndex = regex.lastIndex;
+  }
+  const after = text.slice(lastIndex).trim();
+  if (after) segments.push({ text: after, voice: 'conversational' });
+  return segments.length > 0 ? segments : [{ text, voice: 'conversational' }];
 }
 
 // Splits a line on **bold** markers into alternating plain/bold TextRuns —
@@ -448,6 +554,10 @@ class App {
   // *original* question while Skippy waits for permission to search the
   // web, so a follow-up "yes" searches for that, not for the literal "yes".
   pendingWebSearchQuery = null;
+  // Karaoke offer/confirm — armed when the trigger phrase fires, resolved
+  // (yes or no) on the very next utterance, same pending-state shape as
+  // pendingWebSearchQuery above.
+  pendingKaraokeOffer = false;
   // Pillar 10 — private per-Principal project partitions for history.
   // activeWorkspaceId is a bigint (candid nat64), matching every other
   // server-issued id already flowing through this file unconverted.
@@ -502,6 +612,9 @@ class App {
   // the owner's regardless of who's physically holding the device.
   guestMode = localStorage.getItem('skippy_guest_mode') === 'true';
   guestUnlockError = '';
+  // Sticky Heavy Hitter override — device-local preference, not security-
+  // sensitive, same persistence rationale as rosterProfiles below.
+  superBrainLocked = localStorage.getItem('skippy_super_brain_locked') === 'true';
   // "Tactical Roster" — persona/addressing context only, deliberately with
   // no permission concept of its own (see CLAUDE.md's Pillar 16 note): the
   // only real access boundary in this app is Guest Mode above, which a
@@ -554,6 +667,12 @@ class App {
   operationalMode = 'default';
   profileName = '';
   profileVoiceId = '';
+  // Pillar 19 (Self-Evolution & Metacognitive Matrix) — fetched fresh after
+  // login and refreshed after every evolution event (Critic Loop or Course
+  // Correction). Always a real EvolutionProfile object once login completes
+  // (the canister returns documented defaults, never null).
+  evolutionProfile = null;
+  evolutionLog = [];
   // TEMPORARY debug aid for verifying Brain Switching (Phase 5.3) — which
   // brain/model actually answered the last message. Drop once confirmed.
   lastBrain = '';
@@ -565,6 +684,11 @@ class App {
     }
     // One persistent element, reused for every reply — see #unlockAudioPlayback.
     this.premiumAudioEl = new Audio();
+    // Web Audio gain graph for Dual-Voice routing (Pillar 18) — see
+    // #ensureAudioGraph. audioContext/gainNode stay null until the first
+    // real gesture-anchored #unlockAudioPlayback call sets them up.
+    this.audioContext = null;
+    this.gainNode = null;
     this.#render();
     this.#initAuth();
   }
@@ -654,6 +778,7 @@ class App {
       const profile = profileOpt[0];
       this.profileName = profile?.name?.[0] || '';
       this.profileVoiceId = profile?.voice_id?.[0] || '';
+      this.evolutionProfile = await this.backendActor.get_my_evolution_profile();
       await this.#deliverPendingCourierMessages();
       await this.#refreshFuel();
     } catch (err) {
@@ -681,6 +806,73 @@ class App {
       this.#speak(reply);
     }
     this.#render();
+  };
+
+  // text is only passed by the voice/text trigger path (gives a spoken
+  // confirmation); a plain button click passes nothing and flips the state
+  // silently, same asymmetry-of-confirmation precedent as #enableGuestMode.
+  #setSuperBrainLock = (locked, text) => {
+    this.superBrainLocked = locked;
+    localStorage.setItem('skippy_super_brain_locked', String(locked));
+    if (text !== undefined) {
+      const reply = locked
+        ? "Super Brain locked in, Commander. I'm staying on the Heavy Hitter engine until you say otherwise — Steel Rain still overrides for latency."
+        : 'Super Brain unlocked. Back to normal one-shot brain switching.';
+      this.#recordTurn(text, reply);
+      this.#speak(reply);
+    }
+    this.#render();
+  };
+
+  // Replies locally first (no waiting on the canister write) since the
+  // sulky acknowledgment is the whole point of this being immediate — the
+  // record_evolution_event call and refreshed weights land moments later.
+  #applyCourseCorrection = async (text) => {
+    const reply = COURSE_CORRECTION_REPLIES[Math.floor(Math.random() * COURSE_CORRECTION_REPLIES.length)];
+    this.#recordTurn(text, reply);
+    this.#render();
+    this.#speak(reply);
+    try {
+      await this.backendActor.record_evolution_event(
+        {
+          snark_level_delta: -0.15,
+          vendor_skepticism_delta: 0,
+          technical_precision_delta: 0,
+          proactive_interruption_delta: 0,
+        },
+        `Course-corrected after a direct reprimand: "${text}"`,
+      );
+      this.evolutionProfile = await this.backendActor.get_my_evolution_profile();
+      this.#render();
+    } catch (err) {
+      console.error('[Skippy] course correction failed to persist:', err);
+    }
+  };
+
+  // Fires a fresh, original 80s-hair-band-or-Nightwish-style song via the
+  // dedicated /karaoke route (not /respond — none of the persona/RAG/
+  // brevity machinery there applies to a one-off performance). A real
+  // OpenRouter call (unlike the deterministic offer ack) since the whole
+  // point is a different song each time.
+  #performKaraoke = async (text) => {
+    this.statusMessage = 'Skippy is warming up...';
+    this.#render();
+    try {
+      const response = await fetch(`${PROXY_URL}/karaoke`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Skippy-Session': this.sessionToken },
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || 'Karaoke request failed.');
+      this.statusMessage = '';
+      this.#recordTurn(text, data.reply);
+      this.#render();
+      this.#speak(data.reply);
+    } catch (err) {
+      console.error('[Skippy] karaoke failed:', err);
+      this.statusMessage = `Couldn't get the song going: ${err.message}`;
+      this.#render();
+    }
   };
 
   // The cached session identity in `this.identity`/`this.backendActor` is
@@ -941,10 +1133,41 @@ class App {
       window.alert("That's your only active workspace — create or restore another one first.");
       return;
     }
+    // Captured before switching away — #switchWorkspace below overwrites
+    // this.history with the next active workspace's, so the Critic Loop
+    // (Pillar 19) needs its own copy of what's actually closing.
+    const closingHistory = this.history;
     await this.backendActor.archive_workspace(this.activeWorkspaceId);
     this.workspaces = await this.backendActor.list_my_workspaces();
     const nextActive = this.workspaces.find((w) => 'Active' in w.status);
     await this.#switchWorkspace(nextActive.id);
+    // Fire-and-forget: a failed self-critique is a missed reflection, not a
+    // broken archive — it must never block or error the action the user
+    // actually asked for.
+    this.#runCriticLoop(closingHistory);
+  };
+
+  // Pillar 19 — the "Critic Loop." Stand-in trigger for "post-mission
+  // debrief" until that's a real dedicated feature (confirmed 2026-06-22):
+  // fires whenever a workspace is archived, i.e. whenever a chat is
+  // genuinely closed. Skipped entirely for an empty/unused workspace — no
+  // point self-critiquing a conversation that never happened.
+  #runCriticLoop = async (history) => {
+    if (history.length === 0) return;
+    try {
+      const response = await fetch(`${PROXY_URL}/critic-loop`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Skippy-Session': this.sessionToken },
+        body: JSON.stringify({ history: history.map(({ role, content }) => ({ role, content })) }),
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || 'Critic Loop failed.');
+      await this.backendActor.record_evolution_event(data.deltas, data.summary);
+      this.evolutionProfile = await this.backendActor.get_my_evolution_profile();
+      this.#render();
+    } catch (err) {
+      console.error('[Skippy] Critic Loop failed:', err);
+    }
   };
 
   #restoreWorkspace = async (id) => {
@@ -1041,6 +1264,24 @@ class App {
     this.#render();
   };
 
+  // Dual-Voice routing (Pillar 18) needs to boost the singing voice's
+  // playback level above the conversational voice's native loudness (the
+  // cloned singing voice renders quieter at the source — confirmed live
+  // 2026-06-23 — and a plain <audio> element's .volume is capped at 1.0, so
+  // there's no way to amplify past native level without an actual gain
+  // node). createMediaElementSource can only be called ONCE per <audio>
+  // element ever (a second call throws), so this graph is built once, here,
+  // and reused for every subsequent #speak call rather than rebuilt per call.
+  #ensureAudioGraph() {
+    if (this.audioContext) return;
+    const AudioContextImpl = window.AudioContext || window.webkitAudioContext;
+    if (!AudioContextImpl) return; // no Web Audio support — native 1.0 volume only
+    this.audioContext = new AudioContextImpl();
+    const source = this.audioContext.createMediaElementSource(this.premiumAudioEl);
+    this.gainNode = this.audioContext.createGain();
+    source.connect(this.gainNode).connect(this.audioContext.destination);
+  }
+
   #unlockAudioPlayback() {
     // Must run synchronously inside a real user-gesture handler (no awaits
     // before this). Mobile browsers track "may autoplay" per *element
@@ -1049,6 +1290,7 @@ class App {
     // even though that later call happens deep inside an async chain with
     // no gesture of its own.
     if (this.audioUnlocked) return;
+    this.#ensureAudioGraph();
     this.premiumAudioEl.src = SILENT_AUDIO_DATA_URI;
     this.premiumAudioEl
       .play()
@@ -1247,6 +1489,19 @@ class App {
   // operational mode (Everyday Brain); otherwise stay on whatever mode/brain
   // was already active.
   #detectModeAndBrain(text) {
+    const result = this.#detectModeAndBrainCore(text);
+    // Sticky Super Brain override — applied after all the one-shot/mode
+    // logic below, so it wins over the default "everyday" brain but never
+    // fights Steel Rain's deliberately fast Tactical brain while that mode
+    // is actually active. Guest Mode's own lock (inside Core, above) always
+    // takes precedence regardless.
+    if (this.superBrainLocked && !this.guestMode && result.brain !== 'tactical') {
+      return { ...result, brain: 'heavy_hitter' };
+    }
+    return result;
+  }
+
+  #detectModeAndBrainCore(text) {
     // Pillar 15 — Guest Mode locks the brain/persona that was active the
     // moment it was enabled; no trigger phrase (voice or typed) can change
     // either while it's on.
@@ -1352,6 +1607,60 @@ class App {
       return;
     }
 
+    if (!this.guestMode && SUPER_BRAIN_LOCK_PHRASES.some((phrase) => lowerText.includes(phrase))) {
+      this.#setSuperBrainLock(true, text);
+      return;
+    }
+    if (!this.guestMode && SUPER_BRAIN_UNLOCK_PHRASES.some((phrase) => lowerText.includes(phrase))) {
+      this.#setSuperBrainLock(false, text);
+      return;
+    }
+
+    // Pillar 19's Course Correction loop only ever retunes the
+    // authenticated owner's own EvolutionProfile (the cached session
+    // identity, regardless of who's physically talking) — a guest's
+    // complaint permanently softening the Commander's persona for every
+    // future session would be an unwanted side effect, so this is gated off
+    // during Guest Mode same as every other persistent-state-changing action.
+    if (!this.guestMode && COURSE_CORRECTION_PHRASES.some((phrase) => lowerText.includes(phrase))) {
+      this.#applyCourseCorrection(text);
+      return;
+    }
+
+    // Book-canon "Karaoke" moment (Skippy's hobby in the Expeditionary Force
+    // novels) — default mode only, same persona-fit reasoning as the
+    // Musical Outburst protocol (professional forbids jokes, tactical
+    // forbids fluff, neither fits hamming up a song). A two-step offer/
+    // confirm dance, same shape as the Steel Rain web-search permission ask:
+    // mentioning karaoke gets an excited, deterministic ack (no LLM call —
+    // nothing for the model to add yet) and arms pendingKaraokeOffer; the
+    // *next* turn checks for an affirmation before actually performing.
+    if (
+      this.operationalMode === 'default' &&
+      !this.pendingKaraokeOffer &&
+      KARAOKE_TRIGGER_PHRASES.some((phrase) => lowerText.includes(phrase))
+    ) {
+      this.pendingKaraokeOffer = true;
+      this.#recordTurn(text, KARAOKE_OFFER_REPLY);
+      this.#render();
+      this.#speak(KARAOKE_OFFER_REPLY);
+      return;
+    }
+    if (this.pendingKaraokeOffer) {
+      const hasAffirmation = AFFIRMATION_PHRASES.some((phrase) => lowerText.includes(phrase));
+      let remainder = lowerText;
+      AFFIRMATION_PHRASES.forEach((phrase) => {
+        remainder = remainder.split(phrase).join('');
+      });
+      this.pendingKaraokeOffer = false; // any response resolves the offer, yes or no
+      if (hasAffirmation && isTrivialRemainder(remainder)) {
+        await this.#performKaraoke(text);
+        return;
+      }
+      // Not an affirmation — offer's cleared, fall through and handle this
+      // as a normal message instead.
+    }
+
     // "Tactical Roster" — persona/addressing only. Switching who Skippy is
     // addressing never touches this.guestMode or anything it gates; a
     // matched profile only ever changes prompt framing (see rosterContext
@@ -1434,11 +1743,11 @@ class App {
     // the user's actual question was never even seen by the model. Strip
     // every affirmation phrase out of the text and require what's left
     // (after also stripping filler words) to be empty.
-    const hasAffirmationPhrase = WEB_SEARCH_AFFIRMATION_PHRASES.some((phrase) =>
+    const hasAffirmationPhrase = AFFIRMATION_PHRASES.some((phrase) =>
       lowerText.includes(phrase),
     );
     let affirmationRemainder = lowerText;
-    WEB_SEARCH_AFFIRMATION_PHRASES.forEach((phrase) => {
+    AFFIRMATION_PHRASES.forEach((phrase) => {
       affirmationRemainder = affirmationRemainder.split(phrase).join('');
     });
     const isAffirmation =
@@ -1589,6 +1898,11 @@ class App {
           rosterContext: this.activeRosterProfile
             ? { name: this.activeRosterProfile.name, role: this.activeRosterProfile.role }
             : null,
+          // Pillar 19 — calibrated personality weights, evolved over time by
+          // the Critic Loop and Course Correction feedback loop. Always a
+          // real object (the canister returns documented defaults, never
+          // null), so there's always something genuine to inject.
+          evolutionProfile: this.evolutionProfile,
         }),
         signal,
       });
@@ -1692,6 +2006,17 @@ class App {
     this.#recordTurn('', reply);
   };
 
+  // Pillar 19 — fetched only on demand (not on every login) since it's just
+  // a human-readable log, not something any reply logic depends on.
+  #refreshEvolutionLog = async () => {
+    try {
+      this.evolutionLog = await this.backendActor.list_my_evolution_log(10);
+      this.#render();
+    } catch (err) {
+      console.error('[Skippy] evolution log fetch failed:', err);
+    }
+  };
+
   // Pillar 8 — read-only, refreshed once after login and on demand via the
   // dashboard's "Refresh" button. Failures are caught per-source so one
   // down provider doesn't blank out the other two readouts.
@@ -1723,6 +2048,20 @@ class App {
     ++this.requestSeq; // discard any late-arriving response from the aborted request
     this.statusMessage = 'Silenced.';
     this.#render();
+  };
+
+  // Deterministic test of the Dual-Voice audio pipeline (Pillar 18) —
+  // bypasses OpenRouter entirely, so it isolates "does the audio/voice-
+  // routing plumbing actually work" from "did the LLM decide to sing this
+  // turn" (the latter is inherently non-deterministic and conditional —
+  // confirmed live 2026-06-23 that the model only sings on a genuine
+  // flagged-worthy moment, not on demand). Not recorded in history/canister
+  // — this is a local plumbing check, not a real conversation turn.
+  #testSingingVoice = () => {
+    this.#speak(
+      "Let's see if this works. 🎶 Testing one two, the singing voice review, " +
+        'cosine similarity, RAG context for you 🎶 Back to normal speech now.',
+    );
   };
 
   // Pillar 12 (Guardian Emergency Protocol). Placement protection: only
@@ -1919,9 +2258,25 @@ class App {
     this.#stopSpeaking();
 
     if (this.voiceMode === 'economy') {
-      this.#speakEconomy(cleanText);
+      // No real singing synthesis exists client-side — Dual-Voice routing
+      // is Premium/ElevenLabs-only. Strip the lyric markers and speak the
+      // verse as plain text through the same Economy voice.
+      this.#speakEconomy(cleanText.replace(/🎶/g, ''));
       return;
     }
+
+    this.#playPremiumSegments(splitVoiceSegments(cleanText), 0);
+  };
+
+  // Dual-Voice routing ("Marco Hietala Protocol") — plays a reply's
+  // conversational and 🎶-wrapped singing segments in order, each through its
+  // own ElevenLabs voice (the proxy resolves which via /speak?voice=singing).
+  // Same sequential-<audio>-per-chunk precedent already used by the Guardian
+  // live-ops listener page. A reply with no 🎶 markers is just one segment,
+  // so this degenerates to the previous single-call behavior unchanged.
+  #playPremiumSegments = (segments, index) => {
+    if (index >= segments.length) return;
+    const { text: segText, voice } = segments[index];
 
     let hasStartedPlaying = false;
     let settled = false;
@@ -1929,7 +2284,13 @@ class App {
     // new Audio() each time — a fresh element has no user-gesture history
     // and mobile browsers will block it regardless of timing.
     const audio = this.premiumAudioEl;
-    audio.src = `${PROXY_URL}/speak?text=${encodeURIComponent(cleanText)}&session=${encodeURIComponent(this.sessionToken)}`;
+    const voiceParam = voice === 'singing' ? '&voice=singing' : '';
+    // gainNode is null if Web Audio isn't supported or the graph was never
+    // unlocked yet — falls back to native (un-boosted) volume in that case.
+    if (this.gainNode) {
+      this.gainNode.gain.value = voice === 'singing' ? SINGING_VOICE_GAIN : 1.0;
+    }
+    audio.src = `${PROXY_URL}/speak?text=${encodeURIComponent(segText)}&session=${encodeURIComponent(this.sessionToken)}${voiceParam}`;
     audio.load();
 
     const fallBackToEconomy = (reason) => {
@@ -1942,7 +2303,14 @@ class App {
       this.#detachCurrentAudio();
       this.statusMessage = 'Premium voice unavailable — falling back to browser voice.';
       this.#render();
-      this.#speakEconomy(cleanText);
+      // Speak this segment AND everything still queued after it in one
+      // Economy utterance, rather than dropping the rest of the reply.
+      const remainder = segments
+        .slice(index)
+        .map((s) => s.text)
+        .join(' ')
+        .replace(/🎶/g, '');
+      this.#speakEconomy(remainder);
     };
 
     audio.onplaying = () => {
@@ -1952,8 +2320,12 @@ class App {
     };
 
     audio.onended = () => {
-      this.isSpeaking = false;
-      this.#render();
+      if (index + 1 < segments.length) {
+        this.#playPremiumSegments(segments, index + 1);
+      } else {
+        this.isSpeaking = false;
+        this.#render();
+      }
     };
 
     audio.onerror = () => {
@@ -2316,6 +2688,7 @@ class App {
           <button @click=${this.#clearHistory} ?disabled=${this.history.length === 0 || this.guestMode}>
             Clear history
           </button>
+          <button @click=${this.#testSingingVoice}>🎤 Test Singing Voice</button>
           <button @click=${this.#logout}>Log out</button>
         </section>
 
@@ -2342,6 +2715,17 @@ class App {
         ${this.lastBrain
           ? html`<p class="status">Last brain: ${this.lastBrain} (${this.lastModel})</p>`
           : ''}
+        ${this.guestMode
+          ? ''
+          : html`
+              <button
+                type="button"
+                class=${this.superBrainLocked ? 'super-brain-toggle active' : 'super-brain-toggle'}
+                @click=${() => this.#setSuperBrainLock(!this.superBrainLocked)}
+              >
+                ${this.superBrainLocked ? '🧠 Super Brain: LOCKED' : '🧠 Super Brain: Off'}
+              </button>
+            `}
 
         ${this.operationalMode === 'tactical' && !this.emergencyActive && !this.guestMode
           ? html`
@@ -2415,6 +2799,37 @@ class App {
                   </label>
                   <button type="submit">Save profile</button>
                 </form>
+              </details>
+
+              <details class="evolution-matrix">
+                <summary>Evolution Matrix</summary>
+                ${this.evolutionProfile
+                  ? html`
+                      <p>Snark level: ${this.evolutionProfile.snark_level.toFixed(2)}</p>
+                      <p>Vendor skepticism: ${this.evolutionProfile.vendor_skepticism.toFixed(2)}</p>
+                      <p>Technical precision: ${this.evolutionProfile.technical_precision.toFixed(2)}</p>
+                      <p>Proactive interruption: ${this.evolutionProfile.proactive_interruption.toFixed(2)}</p>
+                    `
+                  : html`<p>Loading...</p>`}
+                <p class="status">
+                  Grows naturally from archived workspaces (Critic Loop) and direct in-chat
+                  reprimands (Course Correction) — no reset button by design. Clamped to 0.2-0.95.
+                </p>
+                <button @click=${this.#refreshEvolutionLog}>Show recent changes</button>
+                ${this.evolutionLog.length > 0
+                  ? html`
+                      <ul>
+                        ${this.evolutionLog
+                          .slice()
+                          .reverse()
+                          .map(
+                            (entry) => html`
+                              <li>${new Date(Number(entry.timestamp / 1_000_000n)).toLocaleString()}: ${entry.summary}</li>
+                            `,
+                          )}
+                      </ul>
+                    `
+                  : ''}
               </details>
             `}
 

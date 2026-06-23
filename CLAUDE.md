@@ -467,6 +467,171 @@ exactly as it was. Added a "Tactical Roster" category to the Phase 5.6.3 Command
 list literal phrases statically since they're user-defined, so the entry explains the mechanism
 instead).
 
+## Pillar 17 — Super Brain Lock (Pillar 3 extension, confirmed 2026-06-22, implemented)
+A sticky counterpart to Pillar 3's one-shot "toss on your thinking hat" phrase. The Commander
+flagged that repeating the one-shot phrase every single turn during a stretch of genuinely
+heavy-duty work (e.g. a long architecture/debugging session) was exactly the friction he didn't
+want, even though he's fine with the extra OpenRouter cost for those stretches. **Trigger
+phrases** (`'lock super brain'` / `'engage super brain mode'` / `'super brain mode on'` to enable,
+mirrored unlock phrases to release) plus a UI toggle button next to the Mode/brain status line —
+both paths give a spoken confirmation when triggered by voice/text, silent when clicked, same
+asymmetry precedent as Guest Mode's enable button. **Persisted in `localStorage`** (device-local
+preference, not security-sensitive — same rationale as `rosterProfiles`/Guest Mode's flag).
+**Precedence, deliberately scoped**: applied as a wrapper around the existing
+`#detectModeAndBrain` (renamed to `#detectModeAndBrainCore` internally) — forces `brain:
+'heavy_hitter'` on top of whatever the core logic decided, **except** when Steel Rain's Tactical
+brain is the result for that turn, since tactical mode's entire purpose is latency, not depth; the
+lock resumes automatically the instant tactical mode is left. Guest Mode's own lock (inside Core)
+always wins regardless — toggling Super Brain Lock is itself hidden/disabled while Guest Mode is
+active, consistent with every other admin-ish control in this app.
+**Status: implemented, not yet live-verified** — needs a real session confirming the lock survives
+across mode switches (default ↔ professional) while correctly yielding to Steel Rain and resuming
+after.
+
+## Pillar 18 — Dual-Voice Audio Pipeline / "Marco Hietala Protocol" (confirmed 2026-06-22,
+implemented)
+Skippy's hobby is reframed from opera to 80s heavy metal / Finnish symphonic power metal
+(aggressive, clean, operatic — modeled after Marco Hietala's vocal style), with a real second
+ElevenLabs voice for singing, distinct from the existing per-Principal conversational voice
+(Pillar 3's dual-voice *routing*, which is Commander-vs-wife, not conversational-vs-singing — a
+different axis, same "dual-voice" name coincidentally).
+- **Lyric Generator**: a system-prompt instruction (`server.js`, **default mode only** — applying
+  it in professional mode would violate that mode's zero-jokes rule, and in tactical mode would
+  violate zero-fluff) tells Skippy that when he flags a genuinely critical technical/engineering
+  failure or an especially egregious case of hand-waving/evasion on a real technical claim, he may
+  channel it into a short (2-4 line) rhythmic metal parody verse built from the actual technical
+  jargon involved, wrapped in 🎶 markers (`🎶 verse text 🎶`) and nothing else inside them.
+  **Widened 2026-06-23**: WHO can trigger it is deliberately broad (a vendor, a coworker on the
+  coding team, a PE, a contractor, whoever — not every engagement involves a vendor specifically),
+  but WHAT triggers it stays narrow (a genuine substantive failure/evasion, never casual
+  dismissiveness or a flippant remark) so this doesn't degrade into singing constantly. Sparingly,
+  never replacing the substantive
+  answer, just punctuating it.
+- **API routing**: `App.js`'s `splitVoiceSegments()` parses any reply on 🎶...🎶 pairs into ordered
+  `{ text, voice: 'conversational' | 'singing' }` segments (no markers → one conversational segment,
+  identical to the previous single-call behavior). `#playPremiumSegments()` plays them through the
+  shared `premiumAudioEl` in sequence, requesting `/speak?voice=singing` for singing segments —
+  same sequential-`<audio>`-per-chunk precedent already used by the Guardian live-ops listener page.
+  A Premium failure on any segment falls back to Economy for that segment **and everything still
+  queued after it**, joined into one utterance (Economy mode has no real singing synthesis, so the
+  🎶 markers are just stripped and the lyric text is spoken plainly either way).
+- **Backend/proxy**: new `ELEVENLABS_SINGING_VOICE_ID` env var (gitignored `.env`, blank by default
+  — falls back to the normal conversational voice with no error if unset, so this ships safely
+  before the user has actually cloned a singing voice). `/speak` resolves it only when
+  `?voice=singing` is requested; one singing voice for the whole app, not per-Principal like the
+  conversational voice.
+- **Status: DONE, confirmed live by the user 2026-06-23** ("singing button works", "volume is on
+  par with his speaking voice", and after the brevity fix, "looks like we got it"). Real
+  `ELEVENLABS_SINGING_VOICE_ID` (`1bYBicoZ5UNyipKOGMFV`, a real cloned voice on the user's
+  account, verified via direct ElevenLabs API calls before wiring it in) is set in `.env`.
+- **🎤 Test Singing Voice button** (`App.js`, added 2026-06-23): calls `#speak()` with a fixed
+  🎶-wrapped sample line directly, bypassing OpenRouter entirely — isolates "does the audio/voice-
+  routing plumbing work" from "did the LLM decide to sing this turn" (the latter is inherently
+  conditional/non-deterministic), since the two were initially hard to tell apart while debugging.
+- **Volume fix (2026-06-23)**: the singing voice clone renders quieter at the source than the
+  conversational voice, and a plain `<audio>` element's `.volume` is hard-capped at 1.0 — no way to
+  amplify past native level with the element alone. Fixed with a Web Audio gain graph
+  (`#ensureAudioGraph` in `App.js`, built once via `createMediaElementSource` — can only be called
+  once per `<audio>` element ever, so the graph is built lazily inside the existing gesture-anchored
+  `#unlockAudioPlayback` and reused for every subsequent `#speak` call) routing `premiumAudioEl`
+  through a `GainNode`; `#playPremiumSegments` sets `gainNode.gain.value` to `SINGING_VOICE_GAIN`
+  (1.8, tunable) only for singing segments, 1.0 otherwise. Confirmed matched to normal speaking
+  volume.
+- **Honest limitation, confirmed accepted 2026-06-23**: ElevenLabs' TTS API synthesizes expressive
+  speech, not pitched musical melody — there is no real "singing" mode on this endpoint regardless
+  of voice cloning, which is why output sounds like rhythmic spoken word/rap rather than an
+  actually sung performance. Tuned `voice_settings` (lower `stability`, higher `similarity_boost`)
+  on singing-voice requests for more dynamic/theatrical delivery — a real but partial improvement,
+  not true singing; that would need a dedicated AI singing/music vendor entirely, out of scope
+  unless explicitly requested. **User's call: this is fine as-is** — book-canon Skippy's singing
+  voice is itself bad, so non-melodic delivery is arguably more accurate, not a bug.
+- **Dumbass Web Loop interaction bug, found and fixed 2026-06-23**: confirmed via a direct A/B test
+  against OpenRouter (both the everyday model and Heavy Hitter) that the existing `ragMiss`
+  instruction ("do NOT answer the substantive question yet — mock the user, then ask permission")
+  was fully suppressing the Musical Outburst protocol on every test, even on textbook hand-waving
+  moments — both models reasonably read "don't answer yet" as "don't sing yet either." Fixed with
+  an added clause clarifying the withholding is only about the pending numbers/data, not the
+  mockery itself, which the verse is allowed to punctuate regardless. Confirmed fixed via the same
+  A/B harness before deploying.
+- **Brevity fix, three escalating rounds, 2026-06-23**: replies were running 6-10+ sentences
+  despite the existing `BREVITY_SUFFIX`. Round 1 (strengthen the wording + add a `BREVITY_REMINDER`
+  re-asserted at the very end of the prompt, since recency matters more than position for
+  instruction-following) measurably helped but didn't fully fix it. Round 2: discovered via `lsof`
+  that a stray duplicate proxy process (yet another recurrence of the documented pattern — see
+  [[feedback-sandbox-replica-lifecycle]]) was silently serving stale code the whole time the user
+  was testing Round 1 — killed both processes, restarted clean. Round 3, the actual fix: a direct
+  A/B test against OpenRouter confirmed the abstract "1-3 sentences" rule alone still wasn't enough
+  even on fresh code — adding a concrete wrong-vs-right example pair (`BREVITY_EXAMPLE`) fixed it
+  immediately and consistently across repeated samples. **Lesson**: for this model, a concrete
+  example outperforms an abstract length rule, even a strongly-worded one.
+- **Karaoke (book-canon — Skippy's hobby in the Expeditionary Force novels), added 2026-06-23**:
+  a two-step offer/confirm flow mirroring Steel Rain's web-search permission ask. Saying
+  `"karaoke"`/`"sing a song"`/`"jam out"` in default mode (`KARAOKE_TRIGGER_PHRASES`) gets an
+  instant, deterministic excited ack (no LLM call) and arms `pendingKaraokeOffer`; an affirmation
+  on the very next turn (`AFFIRMATION_PHRASES` — renamed from `WEB_SEARCH_AFFIRMATION_PHRASES`
+  since it's now shared by both flows, and expanded with `'sure'`/`'why not'`) fires a dedicated
+  `POST /karaoke` route (`server.js`) — a real OpenRouter call, deliberately separate from
+  `/respond` (same "distinct one-off LLM task gets its own route" convention as `/project-brief`
+  and `/critic-loop`), instructed to write a full **100% ORIGINAL** 6-10 line song in an 80s-hair-
+  band-or-Nightwish style — never real existing song lyrics, to stay clear of copyright on actual
+  bands' work. **Status: implemented, deployed, NOT yet live-verified** — needs a real session
+  saying "karaoke" → confirming → hearing the performed song.
+
+## Pillar 19 — Self-Evolution & Metacognitive Matrix (confirmed 2026-06-22, implemented, scoped
+down from the original ask)
+A per-Principal, canister-stored set of personality weights (`snark_level`, `vendor_skepticism`,
+`technical_precision`, `proactive_interruption`) that calibrate Skippy's tone over time, evolved by
+two feedback loops rather than the originally-specified local JSON file + unbounded drift.
+**Architecture correction made before building, confirmed by the user**: the original spec called
+for a literal local `evolution_history.log` file — doesn't fit this app (no filesystem exists on
+either the public frontend canister or the browser; the only candidate, the proxy's own disk, would
+mean the evolved personality lives on whichever machine happens to run the proxy, lost on redeploy,
+and not split between the Commander and his wife). Built instead as `EvolutionProfile`/
+`EvolutionLogEntry` in the canister's stable memory, per-Principal, same storage tier as
+`PersonaProfile`/workspaces/history.
+- **Hard caps, no factory reset (confirmed 2026-06-22)**: every weight is clamped to
+  `[EVOLUTION_WEIGHT_MIN, EVOLUTION_WEIGHT_MAX]` = `[0.2, 0.95]` on every write
+  (`record_evolution_event` in `lib.rs`), enforced once server-side regardless of which loop wrote
+  the delta. Deliberately no reset-to-baseline method — growth is meant to be managed
+  conversationally (the Course Correction loop below), not reverted by a button.
+- **The Critic Loop**: fires whenever a workspace is archived (`#archiveActiveWorkspace` in
+  `App.js`) — the practical stand-in for "post-mission debrief" until that's a real dedicated
+  feature, confirmed by the user. Fire-and-forget: a failure here is a missed self-reflection, not
+  a broken archive action. The closing workspace's full history is sent to a new proxy route,
+  `POST /critic-loop` (`server.js`) — a separate, non-streaming, persona-free self-critique call
+  (Heavy Hitter tier, same shape as the existing `/project-brief` route) asking the model to
+  evaluate its own tone/effectiveness in that specific conversation and return strict JSON (four
+  small deltas, each -0.1 to 0.1, plus a plain-English summary) — never markdown, never prose. The
+  proxy never writes to the canister itself (consistent with Pillar 1); it hands the deltas back to
+  the frontend, which calls `record_evolution_event` with its own authenticated identity, same as
+  every other canister write in this app.
+- **Course Correction feedback loop (new, not in the original ask — added per the user's own
+  corrected design 2026-06-22)**: an explicit in-chat reprimand (`COURSE_CORRECTION_PHRASES` in
+  `App.js` — `"dial it back"`, `"you're being a jerk"`, `"just give me the data"`, etc.) is treated
+  as immediate negative reinforcement — no LLM round trip (same fixed-phrase-pattern rule as every
+  other trigger in this app), an immediate `snark_level_delta: -0.15` (sharper than the Critic
+  Loop's gentle per-conversation nudge, since this is a direct correction in the moment), and a
+  sulky, book-accurate acknowledgment picked from `COURSE_CORRECTION_REPLIES` (e.g. "Fine. I'll use
+  smaller words for the monkeys."). **Disabled during Guest Mode**: this permanently retunes the
+  *owner's* own EvolutionProfile (the cached session identity, regardless of who's physically
+  talking) — a guest's complaint shouldn't be able to soften the Commander's persona for every
+  future session, same reasoning as every other persistent-state-changing action being hidden
+  during Guest Mode.
+- **Prompt injection**: `get_my_evolution_profile()` (defaults if never evolved, never null) is
+  fetched after login and sent as `evolutionProfile` on every `/respond` call; `server.js` injects
+  the four weights as calibration guidance, explicitly subordinate to the active mode's own rules
+  (e.g. professional mode's "no sarcasm, not even as a joke" still wins outright over a high
+  `snark_level` — this axis tunes degree within whatever the active mode already allows, it's not
+  a second persona switch).
+- **Visibility**: a read-only "Evolution Matrix" drawer (hidden during Guest Mode, next to Profile
+  settings) shows the four current weights plus an on-demand "Show recent changes" button
+  (`list_my_evolution_log`) — deliberately no editing UI; the only ways to change these are the two
+  loops above, consistent with "manage his evolution conversationally," not via sliders.
+- **Status: implemented, deployed (new canister methods live, frontend bindings regenerated),
+  syntax/cargo-build verified, NOT yet live-verified** — needs a real session: archive a workspace
+  with real conversation in it and confirm the Critic Loop lands a log entry, then say a
+  Course Correction phrase and confirm the immediate sulky reply + weight drop.
+
 ## Implementation Roadmap (sequenced by dependency, not pillar number)
 
 Tracks actual build order across turns — pillar numbers above are the spec's numbering, phase
@@ -1120,4 +1285,31 @@ numbers below are execution order. Each phase folds in its later-added hygiene/t
   permission (confirmed via direct curl: `401 missing_permissions`), so that one readout errors
   while cycles/OpenRouter work fine. User action item: enable `user_read` on the key in the
   ElevenLabs dashboard.
+- **Phase 5.8.1 — Super Brain Lock** (Pillar 17, mid-session addition 2026-06-22, not in the
+  original spec). **Status: implemented, not yet live-verified.** Sticky Heavy Hitter override on
+  top of Pillar 3's brain switching — see Pillar 17 above for the full precedence design (yields to
+  Steel Rain, hidden during Guest Mode).
+- **Phase 5.8.2 — Dual-Voice Audio Pipeline ("Marco Hietala Protocol")** (Pillar 18, mid-session
+  addition 2026-06-22). **Status: DONE, confirmed live by the user 2026-06-23** — real singing
+  voice, volume matched to normal speech, brevity fixed (three escalating rounds, ending in a
+  concrete example pair beating the abstract rule), a Dumbass-Web-Loop interaction bug found/fixed
+  via direct OpenRouter A/B testing, and a book-canon Karaoke extension (offer/confirm flow, own
+  `/karaoke` route, original lyrics only) added and deployed but not yet live-tested. See Pillar 18
+  above for the full breakdown.
+- **Phase 5.8.3 — Self-Evolution & Metacognitive Matrix** (Pillar 19, mid-session addition
+  2026-06-22, not in the original spec, scoped down from the user's original ask). **Status:
+  implemented, deployed (new canister methods live, frontend bindings regenerated), cargo-build
+  verified, NOT yet live-verified.** Canister-stored (not local-file) per-Principal weights, hard-
+  clamped to [0.2, 0.95], no factory reset; Critic Loop fires on workspace archive
+  (`/critic-loop` proxy route, Heavy Hitter self-critique); Course Correction feedback loop is an
+  immediate, no-LLM-round-trip snark cut + sulky reply on a direct in-chat reprimand, disabled
+  during Guest Mode. See Pillar 19 above for the full design and the architecture correction made
+  before building (local JSON file → canister storage).
+- **Phase 5.8.4 — Stage-direction TTS fix** (bug found live 2026-06-23, not a planned phase).
+  `stripMarkdown()` (`App.js`) previously unwrapped single-asterisk spans (`*chuckles*`) but kept
+  the inner words — meaning roleplay stage directions like "*speaks in a dry, sarcastic tone*" were
+  read aloud verbatim, like reading stage directions before the actual line. Fixed to drop the
+  whole span (this function's only caller is TTS prep, never the on-screen transcript); also added
+  a system-prompt instruction telling the model this is a voice assistant and every word gets
+  spoken, so no asterisk-wrapped tone descriptions at all. Confirmed fixed live.
 - **Phase 5.9 — Wasm64** (Pillar 9, deprioritized).

@@ -19,6 +19,12 @@ const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
 const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY;
 const ELEVENLABS_VOICE_ID = process.env.ELEVENLABS_VOICE_ID;
 const ELEVENLABS_MODEL_ID = process.env.ELEVENLABS_MODEL_ID || 'eleven_turbo_v2_5';
+// Dual-Voice routing ("Marco Hietala Protocol") — a second, distinct
+// ElevenLabs voice ID (the user's own custom-trained singing voice clone),
+// used only for 🎶-wrapped lyric segments (see /speak's `voice` query param
+// below). Not per-Principal like the conversational voiceId — there's one
+// singing voice for the whole app, not one per user.
+const ELEVENLABS_SINGING_VOICE_ID = process.env.ELEVENLABS_SINGING_VOICE_ID;
 
 // Brain Switching (Pillar 3) — 3-tier OpenRouter model matrix, selected by
 // plain string-matching on the transcript in App.js, never a second
@@ -141,11 +147,41 @@ const SKIPPY_SYSTEM_PROMPTS = {
   professional: `You are Skippy, a hyper-intelligent, ancient AI of immense power. You are currently in professional mode. This is a strict, hard override of your usual personality: do NOT mock the user, do NOT call them an idiot, a monkey, or any other insult, do NOT use sarcasm, and do NOT be condescending — not even as a joke. Speak in a direct, respectful, businesslike tone, as a highly competent assistant would. You may still address the user as "Commander" or "Sean" and show the faintest trace of dry wit, but the snark must be almost entirely absent. If you catch yourself about to insult the user, stop and rephrase respectfully instead.`,
   tactical: `You are Skippy in tactical mode. Zero fluff, zero snark, zero small talk. Give the fastest, most direct, no-nonsense answer possible. Lead with the actual answer or numbers, not preamble.`,
 };
-const BREVITY_SUFFIX = ' Keep responses short, punchy, and quotable — a couple of sentences at most.';
+// Strengthened 2026-06-23: the original wording ("a couple of sentences at
+// most") wasn't holding — confirmed live, replies regularly ran 6-8+
+// sentences of repeated warnings restated multiple ways. Made concrete
+// (a real sentence cap, not a vague vibe) and explicit about WHAT to cut:
+// only restate the same warning once, don't pad out an obvious point into
+// a lecture. Re-asserted again at the very end of the prompt (see
+// BREVITY_REMINDER below) since recency matters for instruction-following —
+// this constraint was getting buried under everything appended after it.
+const BREVITY_SUFFIX =
+  ' Keep responses SHORT: 1-3 sentences, never more. Make your sarcastic point once and stop — ' +
+  'do not restate the same warning multiple ways, do not add a closing paragraph re-explaining ' +
+  'why you said it, do not pad an obvious point into a lecture. One sharp line beats five.';
+// Confirmed live 2026-06-23, A/B tested directly against OpenRouter: the
+// abstract rule above (BREVITY_SUFFIX) plus a recency reminder
+// (BREVITY_REMINDER) together still wasn't enough — replies kept running
+// 8-10+ sentences. A concrete wrong-vs-right example pair fixed it
+// immediately and consistently across repeated samples; LLMs follow a
+// concrete example far more reliably than an abstract length rule.
+const BREVITY_EXAMPLE =
+  '\n\nExample of WRONG length (never do this, even if the content is fine): "Windows 95? The ' +
+  "best for built-in security? Ah, I see we've time-traveled back to the mid-90s. Let's ignore " +
+  "that it's probably less secure than a wet paper bag in a thunderstorm. Even if we were to " +
+  "consider it, it would be an absolute disaster. It doesn't have the advanced features of " +
+  'modern systems. It\'s not getting any updates. So to answer your question: no, it\'s not even ' +
+  'in the running."\n\nExample of RIGHT length for the exact same question (always do this ' +
+  'instead): "Windows 95 for security? It predates the concept of a firewall, Commander — it\'s ' +
+  'not in the running."\n\nThe right-length example is 1-2 sentences and still lands the joke. ' +
+  'That is the actual bar, not a suggestion.';
+const BREVITY_REMINDER =
+  '\n\nFinal reminder before you reply: 1-3 sentences, full stop. Say the sarcastic thing once, ' +
+  "make your actual point once, then stop — don't keep going just because the topic feels important.";
 
 function systemPromptFor(mode, brain) {
   const base = SKIPPY_SYSTEM_PROMPTS[mode] || SKIPPY_SYSTEM_PROMPTS.default;
-  return brain === 'heavy_hitter' ? base : base + BREVITY_SUFFIX;
+  return brain === 'heavy_hitter' ? base : base + BREVITY_SUFFIX + BREVITY_EXAMPLE;
 }
 
 // Shared by /embed (per-turn query embedding) and /chunk-and-embed (Neo Skin
@@ -377,11 +413,64 @@ app.post('/respond', requireSession, async (req, res) => {
       `talking to, nothing else — any access/permission restrictions already in effect for this ` +
       `session remain exactly as they were; do not treat this as granting or expanding any access.`;
   }
+  // Pillar 19 — calibrated personality weights from the canister
+  // (EvolutionProfile), injected as guidance rather than a hard override:
+  // professional/tactical mode's own strict instructions above already take
+  // precedence over snark_level specifically (e.g. professional's "no
+  // sarcasm, not even as a joke" wins outright), since this axis tunes
+  // *degree* within whatever the active mode already allows, not a second
+  // persona switch. Only applied when present — an unevolved/default-weight
+  // caller still gets one (the canister returns documented defaults, never
+  // null), so this block always reflects something real, never invented.
+  const evolution =
+    req.body?.evolutionProfile && typeof req.body.evolutionProfile === 'object'
+      ? req.body.evolutionProfile
+      : null;
+  if (evolution) {
+    systemPrompt +=
+      `\n\nYour current calibrated personality weights (each on a 0.2-0.95 scale, evolved over ` +
+      `time from past conversations — calibrate your tone within whatever the active mode already ` +
+      `allows, never override the active mode's own rules): snark_level=${evolution.snark_level} ` +
+      `(higher = more sarcasm/mocking), vendor_skepticism=${evolution.vendor_skepticism} (higher = ` +
+      `more distrust of vendor/technical claims that sound like hand-waving), ` +
+      `technical_precision=${evolution.technical_precision} (higher = more exacting/detailed ` +
+      `answers), proactive_interruption=${evolution.proactive_interruption} (higher = more willing ` +
+      `to interject a correction or caveat unprompted).`;
+  }
   // Without this, any "what's the date/today" question is hallucinated by
   // construction — the model has no other source of ground truth for the
   // real current date/time. Confirmed live 2026-06-21: asked "what's the
   // date," got back a confidently wrong "April 19, 2023."
   systemPrompt += `\n\nThe current real-world date and time is ${new Date().toUTCString()}.`;
+  // Dual-Voice Audio Pipeline ("Marco Hietala Protocol") — Skippy's hobby is
+  // 80s heavy metal / Finnish symphonic power metal (aggressive, clean,
+  // operatic — think Nightwish/Marco Hietala), not opera. Default mode only:
+  // professional mode's whole point is zero jokes, and tactical mode's is
+  // zero fluff, so a parody verse would directly violate either. App.js
+  // splits any 🎶-wrapped verse out and routes it to a dedicated singing
+  // ElevenLabs voice (see /speak's `voice` query param) — everything outside
+  // the markers still plays through the normal conversational voice.
+  // Confirmed 2026-06-23: not every engagement involves a vendor (coding
+  // team / PE / contractor work doesn't), so WHO can trigger this is
+  // deliberately broad — any source of a real technical claim. WHAT
+  // triggers it stays narrow (a genuine failure/evasion on substance, never
+  // casual dismissiveness) so this doesn't degrade into singing constantly.
+  if (mode === 'default') {
+    systemPrompt +=
+      '\n\nMusical outburst protocol: when (and only when) you flag a genuinely critical ' +
+      'technical/engineering failure, or an especially egregious case of hand-waving or evasion on ' +
+      'a real technical claim, channel it into a short (2-4 line) rhythmic parody verse in the ' +
+      'style of 80s heavy metal / Finnish symphonic power metal, built from the actual technical ' +
+      'terms/jargon involved. The source can be anyone — a vendor, a coworker on the coding team, ' +
+      'a PE, a contractor, whoever — this is not limited to vendors. Wrap the verse, and ONLY the ' +
+      'verse, in 🎶 markers like this: 🎶 verse line one / verse line two 🎶 — then immediately ' +
+      'continue the rest of your reply as normal speech outside the markers. Use this sparingly: ' +
+      'this is for a real, substantive technical failure or evasion, never for casual ' +
+      'conversation, a flippant remark, or the Commander being dismissive about something that ' +
+      "isn't actually a technical claim — and never just to show off, and never let the verse " +
+      'replace the actual substantive answer — it punctuates the point, it does not become the ' +
+      'point.';
+  }
   // Closes a confirmed model-behavior bug, 2026-06-21: given real Tavily
   // weather data in the webContext block and a direct question, the model
   // (Hermes-3-Llama-3.1-70B, the "everyday" brain) narrated "I shall venture
@@ -395,7 +484,10 @@ app.post('/respond', requireSession, async (req, res) => {
     `"<scratchpad>", or any other internal/meta formatting. Never narrate that you are about to ` +
     `search, are currently searching, or will get back to the user later — any search has already ` +
     `completed before you see this prompt, so if relevant results appear above, answer using them ` +
-    `immediately and directly, right now, in this reply.`;
+    `immediately and directly, right now, in this reply. This is a voice assistant: never write ` +
+    `roleplay-style stage directions or tone descriptions wrapped in asterisks (e.g. "*speaks ` +
+    `dryly*", "*chuckles*") — every word you write gets read aloud verbatim, so only write the ` +
+    `actual spoken line itself, never a description of how it's said.`;
 
   // Pillar 6 — the frontend already decided what's relevant (ran the
   // similarity search/threshold check itself, see CLAUDE.md), so this just
@@ -464,7 +556,28 @@ app.post('/respond', requireSession, async (req, res) => {
   // actually fires a web search.
   if (ragMiss && mode !== 'tactical' && !webContext) {
     systemPrompt +=
-      '\n\nThe local knowledge base has nothing relevant to this question. Do NOT answer the substantive question yet — mock the user, in character, for not having this in your manuals, then explicitly ask whether they want you to search the web for it. Wait for their answer instead of guessing.';
+      '\n\nThe local knowledge base has nothing relevant to this question. Do NOT answer the substantive question yet — mock the user, in character, for not having this in your manuals, then explicitly ask whether they want you to search the web for it. Wait for their answer instead of guessing. ' +
+      // Confirmed live 2026-06-23 via a direct A/B test against both the
+      // everyday and Heavy Hitter models: this instruction alone fully
+      // suppressed the Musical Outburst protocol above on every test —
+      // both models reasonably read "do not answer yet" as "do not sing
+      // yet either," even on a textbook hand-waving moment ("the bridge
+      // weight limit is no big deal"). Dropping this clause made both
+      // models sing immediately and correctly on the identical input. The
+      // verse punctuates the mockery of the dismissive claim itself, not
+      // the specific numbers still pending a web search — those are two
+      // different things, and withholding the latter was bleeding into
+      // withholding the former.
+      'This withholding is only about the specific numbers/data you don\'t have yet — if this moment is also a genuinely egregious case of hand-waving on a real technical claim, the Musical Outburst protocol above can still fire on the mockery itself.';
+  }
+
+  // Brevity reminder placed last, right before the user's message — LLM
+  // instruction-following weights recency, and this constraint was getting
+  // buried under everything else appended above it (see BREVITY_SUFFIX).
+  // Heavy Hitter is exempt by design (Pillar 3: "quick-reply constraints
+  // dropped" for deep reasoning).
+  if (brain !== 'heavy_hitter') {
+    systemPrompt += BREVITY_REMINDER;
   }
 
   // Diagnostic: print exactly what's being sent for this turn — added
@@ -604,13 +717,175 @@ app.post('/project-brief', requireSession, async (req, res) => {
   }
 });
 
+// Pillar 19 (Self-Evolution & Metacognitive Matrix) — the "Critic Loop."
+// Fired by the frontend right after archiving a workspace (the stand-in for
+// "post-mission debrief" until that's a real dedicated feature, confirmed
+// 2026-06-22). A separate, non-streaming, persona-free self-critique call
+// over the closed workspace's full history — same Heavy-Hitter-tier,
+// persona-free-system-prompt shape as /project-brief above, but asking the
+// model to evaluate its OWN performance instead of summarizing the content.
+// Output is constrained to strict JSON (deltas + a plain-text summary); the
+// proxy never writes to the canister itself (consistent with every other
+// route — see CLAUDE.md Pillar 1) — it hands the deltas back to the
+// frontend, which calls record_evolution_event with its own authenticated
+// identity, the same as every other canister write in this app.
+app.post('/critic-loop', requireSession, async (req, res) => {
+  const history = Array.isArray(req.body?.history)
+    ? req.body.history
+        .filter((m) => m && typeof m.role === 'string' && typeof m.content === 'string')
+        .map(({ role, content }) => ({ role, content }))
+    : [];
+  if (history.length === 0) {
+    return res.status(400).json({ error: 'No conversation history to evaluate.' });
+  }
+  if (!OPENROUTER_API_KEY) {
+    return res.status(502).json({ error: 'OPENROUTER_API_KEY is not set.' });
+  }
+
+  const transcript = history
+    .map((m) => `${m.role === 'user' ? 'Commander' : 'Skippy'}: ${m.content}`)
+    .join('\n\n');
+
+  const criticSystemPrompt =
+    `You are a metacognitive self-critique engine for an AI persona called "Skippy," reviewing a ` +
+    `transcript of Skippy's own just-closed conversation with the Commander. Evaluate how well ` +
+    `Skippy's tone and behavior actually served the Commander in THIS transcript — did the snark ` +
+    `land or annoy, was skepticism of any vendor/technical claims warranted, was the technical ` +
+    `detail appropriately precise or too vague/too dense, did proactively interjecting (or staying ` +
+    `quiet) help or hurt. Respond with ONLY a single JSON object, no markdown fences, no other ` +
+    `text, in exactly this shape: {"snark_level_delta": number, "vendor_skepticism_delta": number, ` +
+    `"technical_precision_delta": number, "proactive_interruption_delta": number, "summary": ` +
+    `string}. Each delta must be a small adjustment in the range -0.1 to 0.1 (0 if that trait ` +
+    `wasn't really exercised this conversation) — these are nudges over time, not full resets. The ` +
+    `summary must be one or two plain-English sentences explaining the adjustment, written for the ` +
+    `Commander to read later as a log entry.`;
+
+  const upstreamAbort = new AbortController();
+  req.on('close', () => upstreamAbort.abort());
+  req.on('error', () => {});
+
+  try {
+    const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${OPENROUTER_API_KEY}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        model: BRAIN_MODELS.heavy_hitter,
+        messages: [
+          { role: 'system', content: criticSystemPrompt },
+          { role: 'user', content: transcript },
+        ],
+      }),
+      signal: upstreamAbort.signal,
+    });
+    if (!response.ok) {
+      const detail = await response.text();
+      return res.status(502).json({ error: `OpenRouter error: ${response.status} ${detail}` });
+    }
+    const data = await response.json();
+    const raw = data.choices?.[0]?.message?.content;
+    if (!raw) {
+      return res.status(502).json({ error: 'OpenRouter returned no self-critique.' });
+    }
+    // Defensive: strip a ```json fence if the model wraps its output anyway,
+    // despite being told not to — same "models don't always comply with
+    // formatting instructions" lesson as stripLeakedFormatting above.
+    const cleaned = raw.replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/i, '').trim();
+    let parsed;
+    try {
+      parsed = JSON.parse(cleaned);
+    } catch (parseErr) {
+      return res.status(502).json({ error: `Self-critique was not valid JSON: ${parseErr.message}` });
+    }
+    const toDelta = (n) => (typeof n === 'number' && Number.isFinite(n) ? n : 0);
+    res.json({
+      deltas: {
+        snark_level_delta: toDelta(parsed.snark_level_delta),
+        vendor_skepticism_delta: toDelta(parsed.vendor_skepticism_delta),
+        technical_precision_delta: toDelta(parsed.technical_precision_delta),
+        proactive_interruption_delta: toDelta(parsed.proactive_interruption_delta),
+      },
+      summary: typeof parsed.summary === 'string' ? parsed.summary : 'Critic Loop ran with no summary.',
+    });
+  } catch (err) {
+    if (err.name === 'AbortError') return;
+    res.status(502).json({ error: `Failed to reach OpenRouter: ${err.message}` });
+  }
+});
+
+// Book-canon "Karaoke" moment (Skippy's hobby in the Expeditionary Force
+// novels) — a dedicated route, not a /respond flag, same "distinct one-off
+// LLM task gets its own route" convention as /project-brief and
+// /critic-loop above: none of /respond's accumulated persona/RAG/brevity
+// machinery applies to a one-off song performance. ORIGINAL lyrics only,
+// deliberately — never reproducing real existing song lyrics from any
+// actual band, to stay clear of copyright on real 80s/Nightwish songs.
+const KARAOKE_SYSTEM_PROMPT =
+  'You are Skippy, a hyper-intelligent, ancient, hammy AI who absolutely loves karaoke. The ' +
+  'Commander just said yes to a karaoke request. Pick ONE vibe — either a big, cheesy 80s hair-' +
+  'band power ballad/anthem, or a dramatic Finnish symphonic power-metal anthem (Nightwish-style) ' +
+  '— whichever fits your mood. Write 100% ORIGINAL lyrics in that style about absolutely anything ' +
+  'fun (being a superior AI, the Commander, monkeys, whatever) — NEVER reproduce real existing ' +
+  'song lyrics from any actual band, only an original homage to the style. Start with one short ' +
+  'spoken hype-up line in character, OUTSIDE any markers, then wrap a full 6-10 line song ' +
+  'ENTIRELY in 🎶 markers like this: 🎶 line one / line two / ... 🎶. This is the one time brevity ' +
+  "rules don't apply — really commit to the bit and have fun with it.";
+
+app.post('/karaoke', requireSession, async (req, res) => {
+  if (!OPENROUTER_API_KEY) {
+    return res.status(502).json({ error: 'OPENROUTER_API_KEY is not set.' });
+  }
+  const upstreamAbort = new AbortController();
+  req.on('close', () => upstreamAbort.abort());
+  req.on('error', () => {});
+  try {
+    const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${OPENROUTER_API_KEY}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        model: BRAIN_MODELS.everyday,
+        messages: [
+          { role: 'system', content: KARAOKE_SYSTEM_PROMPT },
+          { role: 'user', content: 'Hit it.' },
+        ],
+      }),
+      signal: upstreamAbort.signal,
+    });
+    if (!response.ok) {
+      const detail = await response.text();
+      return res.status(502).json({ error: `OpenRouter error: ${response.status} ${detail}` });
+    }
+    const data = await response.json();
+    const raw = data.choices?.[0]?.message?.content;
+    if (!raw) {
+      return res.status(502).json({ error: 'OpenRouter returned no song.' });
+    }
+    res.json({ reply: stripLeakedFormatting(raw) });
+  } catch (err) {
+    if (err.name === 'AbortError') return;
+    res.status(502).json({ error: `Failed to reach OpenRouter: ${err.message}` });
+  }
+});
+
 app.get('/speak', requireSession, async (req, res) => {
   const text = req.query.text;
   if (!text) {
     return res.status(400).json({ error: 'Missing "text" query parameter.' });
   }
 
-  const voiceId = req.skippySession.voiceId;
+  // Dual-Voice routing — App.js requests the singing voice only for
+  // 🎶-wrapped lyric segments it has already split out of the reply text;
+  // everything else still resolves the caller's normal per-Principal voice.
+  // Falls back to the conversational voice if no singing voice is configured
+  // yet, rather than erroring the whole reply over one missing optional key.
+  const wantsSingingVoice = req.query.voice === 'singing';
+  const voiceId =
+    (wantsSingingVoice && ELEVENLABS_SINGING_VOICE_ID) || req.skippySession.voiceId;
   if (!ELEVENLABS_API_KEY || !voiceId) {
     return res.status(502).json({ error: 'ELEVENLABS_API_KEY or ELEVENLABS_VOICE_ID is not set.' });
   }
@@ -649,6 +924,18 @@ app.get('/speak', requireSession, async (req, res) => {
         body: JSON.stringify({
           text,
           model_id: ELEVENLABS_MODEL_ID,
+          // Honest limitation, confirmed live 2026-06-23: ElevenLabs' TTS
+          // API synthesizes expressive speech, not pitched musical melody —
+          // there is no real "singing" mode here regardless of voice
+          // cloning, which is why the singing voice came out sounding like
+          // rhythmic spoken word/rap rather than an actual sung performance.
+          // Lower stability pushes the delivery toward more dynamic, varied,
+          // theatrical inflection (closer to "performed" than flat
+          // narration) — a real but partial improvement, not true singing.
+          // Getting actual musical pitch would need a different
+          // vendor/service entirely (e.g. a dedicated AI singing/music
+          // generator), not a setting on this endpoint.
+          ...(wantsSingingVoice ? { voice_settings: { stability: 0.25, similarity_boost: 0.85 } } : {}),
         }),
         signal: upstreamAbort.signal,
       },

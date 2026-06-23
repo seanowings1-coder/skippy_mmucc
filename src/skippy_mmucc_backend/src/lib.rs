@@ -23,6 +23,17 @@ const WORKSPACES_MEMORY_ID: MemoryId = MemoryId::new(6);
 const COURIER_QUEUE_MEMORY_ID: MemoryId = MemoryId::new(7);
 const EMERGENCY_EVENTS_MEMORY_ID: MemoryId = MemoryId::new(8);
 const EMERGENCY_AUDIO_MEMORY_ID: MemoryId = MemoryId::new(9);
+const EVOLUTION_PROFILES_MEMORY_ID: MemoryId = MemoryId::new(10);
+const EVOLUTION_LOG_MEMORY_ID: MemoryId = MemoryId::new(11);
+
+// Pillar 19 (Self-Evolution & Metacognitive Matrix) — hard caps on every
+// personality weight, confirmed 2026-06-22: growth should be natural and
+// conversational, never a runaway drift that silences the persona entirely
+// (e.g. snark_level hitting 0) or breaks character consistency at the other
+// extreme. No "factory reset" exists by design — out-of-bounds correction
+// happens via the Course Correction feedback loop, not a revert button.
+const EVOLUTION_WEIGHT_MIN: f32 = 0.2;
+const EVOLUTION_WEIGHT_MAX: f32 = 0.95;
 
 // Rolling cap on a Principal's stored conversation: applied at write time so
 // both stable memory usage and the context forwarded to OpenRouter stay
@@ -358,6 +369,95 @@ impl Storable for PersonaProfile {
     };
 }
 
+/// Pillar 19 (Self-Evolution & Metacognitive Matrix) — a per-Principal set of
+/// personality weights Skippy calibrates over time: the archive-time Critic
+/// Loop (proxy-driven self-critique over a closed workspace) and the
+/// immediate Course Correction feedback loop (a direct in-chat reprimand)
+/// both adjust these via `record_evolution_event`, which hard-clamps every
+/// field to [EVOLUTION_WEIGHT_MIN, EVOLUTION_WEIGHT_MAX]. Defaults match the
+/// baseline default-mode persona — a brand-new caller hasn't evolved away
+/// from anything yet.
+#[derive(CandidType, Deserialize, Clone, Debug)]
+pub struct EvolutionProfile {
+    pub snark_level: f32,
+    pub vendor_skepticism: f32,
+    pub technical_precision: f32,
+    pub proactive_interruption: f32,
+}
+
+impl Default for EvolutionProfile {
+    fn default() -> Self {
+        EvolutionProfile {
+            snark_level: 0.7,
+            vendor_skepticism: 0.6,
+            technical_precision: 0.7,
+            proactive_interruption: 0.5,
+        }
+    }
+}
+
+impl Storable for EvolutionProfile {
+    fn to_bytes(&self) -> Cow<'_, [u8]> {
+        Cow::Owned(Encode!(self).unwrap())
+    }
+
+    fn into_bytes(self) -> Vec<u8> {
+        Encode!(&self).unwrap()
+    }
+
+    fn from_bytes(bytes: Cow<[u8]>) -> Self {
+        Decode!(bytes.as_ref(), Self).unwrap()
+    }
+
+    const BOUND: Bound = Bound::Bounded {
+        max_size: 200,
+        is_fixed_size: false,
+    };
+}
+
+/// Argument type for `record_evolution_event` — signed deltas applied to the
+/// caller's current weights, not absolute values, so a partial adjustment
+/// (e.g. only snark_level) doesn't require resending the other three.
+#[derive(CandidType, Deserialize, Clone, Debug, Default)]
+pub struct EvolutionDeltas {
+    pub snark_level_delta: f32,
+    pub vendor_skepticism_delta: f32,
+    pub technical_precision_delta: f32,
+    pub proactive_interruption_delta: f32,
+}
+
+/// An append-only explanation of why a weight changed — surfaced to the user
+/// as a plain-language evolution history, distinct from the raw weights
+/// themselves. No delete method, by design, same "the record speaks for
+/// itself" reasoning as Pillar 12's emergency audio ledger, just much lower
+/// stakes here — this is meant to be read back, not edited.
+#[derive(CandidType, Deserialize, Clone, Debug)]
+pub struct EvolutionLogEntry {
+    pub id: u64,
+    pub owner: Principal,
+    pub timestamp: u64,
+    pub summary: String,
+}
+
+impl Storable for EvolutionLogEntry {
+    fn to_bytes(&self) -> Cow<'_, [u8]> {
+        Cow::Owned(Encode!(self).unwrap())
+    }
+
+    fn into_bytes(self) -> Vec<u8> {
+        Encode!(&self).unwrap()
+    }
+
+    fn from_bytes(bytes: Cow<[u8]>) -> Self {
+        Decode!(bytes.as_ref(), Self).unwrap()
+    }
+
+    const BOUND: Bound = Bound::Bounded {
+        max_size: 2_000,
+        is_fixed_size: false,
+    };
+}
+
 /// Returned by `validate_session` so the proxy gets everything it needs
 /// (caller identity, display name, voice) from the one query it already
 /// makes on every request, instead of a second round trip.
@@ -429,6 +529,16 @@ thread_local! {
     static PERSONA_PROFILES: RefCell<StableBTreeMap<Principal, PersonaProfile, Memory>> =
         RefCell::new(StableBTreeMap::init(
             MEMORY_MANAGER.with(|m| m.borrow().get(PERSONA_PROFILES_MEMORY_ID)),
+        ));
+
+    static EVOLUTION_PROFILES: RefCell<StableBTreeMap<Principal, EvolutionProfile, Memory>> =
+        RefCell::new(StableBTreeMap::init(
+            MEMORY_MANAGER.with(|m| m.borrow().get(EVOLUTION_PROFILES_MEMORY_ID)),
+        ));
+
+    static EVOLUTION_LOG: RefCell<StableBTreeMap<u64, EvolutionLogEntry, Memory>> =
+        RefCell::new(StableBTreeMap::init(
+            MEMORY_MANAGER.with(|m| m.borrow().get(EVOLUTION_LOG_MEMORY_ID)),
         ));
 }
 
@@ -897,6 +1007,72 @@ fn set_persona_profile(name: String, voice_id: String) {
 fn get_my_persona_profile() -> Option<PersonaProfile> {
     let caller = assert_whitelisted();
     PERSONA_PROFILES.with(|p| p.borrow().get(&caller))
+}
+
+/// Pillar 19 — the caller's current evolved weights, or baseline defaults if
+/// they've never evolved away from them yet (no separate "has this user ever
+/// evolved" flag needed; a fresh default is indistinguishable from, and
+/// behaviorally identical to, a real unevolved profile).
+#[query]
+fn get_my_evolution_profile() -> EvolutionProfile {
+    let caller = assert_whitelisted();
+    EVOLUTION_PROFILES.with(|p| p.borrow().get(&caller).unwrap_or_default())
+}
+
+fn clamp_evolution_weight(value: f32) -> f32 {
+    value.clamp(EVOLUTION_WEIGHT_MIN, EVOLUTION_WEIGHT_MAX)
+}
+
+/// Applies signed deltas to the caller's own weights and logs why — the one
+/// place the [EVOLUTION_WEIGHT_MIN, EVOLUTION_WEIGHT_MAX] clamp is enforced,
+/// so both the archive-time Critic Loop (proxy self-critique) and the
+/// frontend's immediate Course Correction phrase detection funnel through
+/// here rather than each re-implementing the clamp themselves.
+#[update]
+fn record_evolution_event(deltas: EvolutionDeltas, summary: String) -> u64 {
+    let caller = assert_whitelisted();
+    EVOLUTION_PROFILES.with(|p| {
+        let mut p = p.borrow_mut();
+        let mut profile = p.get(&caller).unwrap_or_default();
+        profile.snark_level = clamp_evolution_weight(profile.snark_level + deltas.snark_level_delta);
+        profile.vendor_skepticism =
+            clamp_evolution_weight(profile.vendor_skepticism + deltas.vendor_skepticism_delta);
+        profile.technical_precision =
+            clamp_evolution_weight(profile.technical_precision + deltas.technical_precision_delta);
+        profile.proactive_interruption =
+            clamp_evolution_weight(profile.proactive_interruption + deltas.proactive_interruption_delta);
+        p.insert(caller, profile);
+    });
+    let id = take_next_id();
+    let entry = EvolutionLogEntry {
+        id,
+        owner: caller,
+        timestamp: ic_cdk::api::time(),
+        summary,
+    };
+    EVOLUTION_LOG.with(|l| l.borrow_mut().insert(id, entry));
+    id
+}
+
+/// Most recent `limit` of the caller's own evolution log entries — same
+/// "ascending-id store, tail of the Vec is the most recent" trick already
+/// used by note retrieval, no timestamp parsing needed.
+#[query]
+fn list_my_evolution_log(limit: u32) -> Vec<EvolutionLogEntry> {
+    let caller = assert_whitelisted();
+    EVOLUTION_LOG.with(|l| {
+        let mut entries: Vec<EvolutionLogEntry> = l
+            .borrow()
+            .iter()
+            .map(|entry| entry.value().clone())
+            .filter(|e| e.owner == caller)
+            .collect();
+        let len = entries.len();
+        if len > limit as usize {
+            entries = entries.split_off(len - limit as usize);
+        }
+        entries
+    })
 }
 
 /// Pillar 7 — queues a message for "the other" whitelisted Principal. With
