@@ -26,6 +26,7 @@
     "@dfinity/identity": "^3.4.3",
     "@dfinity/principal": "^3.4.3",
     "@icp-sdk/core": "^5.0.0",
+    "@huggingface/transformers": "4.2.0",
     "docx": "^9.7.1",
     "lit-html": "^2.8.0"
   }

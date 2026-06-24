@@ -574,8 +574,82 @@ different axis, same "dual-voice" name coincidentally).
   `/respond` (same "distinct one-off LLM task gets its own route" convention as `/project-brief`
   and `/critic-loop`), instructed to write a full **100% ORIGINAL** 6-10 line song in an 80s-hair-
   band-or-Nightwish style — never real existing song lyrics, to stay clear of copyright on actual
-  bands' work. **Status: implemented, deployed, NOT yet live-verified** — needs a real session
-  saying "karaoke" → confirming → hearing the performed song.
+  bands' work. **Live-tested 2026-06-24, two real bugs found and fixed**:
+  1. The offer line (`KARAOKE_OFFER_REPLY`) was a single fixed string — repeating verbatim every
+     time read as flat rather than excited. Converted to `KARAOKE_OFFER_REPLIES`, a pool randomly
+     picked from (still deterministic/no-LLM-call), same pattern as `COURSE_CORRECTION_REPLIES`.
+  2. The actual song sometimes came back as ~15-18 separate single-line `🎶...🎶` pairs (no rhyme,
+     no real song structure — read like chopped-up hype copy) instead of one cohesive block.
+     Confirmed via direct A/B testing against OpenRouter that this is non-deterministic sampling,
+     not a one-time fluke — the same exact prompt can produce a correct block or the broken pattern
+     on different runs. Fixed two ways: (a) rewrote `KARAOKE_SYSTEM_PROMPT` with a concrete
+     wrong-vs-right example pair (same technique that fixed the brevity problem in Phase 5.8.2 —
+     an abstract structural instruction alone wasn't enough), and (b) added a deterministic
+     code-level safety net, `mergeKaraokeMarkers()` in `server.js`, that collapses any stray
+     multiple marker pairs into exactly one before the reply is sent — this matters beyond just
+     appearance, since `App.js`'s `splitVoiceSegments()` turns each separate pair into its own
+     ElevenLabs request during playback, so N pairs would always sound like N disconnected clips
+     even if the lyrics themselves were fine.
+  3. **Real-song-reference leak, found in the very next live test**: with the merge fix deployed,
+     Skippy announced "I shall now proceed to eviscerate a Foreigner classic" and then sang a
+     direct hook/structure parody of Foreigner's "Waiting for a Girl Like You" — a real,
+     identifiable existing song, not an original homage, despite the prompt already saying "never
+     reproduce real existing song lyrics." That wording only forbade verbatim copying, not naming a
+     real artist or basing a song on a specific real song's recognizable hook. Strengthened the
+     prompt with an explicit hard rule against naming any real band/artist/song or basing the song
+     on an identifiable real song's hook/melody/structure "even as a parody."
+  4. **A second instance of the same leak class, caught via direct A/B retest (4 trials) of the
+     fix above**: one trial sang "HammerFall and NightWish, watch out for Skippy and me!" — root
+     cause was the prompt itself: it named "Nightwish-style" as a style reference for the
+     Finnish-symphonic-metal vibe, handing the model the real band name to echo back. Fixed by
+     removing the named reference entirely — the genre is now described by musical qualities only
+     (operatic, orchestral-bombast, dramatic minor-key) with no band name anywhere in the prompt.
+  5. **A second structural bug found in the same A/B retest**: one trial used `🎶` for the song's
+     first verse, then silently switched to a different musical-note symbol (`♫`) for the rest —
+     `App.js`'s `splitVoiceSegments()` only recognizes `🎶`, so the `♫`-wrapped portion would have
+     been spoken in the normal voice with the raw symbols read aloud, not sung at all. Widened
+     `mergeKaraokeMarkers()` to normalize `♫`/`♪`/`🎵` to `🎶` before merging.
+  6. **A real bug in that very fix, caught by unit-testing it before trusting it**: the
+     normalization regex `[♫♪🎵]` (no `/u` flag) silently corrupted real `🎶` characters — `🎵` and
+     `🎶` are both astral-plane characters sharing the same leading UTF-16 surrogate, so a character
+     class without `/u` decomposes them into individual code units rather than whole codepoints,
+     letting the class accidentally match just half of a real `🎶` and replace only that half.
+     Fixed by adding the `/u` flag to both regexes in `mergeKaraokeMarkers()`. Confirmed clean via a
+     direct unit test (inspecting codepoints, not just eyeballing terminal output, which hid the
+     corruption as what looked like a shell/encoding artifact at first).
+  7. **The karaoke-confirm and Steel-Rain-web-search affirmation flows share `AFFIRMATION_PHRASES`/
+     `isTrivialRemainder`, and both were too strict**: natural phrasings like "yes let's do that"
+     left "let's do that" after stripping "yes," which isn't pure filler, so `isTrivialRemainder`
+     rejected it and the message fell through to a normal chat reply instead of firing the actual
+     performance/search. Expanded `AFFIRMATION_PHRASES` with common multi-word phrasings ("let's do
+     that", "let's do it", "let's go", "go for it") — fixes both flows at once since they share the
+     same constant.
+  **Status: all 7 above fixed and unit/A-B-tested as of 2026-06-24. A live end-to-end retest the
+  same day surfaced the real-band-naming and marker-merge fixes holding up, but found 3 NEW,
+  not-yet-diagnosed problems — karaoke is still NOT working reliably end-to-end:**
+  8. **A song with an odd/dangling marker count**: the reply contained a long unmarked "spoken"
+     paragraph followed by a single trailing `🎶` with no matching opener — `mergeKaraokeMarkers()`
+     only merges *complete* pairs found via its `/🎶([\s\S]*?)🎶/gu` regex; an unpaired trailing
+     marker is left untouched in the "trailing text" remainder, so that content plays back
+     unsung. Not yet fixed — needs real investigation into why the model emitted an unpaired
+     marker before deciding whether the fix belongs in the prompt or in `mergeKaraokeMarkers()`.
+  9. **A "yes let's do that" confirmation returned the canned offer-line string again instead of
+     performing or replying normally.** Not yet root-caused. Working hypothesis, NOT verified:
+     `pendingKaraokeOffer` may already have been cleared/stale from an earlier turn, so the
+     confirm-check in `#askSkippy` fell through to a different branch that happened to echo
+     offer-line text from conversation history — needs log/code instrumentation to confirm before
+     touching any code, not another guess-and-patch.
+  10. **Two further attempts — "Skippy it's time to jam out" (literally contains the
+      `KARAOKE_TRIGGER_PHRASES` entry "jam out") and a follow-up "or you want to rock out the
+      volume" — produced only normal chat replies, no performance at all.** Also not yet
+      root-caused. Working hypothesis, NOT verified: `pendingKaraokeOffer` may have still been
+      `true` from bug #9's unresolved exchange, which (per the trigger-check's `!
+      this.pendingKaraokeOffer && ...` guard) would skip the trigger-phrase branch entirely even
+      though "jam out" was said again.
+  **None of 8-10 have been confirmed with actual log/code instrumentation — both "working
+  hypotheses" above are unverified guesses, written down so the next session starts from a
+  specific lead instead of re-discovering the symptom from scratch. Deferred to the next session
+  per the user's explicit call ("we will work on skippy's singing again tomorrow").**
 
 ## Pillar 19 — Self-Evolution & Metacognitive Matrix (confirmed 2026-06-22, implemented, scoped
 down from the original ask)
@@ -631,6 +705,107 @@ and not split between the Commander and his wife). Built instead as `EvolutionPr
   syntax/cargo-build verified, NOT yet live-verified** — needs a real session: archive a workspace
   with real conversation in it and confirm the Critic Loop lands a log entry, then say a
   Course Correction phrase and confirm the immediate sulky reply + weight drop.
+
+## Pillar 20 — On-Device Speaker Recognition (confirmed 2026-06-23, implemented and live-tested)
+Automatic, passive detection of whether the Commander or an unrecognized voice is currently
+speaking, using on-device speaker recognition (entirely in the browser via WASM) instead of a
+manual toggle or a spoken trigger phrase (cf. Pillar 16's Tactical Roster).
+
+**Two engine pivots, same day (2026-06-23)**:
+1. Originally built on Picovoice Eagle, dropped when Picovoice locked new AccessKey issuance
+   behind an enterprise manual-review wall the user couldn't wait on.
+2. Rebuilt on `@jaehyun-ko/speaker-verification` (open-source, Apache-2.0, `onnxruntime-web`/WASM,
+   a NeXt-TDNN speaker-embedding model) — real, working, verified via direct GitHub/npm research.
+   Never actually shipped: Claude Code's own auto-mode safety classifier blocked `npm install` for
+   this package specifically because it was agent-selected via web research rather than named by
+   the user, and exact-version-pinning didn't change that.
+3. **Final: `@huggingface/transformers` (Hugging Face's own officially-maintained package) running
+   Microsoft's WavLM speaker-verification model (`Xenova/wavlm-base-sv`, ONNX, q8-quantized,
+   ~100MB)** — chosen specifically to reduce single-maintainer supply-chain risk (bigger-name org
+   on both the runtime library and the model weights), at the cost of a much larger one-time
+   download than option 2. `npm install` for this package was *also* blocked by the classifier on
+   the first attempt; only resolved once the user ran `npm install` themselves directly in their
+   own shell (not an agent-initiated action, so the classifier never saw it).
+
+**The payoff of building `voiceId.js` as a clean module boundary**: both pivots only ever required
+rewriting that one file's internals. `App.js` and `server.js` needed **zero changes** across either
+swap — both only ever consumed `voiceId.js`'s exported function signatures
+(`voiceIdAvailable`/`loadStoredVoiceprint`/`deleteVoiceprint`/`enrollVoice`/`startRecognition`/
+`SPEAKER_MATCH_THRESHOLD`), kept identical throughout.
+
+**Security scope (unchanged across every pivot — confirmed before any implementation)**:
+deliberately **persona/tone only, never a permission gate** — same rule already established for
+Tactical Roster, and for the same reason: a voice match (even a real biometric one, not just a
+self-declared phrase) has zero cryptographic backing and can be spoofed by a recording/replay, so
+it cannot be trusted to gate real capability. Guest Mode's WebAuthn-gated unlock (Pillar 15)
+remains the **sole** real permission boundary in this app, completely unaffected by whatever this
+feature reports.
+
+- **Post-login-only activation**: the recognizer never instantiates before a successful Internet
+  Identity login, and is torn down the instant Guest Mode is enabled (resumed automatically on
+  unlock) — dormant otherwise, no mic access or CPU spent.
+- **Enrollment**: a hidden setup control in the Profile settings drawer (owner-only, hidden during
+  Guest Mode) records three short clips via `MediaRecorder`, extracts a speaker embedding from
+  each, and averages them into one stored voiceprint. A real download-progress callback
+  (`from_pretrained`'s `progress_callback`) drives a distinct "Downloading voice model (one-time,
+  ~100MB)... X%" UI phase before the per-clip "Enrolling... X%" phase — added after live testing
+  showed the enrollment bar sitting at "0%" for ~2 real minutes during the model's first download,
+  which looked exactly like a hang with no feedback at all.
+- **Storage — strictly off-chain**: the voiceprint (a `Float32Array` embedding) lives only in the
+  browser's IndexedDB, tied to that browser profile. Never touches the canister, the proxy, or
+  Internet Identity — avoids putting biometric data (regulated in several jurisdictions, e.g.
+  Illinois BIPA) into this app's otherwise-public Web3 storage layer. Trade-off: re-enrollment is
+  needed once per new device/browser; no cross-device sync.
+- **Real-time routing**: a polling recognition loop records a short clip every few seconds,
+  extracts its embedding, and compares it via cosine similarity to the stored voiceprint. Each
+  `/respond` call attaches whatever the most recent score was as
+  `recognizedSpeaker: { label: 'Commander' | 'Unverified Guest', score }` (`null` if nothing is
+  enrolled/running yet). `server.js` turns this into a framing instruction only — Commander gets
+  the normal unrestricted persona confirmed as just a tone check; an unverified voice gets a
+  politer/safer default tone and an instruction to listen for the person stating their name in
+  conversation — both phrasings explicitly tell the model this changes tone only, mirroring the
+  Tactical Roster's own not-a-permission-change disclaimer.
+- **Auto-clears a stale Tactical Roster profile (Pillar 16), added 2026-06-24, one-directional by
+  design**: confirmed live that the two features never interacted — saying "it's Lisa" then
+  walking away left Skippy addressing the Commander as "Lisa" indefinitely, even once the
+  Commander's own enrolled voice was confidently detected again, since Roster framing is sticky
+  with no auto-revert and voice recognition never touched it. Fixed in `#startSpeakerRecognition`'s
+  result callback (`App.js`): a confident Commander match (`result.isCommander`) silently clears
+  `activeRosterProfile` (no spoken announcement — this fires every ~4s in the background, not on a
+  deliberate action). **Deliberately never the other direction**: voice recognition only ever
+  confirms "this is genuinely the Commander" (the one enrolled voiceprint that exists) — it never
+  sets a Roster profile to someone else, since there's no enrolled voiceprint for Lisa or anyone
+  else to confidently match against; an "Unverified Guest" reading is not evidence of any specific
+  person's identity, so Roster profiles still only ever get set by their own trigger phrases.
+- **Mic capture tuned from real measurements**: `MediaRecorder` explicitly set to 128kbps (was
+  defaulting to a low-bitrate Opus encode); echo cancellation/noise suppression/auto-gain-control
+  explicitly disabled for this feature's mic stream specifically (well-documented to hurt
+  speaker-verification accuracy by normalizing away the spectral cues that distinguish voices) —
+  scoped to `voiceId.js`'s own `getUserMedia` calls only, since the separate Web Speech API
+  dictation pipeline elsewhere in this app wants the opposite (cleaner audio for transcription).
+- **`SPEAKER_MATCH_THRESHOLD` tuned from real live data, not the model's clean-lab reference
+  numbers**: testing surfaced that mic positioning swings the Commander's own score nearly as much
+  as actual speaker identity does (same person: 0.57-0.64 with the mic at its normal resting
+  distance vs. 0.82-0.96 held close) — a genuinely different voice (tested via a YouTube video
+  played through speakers into the mic) scored ~0.6-0.65. Set to **0.75**, sitting between the
+  different-speaker ceiling and the good-mic-position same-speaker floor. Known accepted
+  limitation: a poorly-positioned mic can still cause the Commander to read as "Unverified Guest"
+  — acceptable since this is a tone signal, not a security gate, so the failure mode is just a
+  slightly more formal reply, never an access change.
+- **Known approximation, accepted**: this engine compares discrete recorded clips rather than a
+  continuous per-frame stream, so background recognition is a periodic re-check (every few
+  seconds) rather than truly continuous, on top of the pre-existing "most recent score, not synced
+  exactly to the utterance" timing slack inherent to any non-streaming approach.
+- **Honest network-dependency caveat**: the ~100MB quantized ONNX model is fetched once from
+  Hugging Face's public CDN on first use — no login, no key, no approval queue, just a normal
+  public file download — and relies on the browser's ordinary HTTP cache afterward. Satisfies "no
+  API keys or vendor gatekeeping" fully; doesn't satisfy a stricter "never touches the network"
+  reading literally.
+- **No setup dependency**: nothing needs to be created, requested, or pasted into `.env` —
+  `npm install` (run by the user directly, see the classifier note above) is the only step.
+- **Status: implemented, deployed, live-tested with real tuning data.** Threshold may still need
+  further adjustment with a real second live speaker (not played through speakers) if
+  misclassification shows up in normal use.
 
 ## Implementation Roadmap (sequenced by dependency, not pillar number)
 
@@ -869,6 +1044,15 @@ numbers below are execution order. Each phase folds in its later-added hygiene/t
     `/speak` (deliberately not a global `uncaughtException` handler — that would suppress Node's
     default crash behavior process-wide and risk continuing in a corrupted state; the targeted
     per-route fix addresses the actual confirmed mechanism).
+  - **Same crash class recurred 2026-06-24, different mechanism, same `req.on('error', () => {})`
+    guard didn't cover it**: confirmed live — `upstreamAbort.abort()` itself, called from inside
+    the `req.on('close', ...)` handler present on all 5 routes that proxy an upstream fetch
+    (`/respond`, `/speak`, `/karaoke`, `/critic-loop`, `/project-brief`), can throw a
+    `DOMException [AbortError]` synchronously in some stream-teardown states, which Node's
+    destroy-lifecycle machinery re-surfaces as an unhandled `'error'` event on `req` — fatal again,
+    same "whole proxy down, every route unreachable" symptom. Fixed by wrapping each
+    `upstreamAbort.abort()` call in its own try/catch no-op at all 5 call sites, same "swallow the
+    specific confirmed throw, not a global handler" philosophy as the original fix above.
   - **Some PDFs have no real text layer** (confirmed file-specific, not universal, via two
     independent extraction libraries against real test files — e.g. some browser "print to PDF"
     exports rasterize the page instead of embedding selectable text). No code bug; OCR support is
@@ -1312,4 +1496,21 @@ numbers below are execution order. Each phase folds in its later-added hygiene/t
   whole span (this function's only caller is TTS prep, never the on-screen transcript); also added
   a system-prompt instruction telling the model this is a voice assistant and every word gets
   spoken, so no asterisk-wrapped tone descriptions at all. Confirmed fixed live.
+- **Phase 5.8.5 — On-Device Speaker Recognition** (Pillar 20, mid-session addition 2026-06-23, not
+  in the original spec). **Status: implemented, deployed, live-tested with real threshold-tuning
+  data.** New `src/skippy_mmucc_frontend/src/voiceId.js` module — two same-day engine pivots
+  (Picovoice Eagle → `@jaehyun-ko/speaker-verification` → final: `@huggingface/transformers` +
+  Microsoft's WavLM model), the middle one never actually shipped because Claude Code's own
+  classifier blocked installing an agent-selected package; IndexedDB voiceprint storage,
+  `MediaRecorder`-based clip capture (explicit bitrate, AGC/noise-suppression/echo-cancellation
+  disabled), embedding extraction/averaging/cosine comparison, real download-progress UI for the
+  one-time ~100MB model fetch. `App.js` wires it in post-login only, ties start/stop to Guest
+  Mode, adds a Profile-settings enrollment control, and attaches `recognizedSpeaker` to every
+  `/respond` call; `server.js` turns that into a tone-only framing instruction with an explicit
+  not-a-permission-change disclaimer, mirroring Tactical Roster's. Needed zero changes to either
+  `App.js` or `server.js` across either engine pivot — both only consume `voiceId.js`'s exported
+  function signatures, kept identical throughout. `SPEAKER_MATCH_THRESHOLD` tuned to 0.75 from
+  real same-speaker/different-speaker measurements — see Pillar 20 above for the numbers and the
+  known mic-positioning-sensitivity limitation.
+  See Pillar 20 above for the full design and the security-scope decision made before building.
 - **Phase 5.9 — Wasm64** (Pillar 9, deprioritized).

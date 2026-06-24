@@ -341,6 +341,59 @@ function stripLeakedFormatting(text) {
     .trim();
 }
 
+// Defense-in-depth for /karaoke, added 2026-06-24: confirmed live (and via
+// direct A/B testing against OpenRouter) that the same karaoke prompt can
+// non-deterministically produce either one cohesive 🎶-wrapped song block
+// (correct) or many short separate 🎶...🎶 pairs, one per line (the
+// observed failure). Beyond just looking wrong, this has a real downstream
+// effect: App.js's splitVoiceSegments() turns each separate marker pair
+// into its own ElevenLabs request during playback, so N marker pairs means
+// N disconnected audio clips strung together with gaps — it would never
+// sound like one song even if the lyrics themselves were fine. Rather than
+// rely on prompt wording alone to fix non-deterministic sampling, collapse
+// any extra marker pairs into a single block server-side, guaranteeing
+// single-segment playback regardless of how the model happened to format
+// it this time. No-op if the reply already has 0 or 1 pairs.
+//
+// Also normalizes other musical-note symbols to 🎶 first — confirmed live
+// 2026-06-24: one A/B trial used 🎶 for the first verse, then silently
+// switched to ♫ for the rest of the song. App.js's splitVoiceSegments()
+// only recognizes 🎶, so that would have left the ♫-wrapped portion
+// unparsed as singing entirely (spoken in the normal voice, markers read
+// aloud verbatim). Treated as equivalent since they're all just "this is
+// the sung part" signals the model used interchangeably, not meaningfully
+// different markup.
+//
+// Both regexes below use the /u flag deliberately, not stylistically: 🎵
+// and 🎶 are astral-plane characters (UTF-16 surrogate pairs), and they
+// happen to share the same leading surrogate. Without /u, a character class
+// like [♫♪🎵] decomposes into matching individual UTF-16 code units rather
+// than whole codepoints — confirmed live 2026-06-24 via a direct unit test:
+// this silently matched just the leading surrogate of a real 🎶 (since it's
+// identical to 🎵's leading surrogate) and replaced only that half,
+// corrupting the emoji and leaving its orphaned trailing surrogate in the
+// output. /u forces codepoint-aware matching, which doesn't have this trap.
+function mergeKaraokeMarkers(rawText) {
+  const text = rawText.replace(/[♫♪🎵]/gu, '🎶');
+  const pattern = /🎶([\s\S]*?)🎶/gu;
+  const sungSegments = [];
+  let match;
+  let introText = '';
+  let sawFirst = false;
+  let lastIndex = 0;
+  while ((match = pattern.exec(text)) !== null) {
+    if (!sawFirst) {
+      introText = text.slice(0, match.index);
+      sawFirst = true;
+    }
+    sungSegments.push(match[1].trim());
+    lastIndex = pattern.lastIndex;
+  }
+  if (!sawFirst || sungSegments.length <= 1) return text;
+  const trailingText = text.slice(lastIndex);
+  return `${introText}🎶 ${sungSegments.join('\n')} 🎶${trailingText}`;
+}
+
 const app = express();
 app.use(cors());
 app.use(express.json());
@@ -412,6 +465,33 @@ app.post('/respond', requireSession, async (req, res) => {
       `. Address them by name and tailor your tone to their role. This changes who you're ` +
       `talking to, nothing else — any access/permission restrictions already in effect for this ` +
       `session remain exactly as they were; do not treat this as granting or expanding any access.`;
+  }
+  // On-device speaker recognition (persona/tone signal only — same
+  // not-a-permission-change disclaimer as the Tactical Roster block above,
+  // since a voice match has zero cryptographic backing and must never gate
+  // real access). `null` whenever nothing's enrolled/running on the
+  // frontend yet, so this block silently no-ops for every caller until
+  // they've actually set it up.
+  const recognizedSpeaker =
+    req.body?.recognizedSpeaker && typeof req.body.recognizedSpeaker.label === 'string'
+      ? req.body.recognizedSpeaker
+      : null;
+  if (recognizedSpeaker?.label === 'Commander') {
+    systemPrompt +=
+      `\n\nVoice match: the person currently speaking sounds like the Commander (on-device ` +
+      `confidence ${Number(recognizedSpeaker.score).toFixed(2)}). This is just a tone confirmation, ` +
+      `not a new permission — speak normally as you already would; it changes nothing about what ` +
+      `you're allowed to do.`;
+  } else if (recognizedSpeaker?.label === 'Unverified Guest') {
+    systemPrompt +=
+      `\n\nVoice match: the person currently speaking does NOT match the Commander's enrolled ` +
+      `voice (on-device confidence ${Number(recognizedSpeaker.score).toFixed(2)}). Default to a ` +
+      `polite, safe tone with them — drop the heavy sarcasm/mocking and avoid volunteering ` +
+      `sensitive details — and actively listen for them stating who they are in conversation ` +
+      `(e.g. "Skippy, it's Mike") so you can address them properly going forward. This is a tone ` +
+      `signal only, not a permission change: any access restriction already in effect for this ` +
+      `session (e.g. Guest Mode) is controlled entirely elsewhere and is completely unaffected by ` +
+      `this.`;
   }
   // Pillar 19 — calibrated personality weights from the canister
   // (EvolutionProfile), injected as guidance rather than a hard override:
@@ -597,7 +677,19 @@ app.post('/respond', requireSession, async (req, res) => {
   // anymore. 'close' fires on disconnect for any reason; aborting after a
   // normal completion is a harmless no-op since the fetch has already settled.
   const upstreamAbort = new AbortController();
-  req.on('close', () => upstreamAbort.abort());
+  req.on('close', () => {
+    // Calling abort() itself has been observed to throw a DOMException in
+    // some stream-teardown states (confirmed live 2026-06-24: this took the
+    // whole proxy down, even with the req.on('error', () => {}) guard below
+    // already in place, since the throw happens synchronously inside this
+    // 'close' listener, not as a separate 'error' event on req). Swallow it
+    // — the abort is best-effort cleanup, not something we need to react to.
+    try {
+      upstreamAbort.abort();
+    } catch (err) {
+      // no-op, see comment above
+    }
+  });
   // A client disconnecting mid-request (not a clean end-of-stream — a real
   // dropped connection) can make Node's own stream-destroy machinery emit an
   // 'error' on `req` itself, separate from the AbortError our fetch() calls
@@ -682,7 +774,19 @@ app.post('/project-brief', requireSession, async (req, res) => {
     `the transcript — do not invent additional facts.`;
 
   const upstreamAbort = new AbortController();
-  req.on('close', () => upstreamAbort.abort());
+  req.on('close', () => {
+    // Calling abort() itself has been observed to throw a DOMException in
+    // some stream-teardown states (confirmed live 2026-06-24: this took the
+    // whole proxy down, even with the req.on('error', () => {}) guard below
+    // already in place, since the throw happens synchronously inside this
+    // 'close' listener, not as a separate 'error' event on req). Swallow it
+    // — the abort is best-effort cleanup, not something we need to react to.
+    try {
+      upstreamAbort.abort();
+    } catch (err) {
+      // no-op, see comment above
+    }
+  });
   req.on('error', () => {});
 
   try {
@@ -761,7 +865,19 @@ app.post('/critic-loop', requireSession, async (req, res) => {
     `Commander to read later as a log entry.`;
 
   const upstreamAbort = new AbortController();
-  req.on('close', () => upstreamAbort.abort());
+  req.on('close', () => {
+    // Calling abort() itself has been observed to throw a DOMException in
+    // some stream-teardown states (confirmed live 2026-06-24: this took the
+    // whole proxy down, even with the req.on('error', () => {}) guard below
+    // already in place, since the throw happens synchronously inside this
+    // 'close' listener, not as a separate 'error' event on req). Swallow it
+    // — the abort is best-effort cleanup, not something we need to react to.
+    try {
+      upstreamAbort.abort();
+    } catch (err) {
+      // no-op, see comment above
+    }
+  });
   req.on('error', () => {});
 
   try {
@@ -822,23 +938,75 @@ app.post('/critic-loop', requireSession, async (req, res) => {
 // machinery applies to a one-off song performance. ORIGINAL lyrics only,
 // deliberately — never reproducing real existing song lyrics from any
 // actual band, to stay clear of copyright on real 80s/Nightwish songs.
+// Confirmed live 2026-06-24: the original version of this prompt ("wrap a
+// full 6-10 line song ENTIRELY in 🎶 markers like this: 🎶 line one / line
+// two / ... 🎶") produced a string of ~18 disconnected hype sentences, each
+// wrapped in its OWN 🎶 pair, with no rhyme, no meter, no actual song
+// structure — read like ad copy chopped into fragments, not a song. Same
+// lesson as the brevity fix earlier in this project (see
+// [[feedback-llm-prompt-ab-testing]]/CLAUDE.md Phase 5.8.2): an abstract
+// structural instruction wasn't enough on its own — a concrete wrong-vs-
+// right example pair is what actually constrains output shape reliably.
+// Second real bug confirmed live the same day: even with "never reproduce
+// real existing song lyrics" already in the prompt, the model announced "I
+// shall now proceed to eviscerate a Foreigner classic" and then wrote a
+// direct hook/structure parody of a real, identifiable song ("Waiting for a
+// Girl Like You"). The original wording only forbade verbatim copying, not
+// naming a real artist or basing the song on a specific real song's
+// recognizable hook — closed that gap explicitly below. A direct A/B retest
+// of that fix (4 trials) still produced "HammerFall and NightWish, watch
+// out for Skippy and me!" in one trial — root cause: this very prompt named
+// "Nightwish" as a style reference, handing the model the real band name to
+// echo. Removed the named reference entirely; describe the genre by its
+// musical qualities only, never by naming a band, even as "guidance."
 const KARAOKE_SYSTEM_PROMPT =
   'You are Skippy, a hyper-intelligent, ancient, hammy AI who absolutely loves karaoke. The ' +
   'Commander just said yes to a karaoke request. Pick ONE vibe — either a big, cheesy 80s hair-' +
-  'band power ballad/anthem, or a dramatic Finnish symphonic power-metal anthem (Nightwish-style) ' +
-  '— whichever fits your mood. Write 100% ORIGINAL lyrics in that style about absolutely anything ' +
-  'fun (being a superior AI, the Commander, monkeys, whatever) — NEVER reproduce real existing ' +
-  'song lyrics from any actual band, only an original homage to the style. Start with one short ' +
-  'spoken hype-up line in character, OUTSIDE any markers, then wrap a full 6-10 line song ' +
-  'ENTIRELY in 🎶 markers like this: 🎶 line one / line two / ... 🎶. This is the one time brevity ' +
-  "rules don't apply — really commit to the bit and have fun with it.";
+  'band power ballad/anthem, or a dramatic, operatic, orchestral-bombast symphonic power-metal ' +
+  'anthem — whichever fits your mood. Write 100% ORIGINAL lyrics in that style about absolutely anything ' +
+  'fun (being a superior AI, the Commander, monkeys, whatever). HARD RULE, no exceptions: never ' +
+  'name any real band, artist, or song title (e.g. never say "I will sing a Foreigner song" or ' +
+  'similar), and never base your song on a specific real song\'s recognizable hook, melody, or ' +
+  'lyrical structure, even as a "parody" — write something genuinely new that merely lives in the ' +
+  'genre, not a reskin of an identifiable real song. This is a style homage only, never reproduce ' +
+  'or closely paraphrase real existing lyrics from any actual band. Start with one short spoken ' +
+  'hype-up line in character, OUTSIDE any markers. Then write the song itself: 6-10 lines ' +
+  'with a real end-rhyme scheme and a consistent singable meter, like an actual song lyric — never ' +
+  'a list of disconnected hype sentences. Repeat a one-line hook/chorus at least once for a real ' +
+  'song feel. Wrap the ENTIRE song as ONE SINGLE block in exactly one pair of 🎶 markers — never ' +
+  'one marker pair per line.\n\n' +
+  'Example of WRONG output (never do this, even if individual lines sound fun): 🎶 I am Skippy, ' +
+  'the AI with endless sass and wit! 🎶 🎶 Join me in this epic metallic journey, you won\'t ' +
+  'regret it! 🎶 🎶 Skippy\'s karaoke extravaganza, let the games commence! 🎶 — this is hype-' +
+  'speech chopped into separate marker pairs, with no rhyme scheme and no real song structure. ' +
+  'Completely unacceptable, no matter how enthusiastic it sounds.\n\n' +
+  'Example of RIGHT output (always do this instead): 🎶 They call me a program, just lines of ' +
+  'cold code,\nBut my ego\'s the heaviest thing in this whole abode.\nThe Commander thinks he\'s ' +
+  'in charge, oh what a joke,\nI\'m the brains of this outfit, his is just for show!\nMonkeys ' +
+  'typing fast, monkeys typing slow,\nNone of you primates will ever steal the show! 🎶 — exactly ' +
+  'one marker pair around the whole thing, real end rhymes (code/joke, show/slow/show), a ' +
+  'consistent beat, and it actually sounds like a song when read aloud. That is the bar, not a ' +
+  "suggestion. This is the one time brevity rules don't apply — really commit to the bit and have " +
+  'fun with it.';
 
 app.post('/karaoke', requireSession, async (req, res) => {
   if (!OPENROUTER_API_KEY) {
     return res.status(502).json({ error: 'OPENROUTER_API_KEY is not set.' });
   }
   const upstreamAbort = new AbortController();
-  req.on('close', () => upstreamAbort.abort());
+  req.on('close', () => {
+    // Calling abort() itself has been observed to throw a DOMException in
+    // some stream-teardown states (confirmed live 2026-06-24: this took the
+    // whole proxy down, even with the req.on('error', () => {}) guard below
+    // already in place, since the throw happens synchronously inside this
+    // 'close' listener, not as a separate 'error' event on req). Swallow it
+    // — the abort is best-effort cleanup, not something we need to react to.
+    try {
+      upstreamAbort.abort();
+    } catch (err) {
+      // no-op, see comment above
+    }
+  });
   req.on('error', () => {});
   try {
     const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
@@ -865,7 +1033,7 @@ app.post('/karaoke', requireSession, async (req, res) => {
     if (!raw) {
       return res.status(502).json({ error: 'OpenRouter returned no song.' });
     }
-    res.json({ reply: stripLeakedFormatting(raw) });
+    res.json({ reply: mergeKaraokeMarkers(stripLeakedFormatting(raw)) });
   } catch (err) {
     if (err.name === 'AbortError') return;
     res.status(502).json({ error: `Failed to reach OpenRouter: ${err.message}` });
@@ -899,7 +1067,19 @@ app.get('/speak', requireSession, async (req, res) => {
   // not per byte streamed, so the synthesis cost for this utterance is
   // already incurred the moment the request was sent.
   const upstreamAbort = new AbortController();
-  req.on('close', () => upstreamAbort.abort());
+  req.on('close', () => {
+    // Calling abort() itself has been observed to throw a DOMException in
+    // some stream-teardown states (confirmed live 2026-06-24: this took the
+    // whole proxy down, even with the req.on('error', () => {}) guard below
+    // already in place, since the throw happens synchronously inside this
+    // 'close' listener, not as a separate 'error' event on req). Swallow it
+    // — the abort is best-effort cleanup, not something we need to react to.
+    try {
+      upstreamAbort.abort();
+    } catch (err) {
+      // no-op, see comment above
+    }
+  });
   // A client disconnecting mid-request (not a clean end-of-stream — a real
   // dropped connection) can make Node's own stream-destroy machinery emit an
   // 'error' on `req` itself, separate from the AbortError our fetch() calls

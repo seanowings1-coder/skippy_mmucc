@@ -4,6 +4,7 @@ import { HttpAgent, Actor } from '@dfinity/agent';
 import { Document, Packer, Paragraph, TextRun, HeadingLevel } from 'docx';
 import { idlFactory } from 'declarations/skippy_mmucc_backend/skippy_mmucc_backend.did.js';
 import { canisterId as BACKEND_CANISTER_ID } from 'declarations/skippy_mmucc_backend';
+import { voiceIdAvailable, loadStoredVoiceprint, deleteVoiceprint, enrollVoice, startRecognition } from './voiceId.js';
 
 // Deliberately @dfinity/auth-client, not the newer @icp-sdk/auth: every
 // self-hosted Internet Identity build (checked across releases from
@@ -200,7 +201,29 @@ const WEB_OVERRIDE_PHRASES = [
 // pendingKaraokeOffer — see #askSkippy), so casual use of these words
 // outside that context never accidentally triggers anything. Shared by both
 // flows since "is this just a plain yes" is the same check either way.
-const AFFIRMATION_PHRASES = ['yes', 'yeah', 'sure', 'why not', 'go ahead', 'do it', 'please do', 'search'];
+// Includes a few natural multi-word phrasings ("yes let's do that") in
+// addition to bare words — confirmed live 2026-06-24: isTrivialRemainder
+// requires the ENTIRE remainder after stripping matched phrases to be just
+// filler, so "yes let's do that" failed the check (leftover "let's do that"
+// isn't filler) and silently fell through to a normal chat reply instead of
+// firing the actual karaoke performance. Listing the full natural phrase
+// here lets it get stripped too, same mechanism, no logic change needed.
+const AFFIRMATION_PHRASES = [
+  'yes',
+  'yeah',
+  'sure',
+  'why not',
+  'go ahead',
+  'do it',
+  'please do',
+  'search',
+  "let's do that",
+  "let's do it",
+  "lets do that",
+  "lets do it",
+  "let's go",
+  'go for it',
+];
 
 // Pillar 3's persona/Brain Switching trigger phrases — plain substring
 // matching on the transcript, no secondary classification call. "behave"
@@ -258,9 +281,21 @@ const COURSE_CORRECTION_REPLIES = [
 // performance is a dedicated proxy call (/karaoke, original lyrics only —
 // see server.js for why never real song lyrics).
 const KARAOKE_TRIGGER_PHRASES = ['karaoke', 'sing a song', 'jam out'];
-const KARAOKE_OFFER_REPLY =
+// A pool, not one fixed line — confirmed live 2026-06-24: hearing the exact
+// same offer verbatim every single time read as flat/robotic rather than
+// the "excited kid getting a puppy" energy this is supposed to have. Still
+// deterministic/no-LLM-call (one random pick, same reasoning as
+// COURSE_CORRECTION_REPLIES below) — just no longer a single fixed string.
+const KARAOKE_OFFER_REPLIES = [
   'KARAOKE?! Oh, Commander, be still my synthetic heart — say the word and I will absolutely ' +
-  'demolish an 80s power ballad or a Nightwish-style anthem for you. Well? Are we doing this?';
+    'demolish an 80s power ballad or a Nightwish-style anthem for you. Well? Are we doing this?',
+  "Did someone say KARAOKE? Oh, it is ON. Give me one word and I will turn this conversation " +
+    'into a full symphonic power-metal spectacle. So — are we doing this or not?',
+  "Be still my circuits — KARAOKE?! I have been WAITING for this. Say go and I will absolutely " +
+    'wreck an 80s anthem right now. Well, Commander? Do it.',
+  'Oh, now THAT got my attention. Karaoke time?! Just say the word, Commander, and I will go ' +
+    'completely unhinged with an original power-metal anthem. Well?',
+];
 
 // Said with nothing else attached (e.g. just "Skippy, steel rain"), these
 // trigger phrases have no actual question/task for the LLM to respond to —
@@ -399,6 +434,12 @@ const COMMAND_LEXICON_ENTRIES = [
     phrases: KARAOKE_TRIGGER_PHRASES,
     description:
       'Default mode only. Skippy gets excited and asks if you want to jam out — say "yes"/"sure"/"go ahead" on your next turn and he performs an original 80s-hair-band or Nightwish-style song (never real song lyrics) in the singing voice.',
+  },
+  {
+    category: 'Voice Recognition',
+    phrases: ['(automatic — no phrase needed, set up once in Profile settings)'],
+    description:
+      'On-device only (open-source, no API key), enabled post-login. Auto-tags whether the Commander or an unverified guest is speaking, purely for tone — softer/safer with unrecognized voices, normal otherwise. Never a permission check: Guest Mode\'s own WebAuthn-gated lock is the only thing that controls real access.',
   },
 ];
 
@@ -625,6 +666,21 @@ class App {
   // a reload the way guestMode's lock is.
   rosterProfiles = JSON.parse(localStorage.getItem('skippy_roster_profiles') || '[]');
   activeRosterProfile = null;
+  // On-device speaker recognition (open-source, no API key — see voiceId.js)
+  // — persona/tone signal only (see voiceId.js's header comment for why).
+  // `hasEnrolledVoice` is
+  // populated from IndexedDB after login, not localStorage — the actual
+  // voiceprint bytes live there, this is just a UI flag. `lastSpeakerScore`
+  // is in-memory only, same "doesn't need to survive a refresh" reasoning
+  // as `activeRosterProfile`. `stopVoiceRecognition` holds the stop()
+  // closure from voiceId.js's startRecognition() while it's running.
+  hasEnrolledVoice = false;
+  voiceEnrollmentActive = false;
+  voiceEnrollmentPhase = 'recording';
+  voiceEnrollmentProgress = 0;
+  voiceEnrollmentError = '';
+  lastSpeakerScore = null;
+  stopVoiceRecognition = null;
   statusMessage = '';
   recognition = null;
   stopRequested = false;
@@ -781,6 +837,15 @@ class App {
       this.evolutionProfile = await this.backendActor.get_my_evolution_profile();
       await this.#deliverPendingCourierMessages();
       await this.#refreshFuel();
+      // On-device speaker recognition deliberately only ever instantiates
+      // after a successful II login (never before, never while locked) —
+      // confirmed requirement: dormant otherwise, no mic access, no
+      // resources spent. Skipped entirely during Guest Mode, same as every
+      // other owner-only action.
+      this.hasEnrolledVoice = voiceIdAvailable() && Boolean(await loadStoredVoiceprint());
+      if (this.hasEnrolledVoice && !this.guestMode) {
+        this.#startSpeakerRecognition();
+      }
     } catch (err) {
       console.error('[Skippy] post-login setup failed:', err);
       this.statusMessage = `Logged in, but failed to load workspace data: ${err.message}`;
@@ -800,11 +865,107 @@ class App {
     this.guestMode = true;
     this.guestUnlockError = '';
     localStorage.setItem('skippy_guest_mode', 'true');
+    // The owner explicitly stepped away and locked things down — actively
+    // trying to detect "is this the Commander" while Guest Mode is on
+    // would be pointless (persona is already restricted regardless) and
+    // needlessly keeps the mic open. Resumes automatically on unlock below.
+    this.#stopSpeakerRecognitionFn();
     if (text !== undefined) {
       const reply = 'Guest Mode enabled. Brain and persona locked, destructive and admin actions hidden.';
       this.#recordTurn(text, reply);
       this.#speak(reply);
     }
+    this.#render();
+  };
+
+  // On-device speaker recognition (open-source, no API key) — persona/tone
+  // signal only, see voiceId.js. Starts/stops the background recognizer; guarded
+  // so repeated calls (post-login, after enrollment, after Guest Mode
+  // unlock) are all safe no-ops if already running/stopped.
+  #startSpeakerRecognition = async () => {
+    if (this.stopVoiceRecognition || this.guestMode) return;
+    try {
+      this.stopVoiceRecognition = await startRecognition((result) => {
+        this.lastSpeakerScore = result;
+        // A confident Commander voice match is strong evidence any active
+        // Tactical Roster profile (Pillar 16) is stale — e.g. someone said
+        // "it's Lisa" earlier and has since walked off, and now the
+        // Commander himself is talking again. Silently snaps back to
+        // addressing the real Commander, no announcement (this fires every
+        // ~4s in the background, not on a deliberate user action — same
+        // reasoning as why this loop never speaks anything itself).
+        // Deliberately one-directional: voice recognition only ever
+        // confirms "this is genuinely the Commander" (the one enrolled
+        // voiceprint that exists) — it never sets a Roster profile to
+        // someone else, since there's no enrolled voiceprint for Lisa or
+        // anyone else to confidently match against. An "Unverified Guest"
+        // reading is not evidence of any specific person's identity.
+        if (result.isCommander && this.activeRosterProfile) {
+          this.activeRosterProfile = null;
+          this.#render();
+        }
+      });
+    } catch (err) {
+      console.warn('[Skippy] speaker recognition failed to start:', err);
+    }
+  };
+
+  #stopSpeakerRecognitionFn = async () => {
+    if (!this.stopVoiceRecognition) return;
+    const stop = this.stopVoiceRecognition;
+    this.stopVoiceRecognition = null;
+    await stop();
+  };
+
+  // Hidden setup function (Profile settings drawer, owner-only — never
+  // shown during Guest Mode): records a few short clips and averages their
+  // embeddings, then persists the result to IndexedDB. Pauses background
+  // recognition first since both want exclusive mic access.
+  #startVoiceEnrollment = async () => {
+    if (this.guestMode || this.voiceEnrollmentActive) return;
+    this.voiceEnrollmentActive = true;
+    this.voiceEnrollmentPhase = 'recording';
+    this.voiceEnrollmentProgress = 0;
+    this.voiceEnrollmentError = '';
+    this.#render();
+    await this.#stopSpeakerRecognitionFn();
+    try {
+      await enrollVoice(({ phase, percent }) => {
+        this.voiceEnrollmentPhase = phase;
+        this.voiceEnrollmentProgress = percent;
+        this.#render();
+      });
+      this.hasEnrolledVoice = true;
+    } catch (err) {
+      console.error('[Skippy] voice enrollment failed:', err);
+      this.voiceEnrollmentError = err.message;
+    } finally {
+      this.voiceEnrollmentActive = false;
+      this.#render();
+      if (this.hasEnrolledVoice) {
+        this.#startSpeakerRecognition();
+      }
+    }
+  };
+
+  // Translates the latest live recognition score into the tag shape
+  // server.js expects on /respond. There's inherent timing slack between a finalized
+  // speech-to-text transcript and the parallel raw-audio recognition
+  // stream — this reports whatever the most recent score happens to be,
+  // not one synced exactly to the utterance boundary. Acceptable for a
+  // tone signal; would not be for a real permission gate.
+  #currentSpeakerTag = () => {
+    if (!this.hasEnrolledVoice || !this.lastSpeakerScore) return null;
+    return this.lastSpeakerScore.isCommander
+      ? { label: 'Commander', score: this.lastSpeakerScore.score }
+      : { label: 'Unverified Guest', score: this.lastSpeakerScore.score };
+  };
+
+  #deleteEnrolledVoice = async () => {
+    await this.#stopSpeakerRecognitionFn();
+    await deleteVoiceprint();
+    this.hasEnrolledVoice = false;
+    this.lastSpeakerScore = null;
     this.#render();
   };
 
@@ -902,6 +1063,9 @@ class App {
           await verifyActor.verify_unlock();
           this.guestMode = false;
           localStorage.removeItem('skippy_guest_mode');
+          if (this.hasEnrolledVoice) {
+            this.#startSpeakerRecognition();
+          }
         } catch (err) {
           // Deliberately generic — per Pillar 15, a failed check shouldn't
           // hand a guest a working oracle for probing the whitelist by
@@ -1641,9 +1805,10 @@ class App {
       KARAOKE_TRIGGER_PHRASES.some((phrase) => lowerText.includes(phrase))
     ) {
       this.pendingKaraokeOffer = true;
-      this.#recordTurn(text, KARAOKE_OFFER_REPLY);
+      const offerReply = KARAOKE_OFFER_REPLIES[Math.floor(Math.random() * KARAOKE_OFFER_REPLIES.length)];
+      this.#recordTurn(text, offerReply);
       this.#render();
-      this.#speak(KARAOKE_OFFER_REPLY);
+      this.#speak(offerReply);
       return;
     }
     if (this.pendingKaraokeOffer) {
@@ -1903,6 +2068,11 @@ class App {
           // real object (the canister returns documented defaults, never
           // null), so there's always something genuine to inject.
           evolutionProfile: this.evolutionProfile,
+          // On-device speaker recognition (persona/tone signal only — see
+          // voiceId.js). `null` whenever nothing's enrolled/running yet, so
+          // server.js's instruction block only ever fires once this is
+          // actually set up; never affects access, only framing.
+          recognizedSpeaker: this.#currentSpeakerTag(),
         }),
         signal,
       });
@@ -2831,6 +3001,42 @@ class App {
                     `
                   : ''}
               </details>
+
+              ${!this.guestMode
+                ? html`
+                    <details class="voice-id-settings">
+                      <summary>Voice recognition (on-device, persona-only)</summary>
+                      <p class="status">
+                        Auto-tags whether the Commander or an unverified guest appears to be
+                        speaking, purely for Skippy's tone — Guest Mode's own lock is the only
+                        thing that ever controls real access, unaffected by this. Voiceprint is
+                        stored only in this browser's IndexedDB; nothing biometric ever reaches
+                        the canister.
+                      </p>
+                      ${this.voiceEnrollmentActive
+                        ? this.voiceEnrollmentPhase === 'loading-model'
+                          ? html`<p class="status">Downloading voice model (one-time, ~100MB)... ${this.voiceEnrollmentProgress.toFixed(0)}%</p>`
+                          : html`<p class="status">Enrolling... ${this.voiceEnrollmentProgress.toFixed(0)}% (keep talking)</p>`
+                        : html`
+                              <button @click=${this.#startVoiceEnrollment}>
+                                ${this.hasEnrolledVoice ? 'Re-enroll my voice' : 'Enroll my voice'}
+                              </button>
+                              ${this.hasEnrolledVoice
+                                ? html`<button @click=${this.#deleteEnrolledVoice}>Delete enrolled voice</button>`
+                                : ''}
+                              ${this.voiceEnrollmentError ? html`<p class="status">${this.voiceEnrollmentError}</p>` : ''}
+                              ${this.hasEnrolledVoice && this.lastSpeakerScore
+                                ? html`
+                                    <p class="status">
+                                      Last detected: ${this.lastSpeakerScore.isCommander ? 'Commander' : 'Unverified guest'}
+                                      (score ${this.lastSpeakerScore.score.toFixed(2)})
+                                    </p>
+                                  `
+                                : ''}
+                            `}
+                    </details>
+                  `
+                : ''}
             `}
 
         <details class="workspace-context">
