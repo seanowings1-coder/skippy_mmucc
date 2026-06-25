@@ -328,119 +328,117 @@ function isTrivialRemainder(remainder) {
 // add a new one, once Phase 5.4.1 actually ships.
 const COMMAND_LEXICON_ENTRIES = [
   {
-    category: 'Notes',
+    category: '1. Notes (SKIPPY_NOTES)',
     phrases: TRIGGER_PHRASES,
     description:
-      'Starts voice dictation of your own notes; the recorded speech is saved as a text note in the Notes Vault (SKIPPY_NOTES). Plain dictation today — not yet the covert ambient-audio capture planned for Phase 5.4.1.',
+      'Starts plain voice dictation. Saves recorded speech as a text note in the Notes Vault. (Phase 5.4.1 covert ambient capture is not yet live.)',
   },
   {
-    category: 'Notes',
+    category: '1. Notes (SKIPPY_NOTES)',
     phrases: NOTE_RETRIEVAL_PHRASES,
-    description: `Reads back your last ${RECENT_NOTES_COUNT} saved notes directly — skips the LLM entirely.`,
+    description: `Directly reads back the last ${RECENT_NOTES_COUNT} saved notes (skips the LLM entirely).`,
   },
   {
-    category: 'Persona / Mode',
+    category: '2. Persona & Mode Switching',
     phrases: ["Skippy, be yourself"],
-    description: 'Switches to default mode (full sarcasm/snark).',
+    description: 'Switches to Default Mode (full sarcasm and snark).',
   },
   {
-    category: 'Persona / Mode',
+    category: '2. Persona & Mode Switching',
     phrases: ["Skippy, behave"],
-    description: 'Switches to professional mode (persona toned down).',
+    description: 'Switches to Professional Mode (persona toned down).',
   },
   {
-    category: 'Persona / Mode',
+    category: '2. Persona & Mode Switching',
     phrases: STEEL_RAIN_PHRASES,
     description:
-      'Switches to tactical mode AND selects the Tactical (fastest/cheapest) brain together. If local manuals have no match, fires a live web search instantly with no permission step.',
+      'Switches to Tactical Mode AND locks the Tactical brain (fastest/cheapest). Instantly fires a live web search if local manuals have no match (bypasses permissions).',
   },
   {
-    category: 'Brain switching',
+    category: '3. Brain Selection (Model Routing)',
     phrases: SUPER_BRAIN_LOCK_PHRASES,
     description:
-      'Sticky: locks every turn onto the Heavy Hitter brain (also a button toggle) until unlocked. Steel Rain still overrides with the fast Tactical brain while active; the lock resumes the instant tactical mode is left.',
+      'Sticky Lock. Forces all subsequent turns onto the Heavy Hitter brain. Exception: Steel Rain temporarily overrides this with the Tactical brain; the lock resumes instantly once Tactical Mode is exited.',
   },
   {
-    category: 'Brain switching',
+    category: '3. Brain Selection (Model Routing)',
     phrases: SUPER_BRAIN_UNLOCK_PHRASES,
-    description: 'Releases the Super Brain lock — back to normal one-shot/automatic brain switching.',
+    description: 'Releases the lock and restores normal automatic/one-shot brain switching.',
   },
   {
-    category: 'Brain switching',
+    category: '3. Brain Selection (Model Routing)',
     phrases: [THINKING_HAT_PHRASE],
     description:
-      'One-shot: swaps to the Heavy Hitter (most capable) model for just this message, then reverts to whichever brain/mode was active before. Model only — persona/mode is unaffected.',
+      'One-shot. Swaps to the Heavy Hitter brain for the current message only, then reverts to the previous model. Persona and mode remain unaffected.',
   },
   {
-    category: 'Web search',
+    category: '4. Web Search & Permissions',
     phrases: WEB_OVERRIDE_PHRASES,
     description:
-      'Direct override — skips the local-knowledge-base check and any permission step, fires a live web search immediately regardless of mode.',
+      'Direct Override. Skips local knowledge base checks and permission steps; executes a live web search immediately regardless of active mode.',
   },
   {
-    category: 'Web search',
+    category: '4. Web Search & Permissions',
     phrases: AFFIRMATION_PHRASES,
     description:
-      'Only meaningful right after Skippy mocks you and asks permission to search the web (default/professional mode, local knowledge base miss) — confirms the pending search and answers your original question.',
+      'Search Confirmation. Only functional immediately after Skippy mocks you and requests permission to search the web (triggered by a local KB miss in Default/Professional mode). Confirms the search and answers the original query.',
   },
   {
-    category: 'Courier',
+    category: '5. Courier (Messaging)',
     phrases: COURIER_TRIGGER_PHRASES,
     description:
-      'Queues whatever you say after the phrase as a message for the other whitelisted user — delivered as Skippy\'s first remark the next time they log in, then cleared.',
+      "Queues all trailing text as a message for the other whitelisted user. Delivered as Skippy's first remark upon their next login, then cleared.",
   },
   {
-    category: 'Emergency (only while active)',
+    category: '6. Emergency Control (only while a Guardian dispatch is active)',
     phrases: OPEN_COMMS_PHRASES,
-    description:
-      'Unmutes the speaker and lets your whitelist contacts speak/send presets through the device. Only meaningful during an active Guardian Emergency dispatch.',
+    description: 'Unmutes the speaker, allowing whitelisted contacts to speak or send presets through the device.',
   },
   {
-    category: 'Emergency (only while active)',
+    category: '6. Emergency Control (only while a Guardian dispatch is active)',
     phrases: GO_DARK_PHRASES,
-    description:
-      'Re-mutes the speaker and returns to silent Ghost Mode streaming. Only meaningful during an active Guardian Emergency dispatch.',
+    description: 'Re-mutes the speaker and reverts to silent Ghost Mode streaming.',
   },
   {
-    category: 'Emergency (only while active)',
+    category: '6. Emergency Control (only while a Guardian dispatch is active)',
     phrases: STAND_DOWN_PHRASES,
-    description: 'Ends the active emergency: stops streaming, exits Ghost Mode, restores the normal screen.',
+    description: 'Ends the emergency state: stops streaming, exits Ghost Mode, restores the standard display.',
   },
   {
-    category: 'Demo',
-    phrases: CIVILIAN_BRIEFING_PHRASES,
-    description:
-      'One-shot: returns a fixed, verbatim tech-flex monologue instead of a normal reply, for live demo audiences. Reverts to normal persona immediately after.',
-  },
-  {
-    category: 'Security',
+    category: '7. Security & User Profiles',
     phrases: GUEST_MODE_TRIGGER_PHRASES,
     description:
-      'Instantly enables Guest Mode (also available as a button in Workspace security) — no confirmation step. Locks the current brain/persona and hides destructive/admin actions until manually unlocked via re-authentication.',
+      'Instantly activates Guest Mode, no confirmation step. Locks the current brain/persona and hides destructive/admin actions. Requires manual WebAuthn re-authentication to unlock.',
   },
   {
-    category: 'Tactical Roster',
-    phrases: ['(any phrase you register in the Tactical Roster drawer, e.g. "it\'s lisa")'],
+    category: '7. Security & User Profiles',
+    phrases: ['(custom registered phrases, e.g. "it\'s lisa" — set up in the Tactical Roster drawer)'],
     description:
-      'Switches who Skippy is addressing for tone/framing only — never changes active permissions. Guest Mode restrictions stay exactly as they were regardless of which Roster profile is active.',
+      'Tactical Roster switch. Changes the active profile Skippy is addressing, for tone/framing only — never alters active permissions or overrides Guest Mode restrictions.',
   },
   {
-    category: 'Self-Evolution',
+    category: '7. Security & User Profiles',
+    phrases: ['(passive — automatic on-device voice recognition, no phrase needed)'],
+    description:
+      "Auto-tags whether the Commander or an unverified guest is speaking, purely to adjust tone (softer for unrecognized voices). Never used for permission checks — security stays gated exclusively by Guest Mode.",
+  },
+  {
+    category: '8. Self-Evolution Matrix',
     phrases: COURSE_CORRECTION_PHRASES,
     description:
-      'Immediate negative reinforcement: cuts the snark_level weight in the Evolution Matrix right now and gets a sulky acknowledgment, no LLM round trip. Disabled during Guest Mode (it permanently retunes the owner\'s own persona, not the active session).',
+      'Immediate negative reinforcement. Cuts the snark_level weight in the Evolution Matrix instantly and triggers a sulky acknowledgment (no LLM round trip). Disabled during Guest Mode.',
   },
   {
-    category: 'Karaoke',
+    category: '9. Demos & Entertainment',
+    phrases: CIVILIAN_BRIEFING_PHRASES,
+    description:
+      'One-shot monologue. Bypasses normal generation to deliver a fixed, verbatim tech-flex monologue for live audiences. Reverts to normal persona immediately after.',
+  },
+  {
+    category: '9. Demos & Entertainment',
     phrases: KARAOKE_TRIGGER_PHRASES,
     description:
-      'Default mode only. Skippy gets excited and asks if you want to jam out — say "yes"/"sure"/"go ahead" (or just repeat the trigger phrase) and he performs an original 80s-hair-band or symphonic-metal song (never real song lyrics) in the singing voice.',
-  },
-  {
-    category: 'Voice Recognition',
-    phrases: ['(automatic — no phrase needed, set up once in Profile settings)'],
-    description:
-      'On-device only (open-source, no API key), enabled post-login. Auto-tags whether the Commander or an unverified guest is speaking, purely for tone — softer/safer with unrecognized voices, normal otherwise. Never a permission check: Guest Mode\'s own WebAuthn-gated lock is the only thing that controls real access.',
+      'Default Mode only. Skippy offers to jam out — confirm with an affirmation phrase or just repeat the trigger phrase, and he performs an original 80s-hair-band or symphonic-metal song (never real song lyrics) in his singing voice.',
   },
 ];
 
@@ -2099,6 +2097,11 @@ class App {
           // server.js's instruction block only ever fires once this is
           // actually set up; never affects access, only framing.
           recognizedSpeaker: this.#currentSpeakerTag(),
+          // Book-canon trait (Pillar 12/Pillar 18 persona pass): Skippy's
+          // sarcasm drops entirely during genuine danger — server.js turns
+          // this into an unconditional sincerity override, regardless of
+          // mode/brain/evolution weights.
+          emergencyActive: this.emergencyActive,
         }),
         signal,
       });
@@ -2247,19 +2250,6 @@ class App {
   };
 
   // Deterministic test of the Dual-Voice audio pipeline (Pillar 18) —
-  // bypasses OpenRouter entirely, so it isolates "does the audio/voice-
-  // routing plumbing actually work" from "did the LLM decide to sing this
-  // turn" (the latter is inherently non-deterministic and conditional —
-  // confirmed live 2026-06-23 that the model only sings on a genuine
-  // flagged-worthy moment, not on demand). Not recorded in history/canister
-  // — this is a local plumbing check, not a real conversation turn.
-  #testSingingVoice = () => {
-    this.#speak(
-      "Let's see if this works. 🎶 Testing one two, the singing voice review, " +
-        'cosine similarity, RAG context for you 🎶 Back to normal speech now.',
-    );
-  };
-
   // Pillar 12 (Guardian Emergency Protocol). Placement protection: only
   // rendered while operationalMode === 'tactical' (see #render) — there's no
   // dedicated Steel Rain overlay view yet (Pillar 11 hasn't been built), so
@@ -2734,6 +2724,78 @@ class App {
     }
   };
 
+  // Neo Skin "drop a URL" upload — same pipeline as #uploadManualFile, just
+  // sourced from a URL the user found and verified themselves (rather than
+  // a local file), via the proxy's /chunk-and-embed-url (which fetches the
+  // URL server-side with its own SSRF guardrails — see server.js). Reads
+  // the URL straight from the DOM on click rather than as a controlled
+  // input, same established pattern as the typed-message box (Phase 5.3) —
+  // avoids fighting with this component's own re-renders.
+  #uploadManualFromUrl = async () => {
+    const input = document.getElementById('manual-url-input');
+    const url = input?.value.trim();
+    if (!url) return;
+
+    let defaultName;
+    try {
+      defaultName = new URL(url).hostname;
+    } catch {
+      this.statusMessage = 'That doesn\'t look like a valid URL.';
+      this.#render();
+      return;
+    }
+
+    const manualName = window.prompt(
+      'Manual name for this upload (defaults to the URL\'s hostname — edit if you want something else):',
+      defaultName,
+    );
+    if (!manualName || !manualName.trim()) return;
+    const name = manualName.trim();
+    const category = (
+      window.prompt(
+        'Category/type for this manual (e.g. code, manual, reference) — optional, helps filtering later:',
+        '',
+      ) || ''
+    ).trim();
+
+    this.statusMessage = `Fetching, chunking & embedding ${url}...`;
+    this.#render();
+
+    try {
+      const response = await fetch(`${PROXY_URL}/chunk-and-embed-url`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Skippy-Session': this.sessionToken },
+        body: JSON.stringify({ url }),
+      });
+      const data = await response.json();
+      if (!response.ok) {
+        this.statusMessage = data.error || 'Failed to fetch/chunk/embed that URL.';
+        this.#render();
+        return;
+      }
+
+      await this.backendActor.add_manual_chunks(name, category ? [category] : [], data.chunks);
+      if (category) this.manualCategories.set(name, category);
+      if (!this.manualOptions.includes(name)) {
+        this.manualOptions = [...this.manualOptions, name];
+      }
+      this.selectedManual = name;
+      if (input) input.value = '';
+      const successMessage = `Uploaded ${data.chunks.length} chunk(s) into "${name}" from ${url}.`;
+      this.statusMessage = successMessage;
+      this.#render();
+      setTimeout(() => {
+        if (this.statusMessage === successMessage) {
+          this.statusMessage = '';
+          this.#render();
+        }
+      }, 5000);
+    } catch (err) {
+      this.statusMessage = `Upload failed: ${err.message}`;
+      this.#render();
+    }
+  };
+
   #statusText() {
     switch (this.state) {
       case 'listening':
@@ -2793,12 +2855,17 @@ class App {
 
     const micUnsupported = !SpeechRecognitionImpl;
 
+    const liveBrainState = this.isSpeaking
+      ? 'streaming'
+      : this.statusMessage.endsWith('...') && this.statusMessage !== "I'm listening..."
+        ? 'processing'
+        : 'idle';
+
     let body = html`
-      <main>
+      <div class="command-deck">
         ${this.ghostMode
           ? html`<div style="position: fixed; inset: 0; background: black; z-index: 9999;"></div>`
           : ''}
-        <h1>Skippy Voice Notes <button @click=${this.#toggleLexicon} aria-label="Command Lexicon">❓ Commands</button></h1>
 
         ${this.lexiconOpen
           ? html`
@@ -2807,19 +2874,23 @@ class App {
                 @click=${this.#toggleLexicon}
               >
                 <div
-                  style="background: white; color: black; max-width: 600px; max-height: 80vh; overflow-y: auto; padding: 16px 24px; border-radius: 4px;"
+                  class="lexicon-modal"
+                  style="background: var(--bg-dark-armor); color: var(--text-brushed-aluminum); max-width: 640px; max-height: 80vh; overflow-y: auto; padding: 16px 24px; border-radius: 8px; border: 1px solid var(--border-strong);"
                   @click=${(e) => e.stopPropagation()}
                 >
-                  <h2>Command Lexicon</h2>
-                  <p>Every active voice/text trigger phrase and what it does.</p>
+                  <h2>Skippy Command Lexicon</h2>
+                  <p class="status">
+                    This lexicon details all active voice and text trigger phrases, categorized by
+                    functional module.
+                  </p>
                   ${[...new Set(COMMAND_LEXICON_ENTRIES.map((e) => e.category))].map(
                     (category) => html`
                       <h3>${category}</h3>
                       ${COMMAND_LEXICON_ENTRIES.filter((e) => e.category === category).map(
                         (entry) => html`
                           <p>
-                            <strong>"${entry.phrases.join('" / "')}"</strong><br />
-                            ${entry.description}
+                            <strong>Trigger Phrases:</strong> "${entry.phrases.join('" | "')}"<br />
+                            <strong>Action:</strong> ${entry.description}
                           </p>
                         `,
                       )}
@@ -2831,6 +2902,36 @@ class App {
             `
           : ''}
 
+        <header class="topbar">
+          <h1>
+            Skippy Command Deck
+            ${this.guestMode
+              ? html`<span class="badge active">🔒 Guest Mode Active</span>`
+              : html`<button @click=${() => this.#enableGuestMode()}>Enable Guest Mode</button>`}
+          </h1>
+          <div class="badges">
+            <button
+              class="badge ${this.voiceMode === 'premium' ? 'active' : ''}"
+              @click=${this.#toggleVoiceMode}
+              ?disabled=${this.voiceMuted}
+            >
+              Voice: ${this.voiceMode === 'premium' ? 'Premium 🎙' : 'Economy 💬'}
+            </button>
+            ${this.guestMode
+              ? ''
+              : html`
+                  <button
+                    class="badge ${this.superBrainLocked ? 'active' : ''}"
+                    @click=${() => this.#setSuperBrainLock(!this.superBrainLocked)}
+                  >
+                    Super Brain: ${this.superBrainLocked ? 'ON' : 'OFF'} 🧠
+                  </button>
+                `}
+          </div>
+        </header>
+
+        <div class="columns">
+        <aside class="col-left">
         <section class="workspace-switcher">
           <select @change=${this.#handleWorkspaceChange} .value=${this.activeWorkspaceId?.toString() ?? ''}>
             ${this.workspaces
@@ -2868,91 +2969,7 @@ class App {
             : ''}
         </section>
 
-        <section class="voice-toggle">
-          <button
-            @click=${this.#silence}
-            ?disabled=${!this.isSpeaking && this.statusMessage !== 'Skippy is thinking...'}
-          >
-            ✋ Stop
-          </button>
-          <button @click=${this.#toggleVoiceMode} ?disabled=${this.voiceMuted}>
-            Voice: ${this.voiceMode === 'premium' ? 'Premium 🎙' : 'Economy 💬'}
-          </button>
-          <button @click=${this.#toggleVoiceMuted}>
-            ${this.voiceMuted ? '🔇 Muted (text only)' : '🔊 Mute'}
-          </button>
-          <button @click=${this.#clearHistory} ?disabled=${this.history.length === 0 || this.guestMode}>
-            Clear history
-          </button>
-          <button @click=${this.#testSingingVoice}>🎤 Test Singing Voice</button>
-          <button @click=${this.#logout}>Log out</button>
-        </section>
-
-        <form class="text-input" @submit=${this.#sendTextMessage}>
-          <button
-            type="button"
-            class=${this.manualNoteMode ? 'note-mode-toggle active' : 'note-mode-toggle'}
-            @click=${this.#toggleNoteMode}
-          >
-            ${this.manualNoteMode ? '📝 Note Mode: ON' : '📝 Note Mode'}
-          </button>
-          <textarea
-            name="textInput"
-            rows="3"
-            placeholder=${this.manualNoteMode
-              ? 'Note mode: type and press Enter to save (no chat, no voice)...'
-              : 'Type to Skippy (e.g. for meetings)...'}
-            @keydown=${this.#handleTextareaKeydown}
-          ></textarea>
-          <button type="submit">${this.manualNoteMode ? 'Save Note' : 'Send'}</button>
-        </form>
-
-        <p class="status">Mode: ${this.operationalMode}</p>
-        ${this.lastBrain
-          ? html`<p class="status">Last brain: ${this.lastBrain} (${this.lastModel})</p>`
-          : ''}
-        ${this.guestMode
-          ? ''
-          : html`
-              <button
-                type="button"
-                class=${this.superBrainLocked ? 'super-brain-toggle active' : 'super-brain-toggle'}
-                @click=${() => this.#setSuperBrainLock(!this.superBrainLocked)}
-              >
-                ${this.superBrainLocked ? '🧠 Super Brain: LOCKED' : '🧠 Super Brain: Off'}
-              </button>
-            `}
-
-        ${this.operationalMode === 'tactical' && !this.emergencyActive && !this.guestMode
-          ? html`
-              <button
-                style="background: #b91c1c; color: white; font-weight: bold; padding: 12px; width: 100%;"
-                @click=${this.#openEmergencyConfirm}
-              >
-                EMERGENCY PANIC
-              </button>
-            `
-          : ''}
-        ${this.emergencyConfirmOpen
-          ? html`
-              <div style="position: fixed; inset: 0; background: rgba(0,0,0,0.7); display: flex; align-items: center; justify-content: center; z-index: 2000;">
-                <div style="background: white; color: black; padding: 24px; border-radius: 4px; max-width: 320px; text-align: center;">
-                  <h2>TRIGGER EMERGENCY DISPATCH?</h2>
-                  <p>This sends your live GPS location and a live audio link to your emergency contacts, and starts silent ambient recording.</p>
-                  <button
-                    style="background: #b91c1c; color: white; font-weight: bold; padding: 12px 24px;"
-                    @click=${this.#triggerEmergencyDispatch}
-                  >
-                    YES, CONFIRM
-                  </button>
-                  <button @click=${this.#closeEmergencyConfirm}>Cancel</button>
-                </div>
-              </div>
-            `
-          : ''}
-        ${this.emergencyActive
-          ? html`<p class="status">🚨 Emergency dispatch active. Say "Skippy, stand down" to end it.</p>`
-          : ''}
+        <div class="col-section-title">Configuration</div>
 
         ${this.guestMode
           ? ''
@@ -3065,6 +3082,225 @@ class App {
                 : ''}
             `}
 
+        <details class="workspace-security">
+          <summary>Workspace security</summary>
+          <button @click=${this.#toggleLexicon} aria-label="Command Lexicon">❓ Commands</button>
+          ${this.guestMode
+            ? html`
+                <p class="status">🔒 Guest Mode active — brain/persona locked, destructive and admin actions hidden.</p>
+                <button @click=${this.#unlockGuestMode}>Unlock (re-authenticate)</button>
+                ${this.guestUnlockError ? html`<p class="status">${this.guestUnlockError}</p>` : ''}
+              `
+            : ''}
+        </details>
+
+        <details class="tactical-roster">
+          <summary>Tactical Roster</summary>
+          <p class="status">
+            Addressing/tone only — never changes active permissions. Whatever Guest Mode (above)
+            currently restricts stays restricted no matter who's registered here.
+          </p>
+          ${this.activeRosterProfile
+            ? html`
+                <p class="status">
+                  Currently speaking with: <strong>${this.activeRosterProfile.name}</strong>
+                  ${this.activeRosterProfile.role ? ` (${this.activeRosterProfile.role})` : ''}
+                  <button @click=${this.#clearActiveRosterProfile}>Clear</button>
+                </p>
+              `
+            : ''}
+          <form @submit=${this.#addRosterProfile}>
+            <label>
+              Name/Callsign
+              <input name="rosterName" type="text" placeholder="Lisa" required />
+            </label>
+            <label>
+              Voice Trigger Phrase
+              <input name="rosterTrigger" type="text" placeholder="it's lisa" required />
+            </label>
+            <label>
+              Role/Significance
+              <input name="rosterRole" type="text" placeholder="Insurance adjuster" />
+            </label>
+            <button type="submit">+ Add profile</button>
+          </form>
+          <ul>
+            ${this.rosterProfiles.map(
+              (p) => html`
+                <li>
+                  <strong>${p.name}</strong> — "${p.triggerPhrase}"${p.role ? ` (${p.role})` : ''}
+                  <button @click=${() => this.#deleteRosterProfile(p.triggerPhrase)}>Delete</button>
+                </li>
+              `,
+            )}
+          </ul>
+        </details>
+        </aside>
+
+        <section class="col-center">
+        <div class="conversation-transcript" id="transcript-scroll">
+          ${this.history.length === 0
+            ? html`<p class="status">No messages yet in this workspace.</p>`
+            : this.history.map(
+                (msg) => html`
+                  <p class="transcript-message ${msg.role}">
+                    <strong>${msg.role === 'user' ? 'You' : 'Skippy'}:</strong> ${msg.content}
+                  </p>
+                `,
+              )}
+        </div>
+
+        <div class="input-deck">
+          ${micUnsupported
+            ? html`<p class="status">
+                Voice dictation isn't supported in this browser — try Chrome.
+              </p>`
+            : html`
+                <section class="mic-controls">
+                  <button
+                    class="mic-button ${this.state}"
+                    @click=${this.state === 'idle' ? this.#startListening : this.#stopListening}
+                  >
+                    ${this.state === 'idle' ? '🎙️ Start Listening' : 'Stop Listening'}
+                  </button>
+                  <button
+                    @click=${this.#silence}
+                    ?disabled=${!this.isSpeaking && this.statusMessage !== 'Skippy is thinking...'}
+                  >
+                    ✋ Stop
+                  </button>
+                  <span class="status">${this.#statusText()}</span>
+                </section>
+
+                ${this.state === 'dictating'
+                  ? html`
+                      <section class="dictation">
+                        <p class="transcript">
+                          ${this.noteBuffer} <em>${this.liveTranscript}</em>
+                        </p>
+                        <button @click=${this.#saveNote}>Stop &amp; Save</button>
+                        <button @click=${this.#cancelDictation}>Cancel</button>
+                      </section>
+                    `
+                  : ''}
+
+                ${this.statusMessage
+                  ? html`<p class="status">${this.statusMessage}</p>`
+                  : ''}
+              `}
+
+          <form class="text-input" @submit=${this.#sendTextMessage}>
+            <button
+              type="button"
+              class=${this.manualNoteMode ? 'note-mode-toggle active' : 'note-mode-toggle'}
+              @click=${this.#toggleNoteMode}
+            >
+              ${this.manualNoteMode ? '📝 Note Mode: ON' : '📝 Note Mode'}
+            </button>
+            <textarea
+              name="textInput"
+              rows="3"
+              placeholder=${this.manualNoteMode
+                ? 'Note mode: type and press Enter to save (no chat, no voice)...'
+                : 'Type to Skippy (e.g. for meetings)...'}
+              @keydown=${this.#handleTextareaKeydown}
+            ></textarea>
+            <button type="submit">${this.manualNoteMode ? 'Save Note' : 'Send'}</button>
+          </form>
+
+          <section class="mic-controls">
+            <button @click=${this.#toggleVoiceMuted}>
+              ${this.voiceMuted ? '🔇 Muted (text only)' : '🔊 Mute'}
+            </button>
+            <button @click=${this.#clearHistory} ?disabled=${this.history.length === 0 || this.guestMode}>
+              Clear history
+            </button>
+          </section>
+
+          ${this.operationalMode === 'tactical' && !this.emergencyActive && !this.guestMode
+            ? html`
+                <button
+                  style="background: #b91c1c; color: white; font-weight: bold; padding: 12px; width: 100%;"
+                  @click=${this.#openEmergencyConfirm}
+                >
+                  EMERGENCY PANIC
+                </button>
+              `
+            : ''}
+          ${this.emergencyConfirmOpen
+            ? html`
+                <div style="position: fixed; inset: 0; background: rgba(0,0,0,0.7); display: flex; align-items: center; justify-content: center; z-index: 2000;">
+                  <div style="background: white; color: black; padding: 24px; border-radius: 4px; max-width: 320px; text-align: center;">
+                    <h2>TRIGGER EMERGENCY DISPATCH?</h2>
+                    <p>This sends your live GPS location and a live audio link to your emergency contacts, and starts silent ambient recording.</p>
+                    <button
+                      style="background: #b91c1c; color: white; font-weight: bold; padding: 12px 24px;"
+                      @click=${this.#triggerEmergencyDispatch}
+                    >
+                      YES, CONFIRM
+                    </button>
+                    <button @click=${this.#closeEmergencyConfirm}>Cancel</button>
+                  </div>
+                </div>
+              `
+            : ''}
+          ${this.emergencyActive
+            ? html`<p class="status">🚨 Emergency dispatch active. Say "Skippy, stand down" to end it.</p>`
+            : ''}
+        </div>
+        </section>
+
+        <aside class="col-right">
+        <div class="col-right-feature">
+          <span class="logo-badge">
+            <img src="/bad-marine-logo.png" alt="Bad Marine LLC" />
+            <span class="logo-eye ${liveBrainState}${this.guestMode ? ' guest-drained' : ''}"></span>
+            <span class="logo-llc">LLC</span>
+          </span>
+        </div>
+        <details class="notes-popout">
+            <summary>Neo Skin</summary>
+            <select @change=${this.#handleManualChange} .value=${this.selectedManual}>
+              ${this.manualOptions.map(
+                (name) => html`<option value=${name}>${name}</option>`,
+              )}
+            </select>
+            <button @click=${this.#refreshSections}>Open</button>
+            ${this.manualBrowserOpen
+              ? html`<button @click=${this.#closeManualBrowser}>Close</button>`
+              : ''}
+            <label class="upload-manual">
+              Upload (.txt/.md/.pdf/.docx) →
+              <input type="file" accept=".txt,.md,.pdf,.docx" @change=${this.#uploadManualFile} />
+            </label>
+            <div class="upload-url">
+              Or drop a URL →
+              <input type="url" id="manual-url-input" placeholder="https://..." />
+              <button @click=${this.#uploadManualFromUrl}>Upload</button>
+            </div>
+            <details class="danger-zone">
+              <summary>⚠ Delete manual</summary>
+              <button @click=${this.#deleteManual}>Delete entire manual</button>
+            </details>
+
+            ${this.manualBrowserOpen
+              ? html`
+                  <ul class="note-list">
+                    ${this.sections.map(
+                      (section) => html`
+                        <li>
+                          <strong>${section.title}</strong>
+                          <span class="section-id">(${section.section})</span>
+                          <button @click=${() => this.#deleteSection(section.id)}>Delete</button>
+                          <p>${section.content}</p>
+                        </li>
+                      `,
+                    )}
+                  </ul>
+                `
+              : ''}
+        </details>
+
         <details class="workspace-context">
           <summary>Scratchpad &amp; pinned manuals</summary>
           <form @submit=${this.#saveScratchpad}>
@@ -3143,144 +3379,33 @@ class App {
             </div>
           </fieldset>
         </details>
-
-        <details class="workspace-security">
-          <summary>Workspace security</summary>
-          ${this.guestMode
-            ? html`
-                <p class="status">🔒 Guest Mode active — brain/persona locked, destructive and admin actions hidden.</p>
-                <button @click=${this.#unlockGuestMode}>Unlock (re-authenticate)</button>
-                ${this.guestUnlockError ? html`<p class="status">${this.guestUnlockError}</p>` : ''}
-              `
-            : html`<button @click=${() => this.#enableGuestMode()}>Enable Guest Mode</button>`}
-        </details>
-
-        <details class="tactical-roster">
-          <summary>Tactical Roster</summary>
-          <p class="status">
-            Addressing/tone only — never changes active permissions. Whatever Guest Mode (above)
-            currently restricts stays restricted no matter who's registered here.
-          </p>
-          ${this.activeRosterProfile
-            ? html`
-                <p class="status">
-                  Currently speaking with: <strong>${this.activeRosterProfile.name}</strong>
-                  ${this.activeRosterProfile.role ? ` (${this.activeRosterProfile.role})` : ''}
-                  <button @click=${this.#clearActiveRosterProfile}>Clear</button>
-                </p>
-              `
-            : ''}
-          <form @submit=${this.#addRosterProfile}>
-            <label>
-              Name/Callsign
-              <input name="rosterName" type="text" placeholder="Lisa" required />
-            </label>
-            <label>
-              Voice Trigger Phrase
-              <input name="rosterTrigger" type="text" placeholder="it's lisa" required />
-            </label>
-            <label>
-              Role/Significance
-              <input name="rosterRole" type="text" placeholder="Insurance adjuster" />
-            </label>
-            <button type="submit">+ Add profile</button>
-          </form>
-          <ul>
-            ${this.rosterProfiles.map(
-              (p) => html`
-                <li>
-                  <strong>${p.name}</strong> — "${p.triggerPhrase}"${p.role ? ` (${p.role})` : ''}
-                  <button @click=${() => this.#deleteRosterProfile(p.triggerPhrase)}>Delete</button>
-                </li>
-              `,
-            )}
-          </ul>
-        </details>
-
-        <div class="conversation-transcript">
-          ${this.history.length === 0
-            ? html`<p class="status">No messages yet in this workspace.</p>`
-            : // Newest first — display order only, a reversed copy. The
-              // underlying this.history array stays chronological (oldest
-              // first), since that's the order OpenRouter and append_turn
-              // both expect.
-              [...this.history].reverse().map(
-                (msg) => html`
-                  <p class="transcript-message ${msg.role}">
-                    <strong>${msg.role === 'user' ? 'You' : 'Skippy'}:</strong> ${msg.content}
-                  </p>
-                `,
-              )}
+        </aside>
         </div>
 
-        ${micUnsupported
-          ? html`<p class="status">
-              Voice dictation isn't supported in this browser — try Chrome.
-            </p>`
-          : html`
-              <section class="mic-controls">
-                <button
-                  class="mic-button ${this.state}"
-                  @click=${this.state === 'idle' ? this.#startListening : this.#stopListening}
-                >
-                  ${this.state === 'idle' ? 'Start Listening' : 'Stop Listening'}
-                </button>
-                <span class="status">${this.#statusText()}</span>
-              </section>
-
-              ${this.state === 'dictating'
-                ? html`
-                    <section class="dictation">
-                      <p class="transcript">
-                        ${this.noteBuffer} <em>${this.liveTranscript}</em>
-                      </p>
-                      <button @click=${this.#saveNote}>Stop &amp; Save</button>
-                      <button @click=${this.#cancelDictation}>Cancel</button>
-                    </section>
-                  `
-                : ''}
-
-              ${this.statusMessage
-                ? html`<p class="status">${this.statusMessage}</p>`
-                : ''}
-            `}
-
-        <section class="manual-browser">
-          <select @change=${this.#handleManualChange} .value=${this.selectedManual}>
-            ${this.manualOptions.map(
-              (name) => html`<option value=${name}>${name}</option>`,
-            )}
-          </select>
-          <button @click=${this.#refreshSections}>Open</button>
-          ${this.manualBrowserOpen
-            ? html`<button @click=${this.#closeManualBrowser}>Close</button>`
-            : ''}
-          <button @click=${this.#deleteManual}>Delete entire manual</button>
-          <label class="upload-manual">
-            Upload (.txt/.md/.pdf/.docx) →
-            <input type="file" accept=".txt,.md,.pdf,.docx" @change=${this.#uploadManualFile} />
-          </label>
-
-          ${this.manualBrowserOpen
-            ? html`
-                <ul class="note-list">
-                  ${this.sections.map(
-                    (section) => html`
-                      <li>
-                        <strong>${section.title}</strong>
-                        <span class="section-id">(${section.section})</span>
-                        <button @click=${() => this.#deleteSection(section.id)}>Delete</button>
-                        <p>${section.content}</p>
-                      </li>
-                    `,
-                  )}
-                </ul>
-              `
-            : ''}
-        </section>
-      </main>
+        <footer class="statusbar">
+          <span>👤 ${this.profileName || 'Sean'} <button @click=${this.#logout}>Log Out</button></span>
+          <span>
+            Status: ${this.statusMessage || 'Idle'} | Mode: ${this.operationalMode}${this.lastBrain
+              ? ` | Brain: ${this.lastBrain}`
+              : ''}
+          </span>
+          <span>Skippy v5.8</span>
+        </footer>
+      </div>
     `;
     render(body, document.getElementById('root'));
+    this.#scrollTranscriptToBottom();
+  }
+
+  // Chat feed is chronological (oldest top, newest bottom), so keep the
+  // viewport pinned to the latest message after every render — same as any
+  // standard messaging app. requestAnimationFrame lets lit-html finish
+  // patching the DOM first so scrollHeight reflects the new content.
+  #scrollTranscriptToBottom() {
+    requestAnimationFrame(() => {
+      const el = document.getElementById('transcript-scroll');
+      if (el) el.scrollTop = el.scrollHeight;
+    });
   }
 }
 

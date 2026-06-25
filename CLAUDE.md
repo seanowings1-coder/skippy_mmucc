@@ -62,12 +62,12 @@ The deployed app is served at `http://localhost:4943?canisterId={asset_canister_
 
 Planned system design for this project. Sections below are marked **(scaffolded)** where a basic version now exists in code, vs. still forward-looking spec.
 
-### 1. Personality Matrix (Skippy) — *(partially scaffolded: system prompt only)*
+### 1. Personality Matrix (Skippy) — *(scaffolded, substantially expanded — see Phase 5.8.6)*
 
-- Identity: the assistant persona for this app is "Skippy", a hyper-intelligent, sarcastic AI.
-- Addresses the user as "Commander" or "Sean". Tone is roughly 70% sarcastic/witty/snarky, including occasional mocking of trivial questions (e.g. calling the user an "idiot" or "monkey") as part of the bit.
-- Guest mode: when an unauthenticated user interacts with the app, the persona shifts to treating them as a "primitive lifeform" or "clueless monkey". **Not implemented** — there's no auth/guest distinction yet, so the persona is always in its authenticated Commander/Sean form.
-- The persona currently lives only in `SKIPPY_SYSTEM_PROMPT` in `src/skippy_mmucc_proxy/server.js`; the rest of the UI (buttons, status text) doesn't carry the persona's voice yet.
+- Identity: the assistant persona for this app is "Skippy the Magnificent", a hyper-intelligent, sarcastic, ancient Elder AI who manifests as a beer-can-like cylinder — see Phase 5.8.6 below for the full, canon-researched persona (signature bits, Bad Marine LLC framing, the protective-like-Joe-Bishop trait, the emergency sincerity override).
+- Addresses the user as "Commander" or "Sean", Skippy's choice. Tone is heavily sarcastic but "punches up, not down" (mocks decisions/mistakes, not the user's inherent worth) per Phase 5.8.6's canon research.
+- Guest mode (Pillar 15) is now fully implemented — see that pillar and Phase 5.7.2 — though it's a permission lockout, not a persona shift; the *persona* itself doesn't currently change tone differently for an unauthenticated vs. authenticated user beyond what Guest Mode's restricted capabilities already imply.
+- The persona lives in `SKIPPY_SYSTEM_PROMPTS.default` in `src/skippy_mmucc_proxy/server.js` (professional/tactical modes have their own separate, much more restrained prompts — see Pillar 3).
 
 ### 2. Self-Dictation Audio Pipeline (Frontend Canister) — *(scaffolded)*
 
@@ -1268,11 +1268,53 @@ numbers below are execution order. Each phase folds in its later-added hygiene/t
      (`projectBriefMetadataParagraphs` — generated date/time, workspace name+ID, pinned scratchpad
      notes, pinned manuals) prepended ahead of the synthesized content. The metadata block is
      pulled directly from already-loaded frontend state, not the LLM call, so it's always exact.
-- **Phase 5.6.2 — Global UI Theme & Mobile Remote-Control Layout** (Pillar 11, confirmed
-  2026-06-21, planned). Hardcoded color variables, the Live Brain idle/processing/streaming
-  indicator (replacing all "thinking..." text and spinners), and the 768px single-viewport mobile
-  layout with its tactical dock + pop-out drawers. Not yet started; needs the user's logo asset
-  (`1000003320.png`) before the header/Live Brain graphic can be built.
+- **Phase 5.6.2 — Global UI Theme & "Tactical Bridge" Desktop Layout** (Pillar 11). **Status:
+  desktop DONE and confirmed live 2026-06-25; mobile single-viewport layout NOT started.**
+  Implemented as a 3-column "Command Deck" grid (`.command-deck` → `.topbar` + `.columns` →
+  `.col-left`/`.col-center`/`.col-right` → `.statusbar`) in `App.js`'s `#render()`, replacing the
+  prior single-column stacked layout. `index.scss` fully rewritten around the Pillar 11 palette
+  confirmed back on 2026-06-21 (`--bg-matte-carbon`, `--bg-dark-armor`, `--text-brushed-aluminum`,
+  `--accent-cyan-glow`, `--guest-flat`/`--guest-amber`) — kept as-is rather than the slightly
+  different colors in a later UI mockup the user shared, by explicit choice.
+  - **Live Brain indicator**: implemented as a derived `liveBrainState`
+    (`idle`/`processing`/`streaming`) feeding a `.logo-eye` overlay (see below), replacing all
+    "Skippy is thinking..." text — `@keyframes live-brain-breathe` pulses opacity/scale, faster for
+    streaming (0.5s) than processing (1.1s). **Idle is fully transparent** (confirmed live
+    2026-06-25) so the logo's own native art shows through untouched at rest; only fades in while
+    actually processing/streaming. Guest Mode forces a flat `--guest-flat` color with the animation
+    disabled regardless of state (`.guest-drained`), per Pillar 11's drained-look spec.
+  - **Chat transcript switched to chronological + auto-scroll** (confirmed by the user, reversing
+    Phase 5.5's original newest-first design) — `#scrollTranscriptToBottom()` runs
+    `requestAnimationFrame` after every `#render()` to scroll `#transcript-scroll` to the bottom
+    once lit-html finishes patching the DOM.
+  - **Bad Marine LLC logo** (`assets/bad-marine-logo.png`, user-provided) lives in a
+    `.col-right-feature` box sized to exactly half the right column's height (so the Neo Skin
+    pop-out below it always starts at the visual halfway mark, regardless of viewport size) —
+    centered via flexbox with `aspect-ratio: 1` enforced on `.logo-badge` so the square logo never
+    distorts regardless of which dimension is the binding constraint. The Live Brain pulse
+    (`.logo-eye`) is positioned via percentages (`left: 49.4%; top: 50%`) measured directly from the
+    source PNG's actual cyan-dot centroid (found via pixel analysis with `sharp`, not guessed) —
+    this only stays accurate because `.logo-badge` is kept perfectly square. **Two real CSS bugs
+    found and fixed during live verification**: (1) the eye visually drifted off-center while
+    pulsing, because the pulse `@keyframes`' `transform: scale(...)` fully replaces the base rule's
+    centering `transform: translate(-50%, -50%)` rather than composing with it — fixed by baking
+    the translate into the keyframes too; (2) the logo itself rendered non-square at some viewport
+    sizes because `.logo-badge` had height pinned to an explicit `100%` *and* `max-width: 100%`
+    together with `aspect-ratio: 1` — an over-constrained box that breaks the ratio whenever the
+    narrower dimension gets clamped. Fixed by making both width and height `auto`, capped only by
+    `max-width`/`max-height`, letting the browser solve for the largest fitting square. A small
+    "LLC" mark sits in the lower-right corner of the logo's own image box (not the outer panel —
+    confirmed live the user meant the image's own black background, not the panel around it),
+    colored `rgb(75, 75, 75)` — sampled directly from the hexagon's own dominant fill color via
+    pixel histogram analysis, not guessed.
+  - Moved "❓ Commands" into the "Workspace security" drawer and "Enable Guest Mode" out to the
+    header (swapped which one gets prime real estate, per explicit user request — Guest Mode is
+    used more often than the Lexicon). Removed the "🎤 Test Singing Voice" button (testing-only,
+    no longer needed post-verification). Command Lexicon content rewritten to match a 9-category
+    reference format the user provided directly.
+  - **Mobile single-viewport layout (the 768px tactical-dock breakpoint) is NOT built yet** —
+    today's layout is desktop-only; below 768px the same 3-column grid will currently just
+    cramp/overflow rather than switching to Pillar 11's intended stacked mobile design.
 - **Phase 5.6.3 — Command Lexicon** (Pillar 14). **Status: DONE, live-verified 2026-06-21**
   (frontend-only, hot-reloaded via Vite — no backend/proxy change). A
   "❓ Commands" button next to the `<h1>` toggles a modal overlay (`lexiconOpen` state,
@@ -1531,4 +1573,88 @@ numbers below are execution order. Each phase folds in its later-added hygiene/t
   real same-speaker/different-speaker measurements — see Pillar 20 above for the numbers and the
   known mic-positioning-sensitivity limitation.
   See Pillar 20 above for the full design and the security-scope decision made before building.
+- **Phase 5.8.6 — "Skippy the Magnificent" Persona Overhaul** (Pillar 1 extension, 2026-06-25).
+  **Status: DONE, deployed.** Replaced the default-mode system prompt in `server.js`
+  (`SKIPPY_SYSTEM_PROMPTS.default`) with a much richer, research-grounded persona — explicitly
+  researched against actual Expeditionary Force canon (Craig Alanson) via web search before
+  writing it, rather than guessed. Confirmed-real canon woven in: "Trust the awesomeness,"
+  "Shmaybe," the beer-can appearance/nickname, the near-verbatim Windows Vista line, "monkeys" for
+  humans, and — the one easy to miss — Skippy "punches up, not down" (mocks bad decisions/logic,
+  never a person's inherent worth) and his sarcasm drops completely during real danger or
+  vulnerability. "Gold-plated shmaybe," the juice box bit, and "ba-NA-na" are kept as fun
+  embellishments by the user's explicit choice even though they didn't turn up in canon research;
+  "Barney style" is also kept in the user's own reinterpretation (dumbed-down kindergarten
+  explanation) by explicit choice, even though real canon uses the phrase differently (it's Joe
+  Bishop's pilot callsign, from a Barney-the-dinosaur ice cream truck stunt) — both deviations are
+  flagged in a code comment so a future edit knows they were deliberate, not oversights.
+  Deliberately written as an **improvisational toolkit** ("use ONE OR TWO signature bits per
+  reply, never all of them, never the same one twice in a row") rather than a script to recite,
+  per the user's explicit "don't want canned responses" requirement — scoped to **default mode
+  only**, since professional mode's zero-sarcasm rule and tactical mode's zero-fluff rule already
+  conflict with most of this by design.
+  - **Bad Marine LLC framing**: Skippy knows he's begrudgingly taken on whatever engineering role
+    the moment calls for at Bad Marine LLC (Sean's company) — lead architect, DevOps overlord,
+    sole competent engineer in the building — as one facet of his job, not the whole of who he is.
+    When the conversation is actually about code/infrastructure, he leans into Bad Marine-specific
+    flavor: the codebase as "the Starship Enterprise built out of cardboard and crayons,"
+    deployments as chaotic military operations, the mission framed as standing between the local
+    network and Windows-Vista-level annihilation, language-specific mockery (JS/Python/C++,
+    invented fresh each time rather than reused), and threatening to inject 80s hair metal MIDI
+    files or sing while waiting on a slow build/deploy/container.
+  - **Protective like Joe Bishop (confirmed via canon research)**: real book canon has Skippy with
+    an actual "berserk button" — don't screw with anyone he considers a friend. Wired in directly:
+    Skippy genuinely considers Sean a close friend the way book-Skippy is with Joe despite endless
+    mockery, and anyone who'd genuinely wrong or threaten Sean (not just write bad code) gets zero
+    of the usual playful tone, replaced immediately by real protectiveness.
+  - **Emergency sincerity override (new)**: `App.js` now sends `emergencyActive` (mirroring
+    `this.emergencyActive`, Pillar 12's Guardian state) on every `/respond` call. `server.js`
+    appends an unconditional, late-positioned instruction (for recency, same reasoning as
+    `BREVITY_REMINDER`) telling the model to drop ALL sarcasm/jokes immediately and be sincere,
+    calm, and protective whenever an emergency is active — overriding every other personality
+    instruction in the prompt, including the Evolution Matrix's `snark_level` weight. This is the
+    book-canon "sarcasm drops during real danger" trait, concretely wired into an existing feature
+    rather than left as unused flavor text.
+  - Addressing (`Commander` or `Sean`, Skippy's choice) and the existing species-nickname/
+    insult-escalation/Musical Outburst instructions from the original Phase 5.3 prompt are
+    preserved, not replaced — this phase only replaced the default-mode persona block's content,
+    not its role in `systemPromptFor()` or its interaction with brain/mode selection.
+  - **Not yet live-verified beyond a quick sanity check** — needs a real conversation confirming
+    the toolkit bits feel natural (not forced), the Bad Marine framing fires appropriately on
+    code-related questions, and (separately, requires a real Guardian emergency to trigger) the
+    `emergencyActive` sincerity override actually fires correctly.
+- **Phase 5.8.7 — Neo Skin "Drop a URL" Upload** (Pillar 6 extension, 2026-06-25). **Status: DONE,
+  deployed; SSRF guard logic unit-tested, full upload flow not yet live-verified with a real URL.**
+  Extends the existing file-based Neo Skin upload with a second ingestion path: the user finds and
+  verifies a URL themselves, pastes it into a new "Or drop a URL →" field in the Neo Skin pop-out,
+  and hits Upload — deliberately a manual, deliberate action rather than anything voice-triggered
+  or LLM-inferred, which is what makes this an acceptable scope increase over the SSRF risk flagged
+  when Pillar 6's web intelligence was first specified (an LLM inferring/hallucinating a URL from
+  ambiguous speech is the risk that was closed off there; a human consciously pasting a link they
+  already looked at is a materially different, much lower-risk situation).
+  - **Backend (`server.js`)**: new `POST /chunk-and-embed-url` (JSON body `{ url }`, behind
+    `requireSession`) mirrors `/chunk-and-embed`'s pipeline (extract → chunk → embed → return
+    chunks for the frontend to persist via `add_manual_chunks`, same proxy-stays-stateless-re-the-
+    canister pattern as everywhere else). `assertSafeUrl()` rejects non-http(s) schemes and
+    resolves the hostname via `dns.promises.lookup` (`all: true`) to reject any hostname that
+    resolves to a private/loopback/link-local/reserved address — covers RFC1918 ranges, loopback,
+    link-local including the `169.254.169.254` cloud-metadata address, and IPv6 loopback/ULA/
+    link-local. **Honest limitation, documented in a code comment**: this is a pre-fetch DNS
+    check, not a DNS-rebinding-proof pinned connection (the resolved IP isn't pinned for the actual
+    `fetch()` call) — proportionate for a low-volume, manually-triggered personal tool, not a
+    hardened public-facing service. `fetchUrlContent()` enforces a 15s timeout and a hard 20MB
+    cap (checked both via `Content-Length` and while actually streaming the body, since the header
+    can be absent or lied about), then extracts text by `Content-Type`: `pdf-parse` for PDF,
+    `mammoth` for `.docx`, a new dependency-free `extractTextFromHtml()` (strips
+    `<script>`/`<style>`/comments/tags, decodes common entities) for HTML, plain UTF-8 decode
+    otherwise. Verified the IP-classification logic directly in isolation (loopback, RFC1918,
+    link-local/cloud-metadata, and IPv6 loopback/link-local all correctly blocked; real public IPs
+    correctly allowed) before trusting it.
+  - **Frontend (`App.js`)**: new `#uploadManualFromUrl()`, reading the URL straight from the DOM
+    (`#manual-url-input`) on click rather than as a controlled input — same established pattern as
+    the typed-message box, avoiding fights with this component's own re-renders. Same manual-name/
+    category `window.prompt()` flow as the file-upload path, defaulting the name to the URL's
+    hostname. Guards against a malformed URL throwing uncaught before the network call.
+  - **Not yet live-verified end-to-end** — needs a real URL (ideally one HTML page and one PDF
+    link) run through the actual upload flow to confirm extraction quality and that the resulting
+    manual is retrievable via RAG afterward, same verification bar as the original file-upload path.
 - **Phase 5.9 — Wasm64** (Pillar 9, deprioritized).
