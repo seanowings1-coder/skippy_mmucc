@@ -577,6 +577,18 @@ app.post('/respond', requireSession, async (req, res) => {
   const webContext =
     req.body?.webContext && typeof req.body.webContext === 'object' ? req.body.webContext : null;
   const ragMiss = req.body?.ragMiss === true;
+  const karaokeDeclined = req.body?.karaokeDeclined === true;
+
+  if (karaokeDeclined) {
+    // The Commander just turned down a pending karaoke offer (App.js).
+    // Confirmed 2026-06-24: silently dropping the topic and just answering
+    // the real question undersold how much Skippy wants to perform — he
+    // should visibly mope about it first, briefly, then still answer.
+    systemPrompt +=
+      `\n\nThe Commander just declined your karaoke offer — no song this time. React with brief, ` +
+      `genuine, in-character disappointment/sulkiness about not getting to perform (one short ` +
+      `aside, not a whole tangent), then answer whatever they actually asked normally.`;
+  }
 
   if (ragContext.length > 0) {
     const block = ragContext
@@ -969,7 +981,10 @@ const KARAOKE_SYSTEM_PROMPT =
   'similar), and never base your song on a specific real song\'s recognizable hook, melody, or ' +
   'lyrical structure, even as a "parody" — write something genuinely new that merely lives in the ' +
   'genre, not a reskin of an identifiable real song. This is a style homage only, never reproduce ' +
-  'or closely paraphrase real existing lyrics from any actual band. Start with one short spoken ' +
+  'or closely paraphrase real existing lyrics from any actual band. Never write asterisk-wrapped ' +
+  'physical/visual stage directions (e.g. "*clears throat*", "*bows with a flourish*") — you are ' +
+  'a voice/text AI with no physical body, so describing a body doing things makes no sense; speak ' +
+  'in pure dialogue/lyrics only. Start with one short spoken ' +
   'hype-up line in character, OUTSIDE any markers. Then write the song itself: 6-10 lines ' +
   'with a real end-rhyme scheme and a consistent singable meter, like an actual song lyric — never ' +
   'a list of disconnected hype sentences. Repeat a one-line hook/chorus at least once for a real ' +

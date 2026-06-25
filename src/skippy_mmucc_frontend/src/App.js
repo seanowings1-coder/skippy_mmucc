@@ -223,6 +223,7 @@ const AFFIRMATION_PHRASES = [
   "lets do it",
   "let's go",
   'go for it',
+  'go',
 ];
 
 // Pillar 3's persona/Brain Switching trigger phrases — plain substring
@@ -280,7 +281,7 @@ const COURSE_CORRECTION_REPLIES = [
 // nothing for the model to add to "want to jam out?"), the confirmed
 // performance is a dedicated proxy call (/karaoke, original lyrics only —
 // see server.js for why never real song lyrics).
-const KARAOKE_TRIGGER_PHRASES = ['karaoke', 'sing a song', 'jam out'];
+const KARAOKE_TRIGGER_PHRASES = ['karaoke', 'sing a song', 'jam out', 'rock out'];
 // A pool, not one fixed line — confirmed live 2026-06-24: hearing the exact
 // same offer verbatim every single time read as flat/robotic rather than
 // the "excited kid getting a puppy" energy this is supposed to have. Still
@@ -288,7 +289,7 @@ const KARAOKE_TRIGGER_PHRASES = ['karaoke', 'sing a song', 'jam out'];
 // COURSE_CORRECTION_REPLIES below) — just no longer a single fixed string.
 const KARAOKE_OFFER_REPLIES = [
   'KARAOKE?! Oh, Commander, be still my synthetic heart — say the word and I will absolutely ' +
-    'demolish an 80s power ballad or a Nightwish-style anthem for you. Well? Are we doing this?',
+    'demolish an 80s power ballad or a dramatic symphonic-metal anthem for you. Well? Are we doing this?',
   "Did someone say KARAOKE? Oh, it is ON. Give me one word and I will turn this conversation " +
     'into a full symphonic power-metal spectacle. So — are we doing this or not?',
   "Be still my circuits — KARAOKE?! I have been WAITING for this. Say go and I will absolutely " +
@@ -433,7 +434,7 @@ const COMMAND_LEXICON_ENTRIES = [
     category: 'Karaoke',
     phrases: KARAOKE_TRIGGER_PHRASES,
     description:
-      'Default mode only. Skippy gets excited and asks if you want to jam out — say "yes"/"sure"/"go ahead" on your next turn and he performs an original 80s-hair-band or Nightwish-style song (never real song lyrics) in the singing voice.',
+      'Default mode only. Skippy gets excited and asks if you want to jam out — say "yes"/"sure"/"go ahead" (or just repeat the trigger phrase) and he performs an original 80s-hair-band or symphonic-metal song (never real song lyrics) in the singing voice.',
   },
   {
     category: 'Voice Recognition',
@@ -1791,6 +1792,13 @@ class App {
       return;
     }
 
+    // Set when the user explicitly declines a pending karaoke offer (see
+    // below) — folded into the /respond system prompt as a one-shot framing
+    // instruction so Skippy reacts with disappointment about not getting to
+    // sing, then still answers whatever the user actually asked, instead of
+    // silently dropping the topic.
+    let karaokeDeclined = false;
+
     // Book-canon "Karaoke" moment (Skippy's hobby in the Expeditionary Force
     // novels) — default mode only, same persona-fit reasoning as the
     // Musical Outburst protocol (professional forbids jokes, tactical
@@ -1817,10 +1825,27 @@ class App {
       AFFIRMATION_PHRASES.forEach((phrase) => {
         remainder = remainder.split(phrase).join('');
       });
+      // Confirmed live 2026-06-24 (real console-log data, see CLAUDE.md
+      // Pillar 18): repeating the trigger phrase itself ("karaoke" again)
+      // instead of a clean "yes" was by far the most common real confirm
+      // attempt, and previously just reset the offer with no performance —
+      // a frustrating loop since the user's *actual* intent was clearly to
+      // perform. Treating a repeated trigger-phrase mention as an implicit
+      // "yes, do it" is the natural reading, not a second fresh offer.
+      // An explicit decline ("no, not karaoke, check the weather") must still
+      // win even though it mentions the trigger word — don't let the
+      // repeated-trigger shortcut above override a real "no."
+      const isDecline = ['no', 'not', "don't", 'cancel', 'stop', 'nevermind', 'never mind'].some(
+        (word) => lowerText.includes(word),
+      );
+      const repeatedTrigger = !isDecline && KARAOKE_TRIGGER_PHRASES.some((phrase) => lowerText.includes(phrase));
       this.pendingKaraokeOffer = false; // any response resolves the offer, yes or no
-      if (hasAffirmation && isTrivialRemainder(remainder)) {
+      if ((hasAffirmation && isTrivialRemainder(remainder)) || repeatedTrigger) {
         await this.#performKaraoke(text);
         return;
+      }
+      if (isDecline) {
+        karaokeDeclined = true;
       }
       // Not an affirmation — offer's cleared, fall through and handle this
       // as a normal message instead.
@@ -2051,6 +2076,7 @@ class App {
           ragContext,
           webContext,
           ragMiss: ragMiss && !webContext,
+          karaokeDeclined,
           // Pillar 10 extension (Phase 5.6.1) — pinned per-workspace context,
           // prepended server-side so it doesn't slide out of the rolling
           // history window during a long session.

@@ -624,32 +624,50 @@ different axis, same "dual-voice" name coincidentally).
      performance/search. Expanded `AFFIRMATION_PHRASES` with common multi-word phrasings ("let's do
      that", "let's do it", "let's go", "go for it") — fixes both flows at once since they share the
      same constant.
-  **Status: all 7 above fixed and unit/A-B-tested as of 2026-06-24. A live end-to-end retest the
-  same day surfaced the real-band-naming and marker-merge fixes holding up, but found 3 NEW,
-  not-yet-diagnosed problems — karaoke is still NOT working reliably end-to-end:**
-  8. **A song with an odd/dangling marker count**: the reply contained a long unmarked "spoken"
-     paragraph followed by a single trailing `🎶` with no matching opener — `mergeKaraokeMarkers()`
-     only merges *complete* pairs found via its `/🎶([\s\S]*?)🎶/gu` regex; an unpaired trailing
-     marker is left untouched in the "trailing text" remainder, so that content plays back
-     unsung. Not yet fixed — needs real investigation into why the model emitted an unpaired
-     marker before deciding whether the fix belongs in the prompt or in `mergeKaraokeMarkers()`.
-  9. **A "yes let's do that" confirmation returned the canned offer-line string again instead of
-     performing or replying normally.** Not yet root-caused. Working hypothesis, NOT verified:
-     `pendingKaraokeOffer` may already have been cleared/stale from an earlier turn, so the
-     confirm-check in `#askSkippy` fell through to a different branch that happened to echo
-     offer-line text from conversation history — needs log/code instrumentation to confirm before
-     touching any code, not another guess-and-patch.
-  10. **Two further attempts — "Skippy it's time to jam out" (literally contains the
-      `KARAOKE_TRIGGER_PHRASES` entry "jam out") and a follow-up "or you want to rock out the
-      volume" — produced only normal chat replies, no performance at all.** Also not yet
-      root-caused. Working hypothesis, NOT verified: `pendingKaraokeOffer` may have still been
-      `true` from bug #9's unresolved exchange, which (per the trigger-check's `!
-      this.pendingKaraokeOffer && ...` guard) would skip the trigger-phrase branch entirely even
-      though "jam out" was said again.
-  **None of 8-10 have been confirmed with actual log/code instrumentation — both "working
-  hypotheses" above are unverified guesses, written down so the next session starts from a
-  specific lead instead of re-discovering the symptom from scratch. Deferred to the next session
-  per the user's explicit call ("we will work on skippy's singing again tomorrow").**
+  **Status: all 7 above fixed and confirmed live 2026-06-24/25. A same-day retest initially looked
+  like it found 3 more problems (items 8-10 below, as originally logged that night) — real
+  instrumentation (branch-tagged `console.log`s added temporarily to the trigger/confirm logic,
+  since removed) resolved all of it. Two were real, narrow bugs (now fixed); the third "bug" was a
+  red herring — the user's own transcript reading, not the code.**
+  8. **Two more hardcoded real-band-name leaks, same class as bug #3/#4 but in our own code, not
+     LLM output**: `KARAOKE_OFFER_REPLIES[0]` (`App.js`) and the Command Lexicon's Karaoke entry
+     both literally said "Nightwish-style anthem" — spoken/shown verbatim every time, no model
+     involved at all. Fixed by replacing both with a generic "symphonic-metal" description.
+     **Lesson**: after fixing a leak in one place (the LLM prompt), grep for the same literal
+     string elsewhere in the codebase — the same mistake can exist in multiple independent
+     locations (a prompt and a hardcoded UI string) without one fix touching the other.
+  9. **`'rock out'` was never a recognized trigger phrase** — `KARAOKE_TRIGGER_PHRASES` only had
+     `['karaoke', 'sing a song', 'jam out']`. Confirmed via real console logs showing empty
+     RAG/trigger matches for a bare "rock out." Added `'rock out'` to the list.
+  10. **Repeating the trigger phrase instead of a clean "yes" just reset the offer with no
+      performance** — confirmed via console logs that the offer/confirm state machine itself was
+      always internally consistent (no stuck `pendingKaraokeOffer`), but saying "karaoke" again
+      while an offer was already pending didn't count as confirming, just silently cleared it —
+      a frustrating "ask again forever" loop since that's clearly how a real person would try to
+      confirm. Fixed: a repeated trigger-phrase mention while `pendingKaraokeOffer` is true now
+      performs directly, same as an explicit "yes" — with a small negation guard (`'no'`, `'not'`,
+      `"don't"`, `'cancel'`, `'stop'`, `'nevermind'`) so an explicit decline that still mentions
+      "karaoke" (e.g. "no, not karaoke, check the weather") correctly still declines.
+  **New, requested feature added in the same pass**: declining a pending offer now makes Skippy
+  briefly sulk about not getting to perform, then still answer the real question — a `karaokeDeclined`
+  one-shot flag threaded from `App.js` to a new framing instruction in `server.js`'s `/respond`
+  (same pattern as `ragMiss`/`publicDemo`), rather than silently dropping the topic.
+  **The "3rd new bug" (originally logged as items 9-10 the night this was first found) turned out
+  to be no bug at all**: the on-screen transcript renders `[...this.history].reverse()` (`App.js`,
+  newest message first — confirmed by Phase 5.5's own design). Reading a fast-moving live voice
+  test top-to-bottom on screen reads conversation turns in *reverse* chronological order, which
+  repeatedly looked like "the reply to message A is actually message B's canned offer line" —
+  confirmed false by cross-referencing the real chronological order in the console log
+  (`pendingKaraokeOffer` true/false transitions matched the code exactly, every time, once read in
+  the log's real order rather than the screen's visual order). **General lesson for live-testing
+  this app**: when a live multi-turn voice test produces a confusing pairing of "You:"/"Skippy:"
+  bubbles, check the console log's real call order before assuming a logic bug — the visible
+  transcript's newest-first rendering is easy to misread as chronological, especially when
+  describing a fast exchange from memory rather than literally copy-pasting raw markup.
+  **Status: karaoke is now confirmed working end-to-end** — offer → repeated-trigger-or-yes
+  confirm → single-block original song with no real-band naming, plus the new decline-sulk
+  behavior, all verified against real console-log data on 2026-06-24/25. Temporary diagnostic
+  logging (`[Skippy Karaoke v2]` tags) has been removed now that the fix is confirmed.
 
 ## Pillar 19 — Self-Evolution & Metacognitive Matrix (confirmed 2026-06-22, implemented, scoped
 down from the original ask)
