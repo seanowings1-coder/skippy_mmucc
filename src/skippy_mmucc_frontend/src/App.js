@@ -116,7 +116,7 @@ function extractCourierContent(lowerText, originalText) {
 // the emergency entirely, so "stand down" was chosen to fit this app's
 // existing Commander/tactical theme — flagged for the user to confirm or
 // rename if they want something else.
-const OPEN_COMMS_PHRASES = ['open comms', 'comms open'];
+const OPEN_COMMS_PHRASES = ['open comms', 'comms open', 'open calms'];
 const GO_DARK_PHRASES = ['go dark'];
 const STAND_DOWN_PHRASES = ['stand down', 'end emergency', 'end emergency dispatch'];
 
@@ -131,7 +131,14 @@ const GUEST_MODE_TRIGGER_PHRASES = ['guest mode', 'enable guest mode'];
 // Sets publicDemo:true on the single /respond call containing the phrase;
 // the proxy returns its canned monologue directly (no LLM call), and the
 // next turn reverts to normal persona/mode with no lingering state here.
-const CIVILIAN_BRIEFING_PHRASES = ['execute public briefing', 'explain what you are to the group'];
+const CIVILIAN_BRIEFING_PHRASES = [
+  'execute public briefing',
+  'explain what you are to the group',
+  'tell us what you are',
+  'tell the group what you are',
+  'give me your elevator pitch',
+  'elevator pitch',
+];
 
 // Pillar 6 RAG retrieval tuning — see CLAUDE.md's Phase 5.6 entry for why
 // these specific defaults (512-dim embeddings, brute-force cosine search at
@@ -224,6 +231,7 @@ const AFFIRMATION_PHRASES = [
   "let's go",
   'go for it',
   'go',
+  'rock out',
 ];
 
 // Pillar 3's persona/Brain Switching trigger phrases — plain substring
@@ -665,6 +673,7 @@ class App {
   // a reload the way guestMode's lock is.
   rosterProfiles = JSON.parse(localStorage.getItem('skippy_roster_profiles') || '[]');
   activeRosterProfile = null;
+  editingRosterIndex = null;
   // On-device speaker recognition (open-source, no API key — see voiceId.js)
   // — persona/tone signal only (see voiceId.js's header comment for why).
   // `hasEnrolledVoice` is
@@ -704,6 +713,7 @@ class App {
   // mic also picks up Skippy's own voice from the speakers, so a fast,
   // simple wake word is more reliable than fully solving acoustic echo.
   isSpeaking = false;
+  #economySpeakTimer = null;
 
   authClient = null;
   identity = null;
@@ -1081,25 +1091,51 @@ class App {
     });
   };
 
-  #addRosterProfile = (e) => {
+  #saveRosterProfile = (e) => {
     e.preventDefault();
     const form = e.target;
     const name = form.elements.rosterName.value.trim();
     const triggerPhrase = form.elements.rosterTrigger.value.trim().toLowerCase();
     const role = form.elements.rosterRole.value.trim();
+    const notes = form.elements.rosterNotes.value.trim();
     if (!name || !triggerPhrase) return;
-    this.rosterProfiles = [...this.rosterProfiles, { name, triggerPhrase, role }];
+    const profile = { name, triggerPhrase, role, notes };
+    if (this.editingRosterIndex !== null) {
+      const updated = [...this.rosterProfiles];
+      const old = updated[this.editingRosterIndex];
+      updated[this.editingRosterIndex] = profile;
+      if (this.activeRosterProfile?.triggerPhrase === old.triggerPhrase) {
+        this.activeRosterProfile = profile;
+      }
+      this.rosterProfiles = updated;
+      this.editingRosterIndex = null;
+    } else {
+      this.rosterProfiles = [...this.rosterProfiles, profile];
+    }
     localStorage.setItem('skippy_roster_profiles', JSON.stringify(this.rosterProfiles));
     form.reset();
     this.#render();
   };
 
+  #editRosterProfile = (index) => {
+    this.editingRosterIndex = index;
+    this.#render();
+  };
+
+  #cancelEditRoster = () => {
+    this.editingRosterIndex = null;
+    this.#render();
+  };
+
   #deleteRosterProfile = (triggerPhrase) => {
     this.rosterProfiles = this.rosterProfiles.filter((p) => p.triggerPhrase !== triggerPhrase);
-    localStorage.setItem('skippy_roster_profiles', JSON.stringify(this.rosterProfiles));
     if (this.activeRosterProfile?.triggerPhrase === triggerPhrase) {
       this.activeRosterProfile = null;
     }
+    if (this.editingRosterIndex !== null) {
+      this.editingRosterIndex = null;
+    }
+    localStorage.setItem('skippy_roster_profiles', JSON.stringify(this.rosterProfiles));
     this.#render();
   };
 
@@ -1532,6 +1568,11 @@ class App {
   }
 
   #handleFinalChunk = (chunk) => {
+    // Discard anything the mic picked up while Skippy is speaking — prevents
+    // his own audio output from looping back through speech recognition and
+    // triggering a new reply. Barge-in is unaffected (it fires on interim
+    // results in onresult, not here).
+    if (this.isSpeaking) return;
     if (this.state === 'listening') {
       const lowerChunk = chunk.toLowerCase();
       const matchedPhrase = TRIGGER_PHRASES.find((phrase) =>
@@ -2085,7 +2126,14 @@ class App {
           // client-side by what UI is hidden, and independent of this field)
           // stay exactly as they were regardless of who's being addressed.
           rosterContext: this.activeRosterProfile
-            ? { name: this.activeRosterProfile.name, role: this.activeRosterProfile.role }
+            ? (() => {
+                // Always pull the current profile from rosterProfiles so edits
+                // made after activation are reflected without re-triggering the phrase.
+                const fresh = this.rosterProfiles.find(
+                  (p) => p.triggerPhrase === this.activeRosterProfile.triggerPhrase,
+                ) ?? this.activeRosterProfile;
+                return { name: fresh.name, role: fresh.role, notes: fresh.notes };
+              })()
             : null,
           // Pillar 19 — calibrated personality weights, evolved over time by
           // the Critic Loop and Course Correction feedback loop. Always a
@@ -2208,6 +2256,11 @@ class App {
   // Pillar 19 — fetched only on demand (not on every login) since it's just
   // a human-readable log, not something any reply logic depends on.
   #refreshEvolutionLog = async () => {
+    if (this.evolutionLog.length > 0) {
+      this.evolutionLog = [];
+      this.#render();
+      return;
+    }
     try {
       this.evolutionLog = await this.backendActor.list_my_evolution_log(10);
       this.#render();
@@ -2271,25 +2324,29 @@ class App {
     this.statusMessage = 'Acquiring location...';
     this.#render();
 
-    let position;
+    let lat = null;
+    let lon = null;
     try {
-      position = await new Promise((resolve, reject) =>
+      const position = await new Promise((resolve, reject) =>
         navigator.geolocation.getCurrentPosition(resolve, reject, { enableHighAccuracy: true, timeout: 10000 }),
       );
+      lat = position.coords.latitude;
+      lon = position.coords.longitude;
     } catch (err) {
-      this.statusMessage = `Couldn't get GPS location: ${err.message}. Dispatch aborted.`;
+      // GPS failure (denied, unavailable, timeout) — proceed without coordinates.
+      // Emergency dispatch still fires and SMS still goes out; the map link is
+      // omitted from the message. Not blocking on GPS is the right call here —
+      // a denied location permission should never prevent a panic alert from sending.
+      console.warn('[Skippy] GPS unavailable, dispatching without location:', err.message);
+      this.statusMessage = 'GPS unavailable — dispatching without location...';
       this.#render();
-      return;
     }
 
     try {
       const response = await fetch(`${PROXY_URL}/emergency-dispatch`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'X-Skippy-Session': this.sessionToken },
-        body: JSON.stringify({
-          lat: position.coords.latitude,
-          lon: position.coords.longitude,
-        }),
+        body: JSON.stringify({ lat, lon }),
       });
       const data = await response.json();
       if (!response.ok) throw new Error(data.error || 'Dispatch failed.');
@@ -2376,7 +2433,9 @@ class App {
     this.emergencyRecorder = null;
     this.emergencyStream?.getTracks().forEach((t) => t.stop());
     this.emergencyStream = null;
-    this.emergencyWs?.close();
+    if (this.emergencyWs && this.emergencyWs.readyState < WebSocket.CLOSING) {
+      this.emergencyWs.close();
+    }
     this.emergencyWs = null;
   };
 
@@ -2415,10 +2474,18 @@ class App {
   };
 
   #detachCurrentAudio = () => {
+    // Clear ALL event handlers before resetting — otherwise a stale onended
+    // or onplaying from the previous segment can fire after barge-in and flip
+    // isSpeaking to false while the new audio is already playing, which
+    // makes subsequent barge-ins blind (isSpeaking appears false to the
+    // interim-result check even though Skippy is audibly talking).
+    this.premiumAudioEl.oncanplaythrough = null;
+    this.premiumAudioEl.onplaying = null;
+    this.premiumAudioEl.onended = null;
+    this.premiumAudioEl.onerror = null;
     // Fully reset the element (not just pause) so mobile browsers can't
     // silently auto-resume a previously-blocked play() later on, which is
     // how Premium audio can resurface and overlap with a fallback utterance.
-    this.premiumAudioEl.oncanplaythrough = null;
     this.premiumAudioEl.pause();
     this.premiumAudioEl.removeAttribute('src');
     this.premiumAudioEl.load();
@@ -2429,6 +2496,10 @@ class App {
   // state before a new reply starts speaking, and to let a barged-in
   // utterance cut him off mid-sentence (see #askSkippy).
   #stopSpeaking = () => {
+    if (this.#economySpeakTimer !== null) {
+      clearTimeout(this.#economySpeakTimer);
+      this.#economySpeakTimer = null;
+    }
     window.speechSynthesis?.cancel();
     this.#detachCurrentAudio();
     this.isSpeaking = false;
@@ -2501,6 +2572,8 @@ class App {
 
     audio.onplaying = () => {
       hasStartedPlaying = true;
+      settled = true; // prevent load timeout from triggering fallback once audio is actually playing
+      clearTimeout(loadTimeout);
       this.isSpeaking = true;
       this.#render();
     };
@@ -2561,7 +2634,11 @@ class App {
     // on cancel() — a speak() called in the very same tick can race with
     // the cancellation and produce dropped or out-of-order utterances.
     // Deferring a tick lets the cancellation fully settle first.
-    setTimeout(() => {
+    // #economySpeakTimer lets #stopSpeaking cancel this before it fires,
+    // preventing economy from starting on top of a premium reply that begins
+    // during the same gap (the overlap-voice bug confirmed 2026-06-26).
+    this.#economySpeakTimer = setTimeout(() => {
+      this.#economySpeakTimer = null;
       const utterance = new SpeechSynthesisUtterance(stripMarkdown(text));
       utterance.onstart = () => {
         this.isSpeaking = true;
@@ -2811,8 +2888,8 @@ class App {
     let body;
     if (this.authState === 'rejected') {
       body = html`
-        <main>
-          <h1>Skippy Voice Notes</h1>
+        <main class="login-screen">
+          <h1 class="login-title">Skippy</h1>
           <p class="status">
             Not authorized. Your Principal is not on the whitelist:
           </p>
@@ -2830,9 +2907,10 @@ class App {
       `;
     } else {
       body = html`
-        <main>
-          <h1>Skippy Voice Notes</h1>
+        <main class="login-screen">
+          <h1 class="login-title">Skippy</h1>
           <button
+            class="login-btn"
             @click=${this.#login}
             ?disabled=${this.authState === 'loading'}
           >
@@ -2864,7 +2942,15 @@ class App {
     let body = html`
       <div class="command-deck">
         ${this.ghostMode
-          ? html`<div style="position: fixed; inset: 0; background: black; z-index: 9999;"></div>`
+          ? this.commsOpen
+            ? html`<div style="position:fixed;inset:0;background:#0a0a0a;z-index:9999;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:1.5em;color:#d1d5db;font-family:inherit;">
+                <div style="font-size:1.1em;letter-spacing:0.12em;color:#00e5ff;text-transform:uppercase;">● COMMS OPEN</div>
+                <div style="font-size:0.8em;color:#555;letter-spacing:0.06em;line-height:1.8;text-align:center;">
+                  "Skippy, go dark" — silence<br/>
+                  "Skippy, stand down" — end emergency
+                </div>
+              </div>`
+            : html`<div style="position: fixed; inset: 0; background: black; z-index: 9999;"></div>`
           : ''}
 
         ${this.lexiconOpen
@@ -3028,7 +3114,9 @@ class App {
                   Grows naturally from archived workspaces (Critic Loop) and direct in-chat
                   reprimands (Course Correction) — no reset button by design. Clamped to 0.2-0.95.
                 </p>
-                <button @click=${this.#refreshEvolutionLog}>Show recent changes</button>
+                <button @click=${this.#refreshEvolutionLog}>
+                  ${this.evolutionLog.length > 0 ? 'Hide recent changes' : 'Show recent changes'}
+                </button>
                 ${this.evolutionLog.length > 0
                   ? html`
                       <ul>
@@ -3109,27 +3197,40 @@ class App {
                 </p>
               `
             : ''}
-          <form @submit=${this.#addRosterProfile}>
-            <label>
-              Name/Callsign
-              <input name="rosterName" type="text" placeholder="Lisa" required />
-            </label>
-            <label>
-              Voice Trigger Phrase
-              <input name="rosterTrigger" type="text" placeholder="it's lisa" required />
-            </label>
-            <label>
-              Role/Significance
-              <input name="rosterRole" type="text" placeholder="Insurance adjuster" />
-            </label>
-            <button type="submit">+ Add profile</button>
-          </form>
+          ${(() => {
+            const editing = this.editingRosterIndex !== null ? this.rosterProfiles[this.editingRosterIndex] : null;
+            return html`
+              <form @submit=${this.#saveRosterProfile}>
+                <label>Name/Callsign
+                  <input name="rosterName" type="text" placeholder="Lisa" required .value=${editing?.name ?? ''} />
+                </label>
+                <label>Voice Trigger Phrase
+                  <input name="rosterTrigger" type="text" placeholder="it's lisa" required .value=${editing?.triggerPhrase ?? ''} />
+                </label>
+                <label>Role/Significance
+                  <input name="rosterRole" type="text" placeholder="Insurance adjuster" .value=${editing?.role ?? ''} />
+                </label>
+                <label>Notes for Skippy
+                  <textarea name="rosterNotes" rows="3" placeholder="Likes the color blue, hates stormy weather, prefers direct answers..."
+                    style="width:100%;margin-top:0.3em;">${editing?.notes ?? ''}</textarea>
+                </label>
+                <div style="display:flex;gap:0.5em;margin-top:0.4em;">
+                  <button type="submit">${editing ? 'Save changes' : '+ Add profile'}</button>
+                  ${editing ? html`<button type="button" @click=${this.#cancelEditRoster}>Cancel</button>` : ''}
+                </div>
+              </form>
+            `;
+          })()}
           <ul>
             ${this.rosterProfiles.map(
-              (p) => html`
-                <li>
-                  <strong>${p.name}</strong> — "${p.triggerPhrase}"${p.role ? ` (${p.role})` : ''}
-                  <button @click=${() => this.#deleteRosterProfile(p.triggerPhrase)}>Delete</button>
+              (p, i) => html`
+                <li style="margin:0.5em 0;">
+                  <div><strong>${p.name}</strong> — "${p.triggerPhrase}"${p.role ? ` · ${p.role}` : ''}</div>
+                  ${p.notes ? html`<div class="status" style="margin:0.2em 0 0.3em;">${p.notes}</div>` : ''}
+                  <div style="display:flex;gap:0.4em;">
+                    <button @click=${() => this.#editRosterProfile(i)}>Edit</button>
+                    <button @click=${() => this.#deleteRosterProfile(p.triggerPhrase)}>Delete</button>
+                  </div>
                 </li>
               `,
             )}
