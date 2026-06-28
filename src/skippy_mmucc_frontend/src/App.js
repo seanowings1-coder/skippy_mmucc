@@ -3670,7 +3670,7 @@ class App {
         </div>
 
         <footer class="statusbar">
-          <span>👤 ${this.profileName || 'Sean'} <button @click=${this.#logout}>Log Out</button></span>
+          <span>👤 ${this.profileName || 'Commander'} <button @click=${this.#logout}>Log Out</button></span>
           <span>
             Status: ${this.statusMessage || 'Idle'} | Mode: ${this.operationalMode}${this.lastBrain
               ? ` | Brain: ${this.lastBrain}`
