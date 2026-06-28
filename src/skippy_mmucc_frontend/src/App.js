@@ -1808,7 +1808,7 @@ class App {
     }
     return {
       mode: this.operationalMode,
-      brain: this.operationalMode === 'tactical' ? 'tactical' : this.operationalMode === 'focus' ? 'tactical' : 'everyday',
+      brain: this.operationalMode === 'tactical' ? 'tactical' : this.operationalMode === 'focus' ? 'focus' : 'everyday',
     };
   }
 

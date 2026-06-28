@@ -77,10 +77,21 @@ const OPENROUTER_MODEL_TACTICAL_FALLBACK =
 const OPENROUTER_MODEL_TACTICAL_FALLBACK_PAID =
   process.env.OPENROUTER_MODEL_TACTICAL_FALLBACK_PAID ||
   OPENROUTER_MODEL_TACTICAL_FALLBACK.replace(/:free$/, '');
+// Focus brain — same zero-personality/direct behavior as tactical but independently
+// configurable (different model or params without touching Steel Rain).
+// Defaults to the same model as tactical; override via OPENROUTER_MODEL_FOCUS.
+const OPENROUTER_MODEL_FOCUS =
+  process.env.OPENROUTER_MODEL_FOCUS || OPENROUTER_MODEL_TACTICAL;
+const OPENROUTER_MODEL_FOCUS_FALLBACK =
+  process.env.OPENROUTER_MODEL_FOCUS_FALLBACK || OPENROUTER_MODEL_TACTICAL_FALLBACK;
+const OPENROUTER_MODEL_FOCUS_FALLBACK_PAID =
+  process.env.OPENROUTER_MODEL_FOCUS_FALLBACK_PAID ||
+  OPENROUTER_MODEL_FOCUS_FALLBACK.replace(/:free$/, '');
 const BRAIN_MODELS = {
   everyday: OPENROUTER_MODEL_EVERYDAY,
   heavy_hitter: OPENROUTER_MODEL_HEAVY_HITTER,
   tactical: OPENROUTER_MODEL_TACTICAL,
+  focus: OPENROUTER_MODEL_FOCUS,
 };
 // Per-brain generation parameters. Everyday (Dolphin 24B / MythoMax fallback):
 // temperature 0.78 (stable character; nudge toward 0.7 if it starts rambling),
@@ -96,6 +107,7 @@ const BRAIN_GENERATION_PARAMS = {
   everyday: { temperature: 0.72, repetition_penalty: 1.12, max_tokens: 100 },
   heavy_hitter: {},
   tactical: {},
+  focus: {},
 };
 
 // RAG (Pillar 6) — OpenRouter added a unified /embeddings endpoint covering
@@ -1103,7 +1115,9 @@ app.post('/respond', requireSession, async (req, res) => {
       const genParams = BRAIN_GENERATION_PARAMS[brain];
       const [fbFree, fbPaid] = brain === 'heavy_hitter'
         ? [OPENROUTER_MODEL_HEAVY_HITTER_FALLBACK, OPENROUTER_MODEL_HEAVY_HITTER_FALLBACK_PAID]
-        : [OPENROUTER_MODEL_TACTICAL_FALLBACK, OPENROUTER_MODEL_TACTICAL_FALLBACK_PAID];
+        : brain === 'focus'
+          ? [OPENROUTER_MODEL_FOCUS_FALLBACK, OPENROUTER_MODEL_FOCUS_FALLBACK_PAID]
+          : [OPENROUTER_MODEL_TACTICAL_FALLBACK, OPENROUTER_MODEL_TACTICAL_FALLBACK_PAID];
 
       // T1 → T2: paid primary (skip if :free wasn't in the model ID — already paid)
       const primaryPaid = activeModel.replace(/:free$/, '');
