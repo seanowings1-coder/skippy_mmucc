@@ -641,7 +641,13 @@ function stripLeakedFormatting(text) {
 // corrupting the emoji and leaving its orphaned trailing surrogate in the
 // output. /u forces codepoint-aware matching, which doesn't have this trap.
 function mergeKaraokeMarkers(rawText) {
-  const text = rawText.replace(/[♫♪🎵]/gu, '🎶');
+  let text = rawText.replace(/[♫♪🎵]/gu, '🎶');
+
+  // If the model emitted a lone 🎶 with no closing pair (e.g. "🎶 *verse*"
+  // at end of reply), close it so splitVoiceSegments() can find the pair.
+  const markerCount = (text.match(/🎶/gu) || []).length;
+  if (markerCount % 2 !== 0) text = text + ' 🎶';
+
   const pattern = /🎶([\s\S]*?)🎶/gu;
   const sungSegments = [];
   let match;
