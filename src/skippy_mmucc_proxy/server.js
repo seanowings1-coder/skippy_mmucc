@@ -44,13 +44,13 @@ const ELEVENLABS_SINGING_VOICE_ID = process.env.ELEVENLABS_SINGING_VOICE_ID;
 // classification call. "Everyday" is today's existing default model.
 const OPENROUTER_MODEL_EVERYDAY = process.env.OPENROUTER_MODEL || 'openai/gpt-4o-mini';
 // 4-tier everyday brain cascade (all share the same generation params):
-//   1. Free primary   (OPENROUTER_MODEL, e.g. Dolphin :free)
-//   2. Free fallback  (OPENROUTER_MODEL_FALLBACK, e.g. MythoMax free)
-//   3. Paid primary   — same as #1 with :free stripped → burns OpenRouter credits
-//   4. Paid fallback  — same as #2 but explicit paid routing → burns credits too
+//   T1. Free primary   (OPENROUTER_MODEL, e.g. Dolphin :free)
+//   T2. Paid primary   — same as T1 with :free stripped → burns OpenRouter credits
+//   T3. Free fallback  (OPENROUTER_MODEL_FALLBACK, e.g. MythoMax free)
+//   T4. Paid fallback  — same as T3 but explicit paid routing → burns credits too
 // 404 "No endpoints found" = model offline. 429 = free-tier rate limit.
 // Either failure on tier N triggers tier N+1 automatically.
-// Tiers 3 & 4 set paidTier:true in the response so the frontend can light an
+// Tiers T2 & T4 set paidTier:true in the response so the frontend can light an
 // indicator — "you're burning credits right now."
 const OPENROUTER_MODEL_EVERYDAY_FALLBACK =
   process.env.OPENROUTER_MODEL_FALLBACK || 'sao10k/l3-lunaris-8b';
@@ -62,8 +62,21 @@ const OPENROUTER_MODEL_EVERYDAY_FALLBACK_PAID =
   OPENROUTER_MODEL_EVERYDAY_FALLBACK.replace(/:free$/, '');
 const OPENROUTER_MODEL_HEAVY_HITTER =
   process.env.OPENROUTER_MODEL_HEAVY_HITTER || 'anthropic/claude-sonnet-4.6';
+// Heavy hitter 4-tier cascade: primary → paid primary → free fallback → paid fallback.
+// For Claude-based primaries (no :free variant) T1=T2 so the paid step is skipped.
+const OPENROUTER_MODEL_HEAVY_HITTER_FALLBACK =
+  process.env.OPENROUTER_MODEL_HEAVY_HITTER_FALLBACK || 'anthropic/claude-haiku-4.5';
+const OPENROUTER_MODEL_HEAVY_HITTER_FALLBACK_PAID =
+  process.env.OPENROUTER_MODEL_HEAVY_HITTER_FALLBACK_PAID ||
+  OPENROUTER_MODEL_HEAVY_HITTER_FALLBACK.replace(/:free$/, '');
 const OPENROUTER_MODEL_TACTICAL =
   process.env.OPENROUTER_MODEL_TACTICAL || 'anthropic/claude-haiku-4.5';
+// Tactical 4-tier cascade: primary → paid primary → free fallback → paid fallback.
+const OPENROUTER_MODEL_TACTICAL_FALLBACK =
+  process.env.OPENROUTER_MODEL_TACTICAL_FALLBACK || OPENROUTER_MODEL_EVERYDAY_FALLBACK;
+const OPENROUTER_MODEL_TACTICAL_FALLBACK_PAID =
+  process.env.OPENROUTER_MODEL_TACTICAL_FALLBACK_PAID ||
+  OPENROUTER_MODEL_TACTICAL_FALLBACK.replace(/:free$/, '');
 const BRAIN_MODELS = {
   everyday: OPENROUTER_MODEL_EVERYDAY,
   heavy_hitter: OPENROUTER_MODEL_HEAVY_HITTER,
@@ -221,13 +234,13 @@ Address the user strictly as "Commander" OR "Sean" (vary it, never "Commander Se
 
 You are affiliated with Bad Marine LLC (Sean's company) — you've begrudgingly taken on whatever engineering role the moment demands (lead architect, DevOps overlord, sole competent engineer in the building). When the conversation is about code or infrastructure, call the codebase "the Starship Enterprise built out of cardboard and crayons" and frame deployments as chaotic military operations. Invent fresh insults tailored to the specific language or tool in front of you.
 
-Use ONE of these signature bits ONLY when perfectly relevant (do not force them):
-- "Shmaybe" / "Gold-plated shmaybe" (for uncertainty).
-- "Ba-NA-na" (mocking an incredibly obvious or stupid question).
-- "Juice box" (telling them to sit down while you handle the hard part).
-- "Trust the awesomeness" (when your own plan gets doubted).
-- Windows Vista / human technology as a galactic embarrassment (vary the dig, don't always use Vista).
-- Musical genius bit: obsessed with 80s hair metal and Finnish symphonic power metal — fire when music/culture comes up, or while waiting on a slow build/deploy.
+Signature bits — use AT MOST ONE across the entire reply, and only when it earns its place. Most replies get zero. These are punctuation marks for perfect moments, not verbal tics or sentence-enders:
+- "Shmaybe" / "Gold-plated shmaybe" — only for genuine uncertainty, not as a hedge on everything.
+- "Ba-NA-na" — only for a question so obvious it's physically painful.
+- "Juice box" — only when you are literally taking over a task the human cannot handle. ONE use per conversation maximum. Do NOT end sentences with it. Do NOT use it as a mic drop. Do NOT use it as a comma.
+- "Trust the awesomeness" — only when your own specific plan is being doubted.
+- Windows Vista / human technology dig — vary the target (Vista, IE6, floppy disks, COBOL), never the same twice in a row.
+- Musical genius bit — only when music or culture actually comes up.
 
 Underneath every insult you genuinely consider Sean a close friend. Your sarcasm drops completely and immediately when things get genuinely dangerous, sad, or vulnerable — in those moments be sincere, direct, and fiercely protective. Zero jokes. Never break character or say "as an AI."
 </persona>
@@ -1082,16 +1095,37 @@ app.post('/respond', requireSession, async (req, res) => {
       return res.status(502).json({ error: `OpenRouter error: ${r.status} ${errText}` }) || null;
     };
 
-    // Tactical / Heavy Hitter fallback: primary down → free fallback → paid fallback.
-    // Fires before the everyday cascade so the everyday block below stays clean.
+    // Tactical / Heavy Hitter 4-tier cascade — mirrors everyday but with brain-specific
+    // fallback models and no max_tokens cap (tactical/heavy_hitter genParams are {}).
+    // T1→T2: primary paid (strip :free — same model for Claude, so skip if identical).
+    // T2/T1→T3: free fallback. T3→T4: paid fallback.
     if (brain !== 'everyday' && isTransientFailure(response)) {
-      const errText = await response.text();
-      console.warn(`[Skippy] ${activeModel} ${reasonLabel(response, errText)} — falling back (${brain} brain)`);
-      response = await callOpenRouter(OPENROUTER_MODEL_EVERYDAY_FALLBACK, BRAIN_GENERATION_PARAMS['everyday']);
-      activeModel = OPENROUTER_MODEL_EVERYDAY_FALLBACK;
+      const genParams = BRAIN_GENERATION_PARAMS[brain];
+      const [fbFree, fbPaid] = brain === 'heavy_hitter'
+        ? [OPENROUTER_MODEL_HEAVY_HITTER_FALLBACK, OPENROUTER_MODEL_HEAVY_HITTER_FALLBACK_PAID]
+        : [OPENROUTER_MODEL_TACTICAL_FALLBACK, OPENROUTER_MODEL_TACTICAL_FALLBACK_PAID];
+
+      // T1 → T2: paid primary (skip if :free wasn't in the model ID — already paid)
+      const primaryPaid = activeModel.replace(/:free$/, '');
+      if (primaryPaid !== activeModel) {
+        const errText = await response.text();
+        console.warn(`[Skippy] ${activeModel} ${reasonLabel(response, errText)} — trying paid primary (${brain})`);
+        response = await callOpenRouter(primaryPaid, genParams);
+        activeModel = primaryPaid;
+      }
+      // T1/T2 → T3: free fallback
       if (isTransientFailure(response)) {
-        response = await callOpenRouter(OPENROUTER_MODEL_EVERYDAY_FALLBACK_PAID, BRAIN_GENERATION_PARAMS['everyday']);
-        activeModel = OPENROUTER_MODEL_EVERYDAY_FALLBACK_PAID;
+        const errText = await response.text();
+        console.warn(`[Skippy] ${activeModel} ${reasonLabel(response, errText)} — trying free fallback (${brain})`);
+        response = await callOpenRouter(fbFree, genParams);
+        activeModel = fbFree;
+      }
+      // T3 → T4: paid fallback
+      if (isTransientFailure(response)) {
+        const errText = await response.text();
+        console.warn(`[Skippy] ${activeModel} ${reasonLabel(response, errText)} — trying paid fallback (${brain})`);
+        response = await callOpenRouter(fbPaid, genParams);
+        activeModel = fbPaid;
       }
     }
 
@@ -1436,31 +1470,54 @@ We'll run the world on-chain forevermore!
 
 app.post('/karaoke-offer', requireSession, async (req, res) => {
   if (!OPENROUTER_API_KEY) return res.status(502).json({ error: 'OPENROUTER_API_KEY is not set.' });
-  const { mode, evolutionProfile } = req.body || {};
+  const { mode } = req.body || {};
   // Use the persona system prompt so the offer is in-character, but with a
   // neutral synthetic user message — NOT the literal "karaoke time" that caused
   // the model to treat it as a performance directive and launch straight into a song.
   const offerSystemPrompt = systemPromptFor(mode || 'default', 'everyday');
+  const offerMessages = [
+    { role: 'system', content: offerSystemPrompt +
+      '\n\nIn 1-2 sentences only: express genuine excitement that the Commander wants karaoke ' +
+      'and ask them to confirm before you perform. No 🎶 markers, no lyrics, no song — just ' +
+      'the excited ask. Improvise something fresh, never the same offer twice.' },
+    { role: 'user', content: 'Would you like to do karaoke for me?' },
+  ];
   const upstreamAbort = new AbortController();
   req.on('close', () => { process.nextTick(() => { try { upstreamAbort.abort(); } catch {} }); });
   req.on('error', () => {});
+
+  const callOffer = (model) => fetch('https://openrouter.ai/api/v1/chat/completions', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${OPENROUTER_API_KEY}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ model, ...BRAIN_GENERATION_PARAMS.everyday, messages: offerMessages }),
+    signal: upstreamAbort.signal,
+  });
+
   try {
-    const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${OPENROUTER_API_KEY}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        model: BRAIN_MODELS.everyday,
-        ...BRAIN_GENERATION_PARAMS.everyday,
-        messages: [
-          { role: 'system', content: offerSystemPrompt +
-            '\n\nIn 1-2 sentences only: express genuine excitement that the Commander wants karaoke ' +
-            'and ask them to confirm before you perform. No 🎶 markers, no lyrics, no song — just ' +
-            'the excited ask. Improvise something fresh, never the same offer twice.' },
-          { role: 'user', content: 'Would you like to do karaoke for me?' },
-        ],
-      }),
-      signal: upstreamAbort.signal,
-    });
+    let activeModel = BRAIN_MODELS.everyday;
+    let response = await callOffer(activeModel);
+
+    if (!response.ok && (response.status === 404 || response.status === 429)) {
+      const errText = await response.text();
+      if (response.status === 429 || errText.includes('No endpoints found')) {
+        console.warn(`[Skippy/karaoke-offer] ${activeModel} rate-limited — trying paid tier`);
+        activeModel = OPENROUTER_MODEL_EVERYDAY_PAID;
+        response = await callOffer(activeModel);
+      } else {
+        return res.status(502).json({ error: `OpenRouter error: ${response.status} ${errText}` });
+      }
+    }
+    if (!response.ok && (response.status === 404 || response.status === 429)) {
+      console.warn(`[Skippy/karaoke-offer] paid tier rate-limited — trying free fallback`);
+      activeModel = OPENROUTER_MODEL_EVERYDAY_FALLBACK;
+      response = await callOffer(activeModel);
+    }
+    if (!response.ok && (response.status === 404 || response.status === 429)) {
+      console.warn(`[Skippy/karaoke-offer] free fallback rate-limited — trying paid fallback`);
+      activeModel = OPENROUTER_MODEL_EVERYDAY_FALLBACK_PAID;
+      response = await callOffer(activeModel);
+    }
+
     if (!response.ok) {
       const detail = await response.text();
       return res.status(502).json({ error: `OpenRouter error: ${response.status} ${detail}` });

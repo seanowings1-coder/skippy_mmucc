@@ -2671,18 +2671,34 @@ class App {
     // unrelated questions asked mid-emergency must stay silent too, not
     // just the dedicated open-comms/go-dark acknowledgments.
     if (this.ghostMode && !this.commsOpen) return;
-    const cleanText = stripMarkdown(text);
     this.#stopSpeaking();
 
     if (this.voiceMode === 'economy') {
       // No real singing synthesis exists client-side — Dual-Voice routing
       // is Premium/ElevenLabs-only. Strip the lyric markers and speak the
       // verse as plain text through the same Economy voice.
-      this.#speakEconomy(cleanText.replace(/🎶/g, ''));
+      this.#speakEconomy(stripMarkdown(text).replace(/🎶/g, ''));
       return;
     }
 
-    this.#playPremiumSegments(splitVoiceSegments(cleanText), 0);
+    // Split BEFORE stripping markdown — stripMarkdown drops entire *...* spans
+    // (stage directions), which would wipe lyric content like "🎶 *verse* 🎶"
+    // before splitVoiceSegments ever sees it. For singing segments, unwrap
+    // asterisks (keep the lyric text); for conversational, drop them (stage dirs).
+    const segments = splitVoiceSegments(text)
+      .map((seg) => ({
+        ...seg,
+        text:
+          seg.voice === 'singing'
+            ? seg.text.replace(/\*\*(.*?)\*\*/g, '$1').replace(/\*(.*?)\*/g, '$1').trim()
+            : stripMarkdown(seg.text),
+      }))
+      .filter((seg) => seg.text.length > 0);
+
+    this.#playPremiumSegments(
+      segments.length > 0 ? segments : [{ text: stripMarkdown(text), voice: 'conversational' }],
+      0,
+    );
   };
 
   // Dual-Voice routing ("Marco Hietala Protocol") — plays a reply's
@@ -3415,7 +3431,7 @@ class App {
             : this.history.map(
                 (msg) => html`
                   <p class="transcript-message ${msg.role}">
-                    <strong>${msg.role === 'user' ? 'You' : 'Skippy'}:</strong> ${msg.content}
+                    <strong>${msg.role === 'user' ? 'You' : 'Skippy'}:</strong> ${msg.role === 'assistant' ? msg.content.replace(/\*\*(.*?)\*\*/g, '$1').replace(/\*(.*?)\*/g, '').replace(/\s{2,}/g, ' ').trim() : msg.content}
                   </p>
                 `,
               )}
