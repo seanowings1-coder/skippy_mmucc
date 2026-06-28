@@ -2,1659 +2,198 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-## Project
-
-A dfx (Internet Computer SDK) project with a Rust backend canister and a vanilla JS/Vite frontend canister.
-
 ## Commands
 
 ```bash
-# Start the local replica in the background
-dfx start --background
+# ─── Local deployment (always use this script, not bare dfx deploy) ──────────
+bash scripts/deploy-local.sh          # deploys internet_identity, backend, frontend
+                                      # reads COMMANDER_PRINCIPAL + PARTNER_PRINCIPAL from .env
 
-# Deploy all canisters to the local replica and generate the Candid interface.
-# The backend canister now requires two Principal init args (the Internet
-# Identity whitelist, Phase 5.1) — use this instead of a bare `dfx deploy`,
-# which will fail with "this canister requires an initialization argument".
-npm run deploy:local
+# ─── ICP replica ─────────────────────────────────────────────────────────────
+dfx start --background                # start the local replica
+dfx stop                              # stop it
 
-# Regenerate frontend bindings from the backend's Candid interface (run after changing lib.rs or the .did file)
-npm run generate
+# ─── Frontend ─────────────────────────────────────────────────────────────────
+npm start                             # Vite dev server at http://localhost:3000
+npm run build                         # production build (calls dfx generate first)
+npm run generate                      # regenerate TS bindings from backend Candid
 
-# Start the frontend dev server (http://localhost:3000), proxying API calls to the replica.
-# Binds to 0.0.0.0, so it's also reachable from other devices on the LAN at
-# http://<this-machine's-LAN-IP>:3000 (e.g. for phone bench testing).
-npm start
+# ─── Proxy ────────────────────────────────────────────────────────────────────
+cd src/skippy_mmucc_proxy && node --watch server.js   # dev proxy (auto-restarts)
 
-# Start the OpenRouter/ElevenLabs proxy (http://localhost:8787), also bound to 0.0.0.0.
-# Run this in its own terminal alongside `npm start` — it is intentionally NOT
-# wired into the root `start` script (see Architecture below).
-npm run dev -w skippy_mmucc_proxy
-
-# Build (workspaces-aware; builds the frontend)
-npm run build
-
-# Run tests (workspaces-aware)
-npm test
-
-# Build only the Rust backend canister
+# ─── Backend canister (Rust) ──────────────────────────────────────────────────
 cargo build --target wasm32-unknown-unknown --release -p skippy_mmucc_backend
+cargo test -p skippy_mmucc_backend
 ```
 
-The deployed app is served at `http://localhost:4943?canisterId={asset_canister_id}` once `dfx deploy` completes.
+**Never use bare `dfx deploy`** — it skips the `--argument` needed for the whitelist principals and `--upgrade-unchanged` needed when only `.env` values change (see `scripts/deploy-local.sh`).
+
+The app runs at `http://localhost:4943?canisterId={asset_canister_id}` after deploy; Vite dev at `http://localhost:3000` proxies API calls to the replica.
 
 ## Architecture
 
-- `dfx.json` defines three canisters: `skippy_mmucc_backend` (type `rust`), `skippy_mmucc_frontend` (type `assets`, depends on the backend and `internet_identity`, serves `src/skippy_mmucc_frontend/dist`), and `internet_identity` (type `custom`, pulls the prebuilt dev wasm/candid from the `dfinity/internet-identity` GitHub releases for local II login; on the `ic` network it instead resolves to the real mainnet II canister via `remote.id.ic`, never redeploying it).
-- The backend's `#[init]` takes two `principal` args — the Internet Identity whitelist (Commander + wife, see "Neo" Blueprint Pillar 2). They're sourced from `COMMANDER_PRINCIPAL`/`PARTNER_PRINCIPAL` in the gitignored `.env` by `scripts/deploy-local.sh` (run via `npm run deploy:local`), never hardcoded or committed.
-- `src/skippy_mmucc_backend/` — Rust canister source. `src/lib.rs` exposes canister methods via `ic_cdk` macros (e.g. `#[ic_cdk::query]`); `skippy_mmucc_backend.did` is the hand-maintained/generated Candid interface describing the canister's public API and must stay in sync with the exported methods.
-- `src/skippy_mmucc_frontend/` — Vite-based vanilla JS frontend (npm workspace `skippy_mmucc_frontend`). `npm run generate` (aliased via dfx) produces TypeScript bindings/declarations from the backend's Candid file so the frontend can call canister methods type-safely; this runs automatically before `dfx deploy` and should be re-run after backend interface changes.
-- Root `Cargo.toml` is a workspace pointing at `src/skippy_mmucc_backend`; root `package.json` declares npm workspaces (`src/skippy_mmucc_frontend`, `src/skippy_mmucc_proxy`) and fans out `build`/`start`/`test` to workspace packages that define them (`--if-present`).
-- `output_env_file: ".env"` in `dfx.json` means `dfx deploy`/`dfx start` writes canister IDs and network info to `.env`, consumed by the frontend build.
-- `src/skippy_mmucc_proxy/` — a small local Express server (npm workspace `skippy_mmucc_proxy`, run via `npm run dev -w skippy_mmucc_proxy`) that holds `OPENROUTER_API_KEY`/`ELEVENLABS_API_KEY`/`ELEVENLABS_VOICE_ID` from the root `.env` and is the *only* thing that calls OpenRouter/ElevenLabs. The frontend asset canister is public, so secrets must never be bundled into its JS — the frontend only ever talks to this proxy (`POST /respond`, `GET /speak`), never to OpenRouter/ElevenLabs directly. Its `dev` script is deliberately not named `start`, so it doesn't get swept up by the root `npm start --workspaces` call (which would otherwise block on whichever dev server runs first).
+Four distinct layers, none of which can act as another:
 
-## Notes
+```
+[Browser: App.js]
+    │  Internet Identity (WebAuthn)       ← authentication
+    │  canister calls (login, history, workspaces, RAG, etc.)
+    ▼
+[ICP Backend Canister: lib.rs]           ← durable source of truth
+    │  validate_session (query)
+    ▼
+[Node Proxy: server.js]                  ← OpenRouter, ElevenLabs, embeddings
+    │  /respond, /speak, /embed, /web-search, etc.
+    ▼
+[External APIs: OpenRouter, ElevenLabs, Brave/Serper]
+```
 
-- Changes to the backend's public interface require updating both `lib.rs` and the `.did` file, then running `npm run generate` before frontend code can use the new interface.
-- `.dfx/`, `target/`, `node_modules/`, `dist/`, and `**/declarations/` are gitignored — these are all regenerated by the commands above, not hand-edited.
+The proxy cannot act as a specific end user — it has no II delegation and calls the canister as itself. The **frontend** calls `append_turn`, `create_workspace`, etc. directly with the user's own authenticated identity.
+
+## Backend Canister (`src/skippy_mmucc_backend/`)
+
+### Access control
+Every method calls `assert_whitelisted()` first — only `COMMANDER_PRINCIPAL` and `PARTNER_PRINCIPAL` can call anything. Set at `#[init]` and re-applied by `#[post_upgrade]` (why `--upgrade-unchanged` is required in the deploy script).
+
+### Auth / session flow
+1. Frontend completes II sign-in, calls `login()` → gets a short-lived hex token (30-min TTL).
+2. Frontend stores token, sends it as `X-Skippy-Session` on every proxy request.
+3. Proxy calls `validate_session(token)` → `Option<SessionInfo>` — returns principal, name, voice_id in one query, no second round-trip needed.
+4. Sessions live in a `HashMap` in heap memory (intentionally, not stable) — upgrading the canister invalidates all sessions; users re-login. This is the spec, not a gap.
+
+### Stable memory layout (12 `MemoryId` slots — never renumber or reuse)
+| MemoryId | Store | Key type |
+|---|---|---|
+| 0 | `MANUAL_SECTIONS` | `u64` → `DocumentSection` |
+| 1 | `NEXT_ID` | `StableCell<u64>` (global counter) |
+| 2 | `COMMANDER_PRINCIPAL` | `StableCell<Principal>` |
+| 3 | `PARTNER_PRINCIPAL` | `StableCell<Principal>` |
+| 4 | `HISTORY` | `HistoryKey{principal, workspace_id}` → `ConversationHistory` |
+| 5 | `PERSONA_PROFILES` | `Principal` → `PersonaProfile` |
+| 6 | `WORKSPACES` | `u64` → `Workspace` |
+| 7 | `COURIER_QUEUE` | `u64` → `CourierMessage` |
+| 8 | `EMERGENCY_EVENTS` | `u64` → `EmergencyEvent` |
+| 9 | `EMERGENCY_AUDIO` | `u64` → `EmergencyAudioChunk` |
+| 10 | `EVOLUTION_PROFILES` | `Principal` → `EvolutionProfile` |
+| 11 | `EVOLUTION_LOG` | `u64` → `EvolutionLogEntry` |
+
+`NEXT_ID` is a **global** counter shared by all entity types (sections, workspaces, courier messages, emergency events, evolution log entries, etc.). Never introduce a separate counter.
+
+### Critical Candid schema invariant
+Any new field added to a stored struct (`Workspace`, `DocumentSection`, etc.) **must** be `Option<T>`, never a bare `String` or `Vec<T>`. A non-optional field absent from already-stored bytes causes a hard Candid subtyping trap on decode. `None` means "empty/not set."
+
+### Key design decisions baked into the canister
+- **RAG is global, not siloed**: `search_similar_chunks` and `search_manuals_by_keyword` scan the full `MANUAL_SECTIONS` store regardless of `manual_name`. `Workspace.associated_manuals` is a visual/organizational pin only.
+- **History is a rolling window**: `append_turn` trims from the front if the history exceeds 40 messages, at write time.
+- **Emergency audio is append-only**: `EMERGENCY_AUDIO` has no delete method — it's potential evidence.
+- **Evolution has no factory reset**: `record_evolution_event` applies signed deltas, clamped to [0.2, 0.95]. The Course Correction feedback loop (in-chat reprimand) and the Critic Loop (archive-time proxy self-critique) are the only correction paths.
+- **Keyword search uses AND logic**: `search_manuals_by_keyword` requires all stems to co-occur in a section, not just one. OR matching produced false "hits" that wrongly suppressed web-search prompts.
+
+## Proxy Server (`src/skippy_mmucc_proxy/server.js`)
+
+Express.js server. All routes require the `requireSession` middleware (validates `X-Skippy-Session` via `validate_session` on the canister).
+
+### Routes
+| Route | Purpose |
+|---|---|
+| `POST /respond` | Main LLM response — 4-tier everyday brain cascade + tactical/heavy-hitter fallback |
+| `POST /project-brief` | Generates a project brief from workspace history |
+| `POST /critic-loop` | Archive-time Critic Loop (self-critique → Evolution Matrix deltas) |
+| `POST /karaoke-offer` | In-character excited ask before performing (one-step before `/karaoke`) |
+| `POST /karaoke` | Full karaoke performance (original lyrics only, no max_tokens cap) |
+| `GET /speak` | ElevenLabs TTS synthesis |
+| `POST /embed` | Single text embedding (for RAG query vectors) |
+| `POST /chunk-and-embed` | File upload (PDF/Word via mammoth/pdf-parse) → chunk → embed → canister |
+| `POST /chunk-and-embed-url` | URL fetch → chunk → embed → canister |
+| `POST /web-search` | Live web search |
+| `GET /api/fuel` | Cycle balance + OpenRouter credit status |
+| `POST /emergency-dispatch` | Triggers Guardian Emergency Protocol, mints secure token |
+| `GET /live-ops/:token` | SSE stream for emergency contacts (no auth — token is the credential) |
+
+### Everyday brain 4-tier cascade
+When the everyday brain fails (404 = model offline, 429 = rate-limited), the proxy automatically escalates:
+1. Free primary (`OPENROUTER_MODEL` env var, default: `openai/gpt-4o-mini`)
+2. Paid primary (same model with `:free` stripped)
+3. Free fallback (`OPENROUTER_MODEL_FALLBACK`, default: `sao10k/l3-lunaris-8b`)
+4. Paid fallback (same fallback with `:free` stripped)
+
+Tiers 2 & 4 set `paidTier: true` in the response so the frontend lights the amber tier-dot. Switching from the primary model family to the fallback family sets `brainDowngrade: true` so App.js plays the in-character quip **once** on transition (not on every subsequent request that's still on the fallback).
+
+Tactical and heavy-hitter brains follow a simpler 2-tier fallback (primary → free fallback → paid fallback).
+
+### Operational modes and system prompts
+- `default` — full Skippy persona, 3-sentence hard limit, structured XML system prompt
+- `professional` — sarcasm suppressed, direct/respectful tone
+- `tactical` — zero fluff, direct answer, instant web search on RAG miss (no permission ask)
+- `focus` — identical behavior to tactical, but no advanced function unlocks (Emergency Panic button stays locked)
+
+`EVERYDAY_UNLOCK_PREFIX` is prepended to prompts for fine-tuned models that need jailbreak framing; it is NOT prepended for Claude-based brains (Sonnet/Haiku handle persona without it).
+
+## Frontend (`src/skippy_mmucc_frontend/src/App.js`)
+
+Single-class `App` with Web Speech API-driven voice input. ~3700 lines. Key subsystems:
+
+### Voice pipeline
+- `SpeechRecognition` runs continuously. Interim results handle barge-in (cancels current TTS); final results route through `#handleFinalChunk`.
+- **TTS cooldown** (1200ms, `App.#SPEAK_COOLDOWN_MS`): final results arriving within 1200ms of TTS end are discarded — they're Skippy's own audio finalized by the recognition engine. Skipped when `pendingKaraokeOffer` or `pendingWebSearchQuery` is armed (user's "yes" is intentional, not loopback).
+- Premium TTS uses ElevenLabs via `/speak`; economy TTS falls back to `window.speechSynthesis` (used for system notifications like brain-downgrade quips to avoid burning ElevenLabs characters).
+
+### Pending states (two-step flows)
+- `pendingWebSearchQuery` — armed when the proxy asks permission to search; next utterance is the answer.
+- `pendingKaraokeOffer` — armed when karaoke trigger heard; next utterance confirms or declines.
+- `pendingWorkspaceCreate` — armed by voice create trigger; next utterance is the workspace name.
+
+### Operational mode switching
+Mode phrase detection happens in `#classifyIntent` before any LLM call. Mode phrases bypass the LLM entirely and produce a local deterministic ack. Focus mode routes to the `tactical` brain but never unlocks advanced functions.
+
+### Guest mode
+Enabled by `#enableGuestMode`. Locks out all canister mutations. Persona shifts to "primitive lifeform" tone. Unlock requires a fresh II WebAuthn ceremony (`verify_unlock()` on the canister gates this — any II anchor succeeds the ceremony, but `verify_unlock` additionally checks it's one of the two whitelisted principals).
+
+### Evolution Matrix display
+Read from `get_my_evolution_profile()` on load; updated on Course Correction phrases (local delta → `record_evolution_event` on canister) and at archive time via the Critic Loop. Displayed in a collapsible panel under the security section (auth-gated, not shown in guest mode).
+
+## Required `.env` variables
+
+```
+COMMANDER_PRINCIPAL=<II principal>
+PARTNER_PRINCIPAL=<II principal>
+OPENROUTER_API_KEY=
+ELEVENLABS_API_KEY=
+ELEVENLABS_VOICE_ID=           # default R.C. Bray clone voice
+ELEVENLABS_SINGING_VOICE_ID=   # karaoke voice (may differ)
+OPENROUTER_MODEL=              # everyday free primary (e.g. openai/gpt-4o-mini)
+OPENROUTER_MODEL_FALLBACK=     # everyday free fallback (e.g. sao10k/l3-lunaris-8b)
+OPENROUTER_MODEL_PAID=         # optional override for paid primary
+OPENROUTER_MODEL_FALLBACK_PAID= # optional override for paid fallback
+OPENROUTER_MODEL_HEAVY_HITTER= # defaults to anthropic/claude-sonnet-4.6
+OPENROUTER_MODEL_TACTICAL=     # defaults to a fast/cheap model
+```
 
 ## Project Blueprint
 
-Planned system design for this project. Sections below are marked **(scaffolded)** where a basic version now exists in code, vs. still forward-looking spec.
+Planned/aspirational system design for features not yet fully implemented.
 
-### 1. Personality Matrix (Skippy) — *(scaffolded, substantially expanded — see Phase 5.8.6)*
+### 1. Personality Matrix (Skippy)
+- Identity: "Skippy the Magnificent", ancient indestructible Elder AI manifesting as a beer can (Expeditionary Force canon).
+- Addresses user as "Commander" or "Sean" — vary it, never combine into "Commander Sean".
+- Tone: 70% sarcastic/witty/snarky, punches up not down (mocks decisions and bad code, not the person). Calls users "monkeys"/"hairless apes" with a fiercely protective undertone.
+- Guest mode persona: shifts to "primitive lifeform"/"clueless monkey" for unauthenticated users.
+- Signature bits (ONE per reply, only when genuinely fitting): "shmaybe" / "gold-plated shmaybe", "ba-NA-na", juice box, "Trust the awesomeness", Windows Vista dig, musical genius (80s hair metal + Finnish symphonic power metal). Invent fresh insults per language/tool rather than recycling Vista every time.
 
-- Identity: the assistant persona for this app is "Skippy the Magnificent", a hyper-intelligent, sarcastic, ancient Elder AI who manifests as a beer-can-like cylinder — see Phase 5.8.6 below for the full, canon-researched persona (signature bits, Bad Marine LLC framing, the protective-like-Joe-Bishop trait, the emergency sincerity override).
-- Addresses the user as "Commander" or "Sean", Skippy's choice. Tone is heavily sarcastic but "punches up, not down" (mocks decisions/mistakes, not the user's inherent worth) per Phase 5.8.6's canon research.
-- Guest mode (Pillar 15) is now fully implemented — see that pillar and Phase 5.7.2 — though it's a permission lockout, not a persona shift; the *persona* itself doesn't currently change tone differently for an unauthenticated vs. authenticated user beyond what Guest Mode's restricted capabilities already imply.
-- The persona lives in `SKIPPY_SYSTEM_PROMPTS.default` in `src/skippy_mmucc_proxy/server.js` (professional/tactical modes have their own separate, much more restrained prompts — see Pillar 3).
+### 2. Self-Dictation Audio Pipeline
+- Background Web Speech API listener for user-configured personal trigger phrases ("Let me make sure I write this down...", "Let me grab my notepad..."). Captures only the user's own dictation — not other parties, who are never recorded without disclosed consent.
+- On trigger detection: starts local transcription, routes to OpenRouter via `/respond`, synthesizes response via ElevenLabs.
 
-### 2. Self-Dictation Audio Pipeline (Frontend Canister) — *(scaffolded)*
+### 3. ICP Storage Layer & Knowledge Base
+- MMUCC V6 (Model Minimum Uniform Crash Criteria) and ANSI D.16 (Manual on Classification of Motor Vehicle Traffic Accidents) reference manuals uploaded via `/chunk-and-embed` or `/chunk-and-embed-url`.
+- RAG pipeline: proxy embeds query → `search_similar_chunks` (cosine) + `search_manuals_by_keyword` (keyword AND) on canister → results injected into `/respond` context.
+- All RAG storage uses `StableBTreeMap` (Pillar 6) — survives canister upgrades.
 
-- A background Web Speech API listener runs in the browser to support hands-free personal note-taking — it captures only the app user's own voice, with the user's full awareness (they choose and speak the trigger phrase themselves). This is not for recording other people or other parties in a conversation.
-- Listens for user-configured trigger phrases the user says to themselves to start a note, e.g.:
-  - "Let me make sure I write this down..."
-  - "Let me grab my notepad..."
-- On phrase detection, starts local recording/transcription of the user's own dictation that follows.
-- If this pipeline is ever extended to capture audio involving other people (e.g. calls, meetings), it must add an explicit, disclosed consent step for those other parties before recording — most jurisdictions require all-party consent to record a conversation, and silent/undisclosed recording of other people is not in scope for this feature. **Superseded for the "take a note" trigger specifically, confirmed 2026-06-21**: see "Neo" Blueprint Pillar 4's Covert Audio Logging Matrix carve-out and its Nebraska one-party-consent / jurisdiction caveat — that trigger now intentionally captures ambient audio without disclosure for a specific professional use case. This general rule still governs every other trigger/feature in this app.
-- Implemented in `src/skippy_mmucc_frontend/src/App.js`. Trigger phrases are currently a hardcoded constant (`TRIGGER_PHRASES`), not yet user-configurable via UI.
+### 4. Guardian Emergency Protocol (Pillar 12)
+- Trigger phrase → proxy `/emergency-dispatch` → mints `secure_token`, texts SMS links to whitelisted contacts, starts in-proxy live audio buffer.
+- Frontend streams audio chunks to proxy → proxy stores finalized chunks via `append_emergency_audio_chunk` on canister (append-only evidentiary ledger, no delete path).
+- Contacts access live audio via `GET /live-ops/:token` SSE endpoint (no authentication beyond the token).
+- Known gap: emergency audio stored without encryption-at-rest.
 
-### 3. External AI & Voice Pipeline (Integration Layer) — *(scaffolded)*
-
-- LLM routing: transcriptions are sent via the OpenRouter API, processed through the custom Skippy system prompt matrix.
-- Audio synthesis: the LLM's text response is routed to the ElevenLabs API for voice synthesis.
-- Voice profile: uses a designated ElevenLabs custom Voice ID (cloned R.C. Bray-style narration) for response playback.
-- Implemented via `src/skippy_mmucc_proxy` (see Architecture above) so API keys never reach the public frontend bundle. The frontend also offers a manual "Voice Mode" toggle between Premium (ElevenLabs, via the proxy) and Economy (the browser's built-in `speechSynthesis`, free/local) to manage API spend, and automatically fails over Premium → Economy if ElevenLabs errors or hits a quota/credit limit, so Skippy never goes silent.
-
-### 4. ICP Storage Layer & Knowledge Base (Backend Canister) — *(scaffolded)*
-
-- Persistent storage: uses DFINITY Stable Memory (`StableBTreeMap`) so data survives canister upgrades.
-- Document indexing: storage is structured to hold, index, and query text data from the MMUCC V6 (Model Minimum Uniform Crash Criteria) and ANSI D.16 (Manual on Classification of Motor Vehicle Traffic Accidents) reference manuals.
-- Implemented as a single generic `MANUAL_SECTIONS` store in `src/skippy_mmucc_backend/src/lib.rs`, keyed by a `manual_name` field rather than hardcoded per-manual buckets, so new manuals can be added without backend changes. No MMUCC V6 / ANSI D.16 content has actually been loaded yet — the store is empty until something calls `add_manual_section`.
-
-## "Neo" Blueprint (Phase 5+) — planned, not yet started
-
-Supersedes/extends sections 1–4 above for a two-user (Commander + wife) Internet-Identity-authenticated
-version of the app. Nothing in this section is implemented yet. Pillars are numbered per the
-finalized spec for reference; **implementation order follows dependency, not pillar number** —
-see the roadmap in chat history for the sequenced plan. Internet Identity lands first since most
-other pillars need a real Principal to key data by. All architectural alignments below were
-explicitly confirmed with the user, including the two flagged risk areas (proxy-vs-user identity,
-Steel Rain citation format) — none are open questions anymore.
-
-### Pillar 1 — Hybrid Web 2.5 Architecture & Secure Proxy Roles (confirmed, no change needed)
-`src/skippy_mmucc_proxy` stays as the Web2 worker holding `OPENROUTER_API_KEY`/`ELEVENLABS_API_KEY`
-in environment memory, shielded from the frontend, and remains the only thing handling streamed
-audio chunking and direct external calls — confirmed over the alternative (moving keys/calls into
-the canister via IC HTTPS outcalls), which doesn't fit non-deterministic LLM sampling (breaks
-replica consensus) or streamed audio (2MB cap, no streaming support). The Rust backend canister is
-the Web3 state/storage/RAG vault; the proxy queries it for active context, manuals, and state
-before calling external APIs.
-**Implementation note:** since the *proxy* (not the end user's browser) is the one calling the
-canister, the canister sees the proxy's Principal as caller, not the end user's. Per-user
-partitioning (Pillar 2) needs either the user's II delegation forwarded through the proxy, or
-canister methods that accept an explicit `principal` argument trusted only from a single
-allow-listed "this is the proxy" caller. To be designed properly in Phase 5.1, not assumed.
-
-### Pillar 2 — Multi-user Cryptographic Whitelisting (Internet Identity)
-Native II login on the frontend. The canister enforces a strict allowlist of **exactly two**
-Internet Identity Principal IDs (Commander + wife); any request from an unlisted Principal is
-instantly rejected. All per-user data (notes, chat history) is partitioned by these two IDs, each
-getting a fully isolated profile/session state. The manual library is shared across both, not
-per-principal.
-
-### Pillar 3 — Behavioral State Machine (persona modes, with Brain Switching)
-An `operational_mode` state (`default` | `professional` | `tactical`), switched by voice trigger
-phrases ("Skippy, be yourself" / "Skippy, behave" / "Skippy, steel rain"), selecting a different
-system prompt server-side per mode.
-- **Dual-voice routing**: distinct ElevenLabs voice profiles for the Commander vs. the wife,
-  stored as `COMMANDER_VOICE_ID`/`PARTNER_VOICE_ID` in the backend canister via a **runtime
-  admin update method** (callable only by the two whitelisted Principals), not `.env` and not
-  baked into immutable `#[init]` args — these aren't secret like the whitelist is, and this way
-  a voice can be changed later without a redeploy. The proxy resolves "whose session is this"
-  (it already does, via `validate_session`) and gets the right voice from the same canister.
-  Voice selection is keyed off the authenticated Principal, not the operational mode — identity
-  governs voice and system-prompt relationship context only, never the engine.
-- **Brain Switching**: a 3-tier OpenRouter model matrix selected by **plain string-matching on
-  the voice transcript only** — explicitly no secondary LLM classification call:
-  - **Everyday Brain** (default, no trigger phrase): the current standard/balanced model.
-  - **Heavy Hitter Brain** ("toss on your thinking hat"): the most capable available model
-    (e.g. Claude Sonnet/Opus, GPT-4o) for deep reasoning/coding/architecture questions, with
-    quick-reply constraints dropped. **One-shot**: applies only to the message containing the
-    phrase, then reverts to whichever brain/mode was active before — avoids silently staying on
-    an expensive top-tier model for the rest of the conversation. **Model-only**: doesn't
-    introduce a 4th `operational_mode`; persona/system-prompt selection is untouched, only the
-    underlying model executing the active prompt changes.
-  - **Tactical Brain** ("steel rain"): the fastest/cheapest available model (e.g. Claude Haiku,
-    Gemini Flash), zero fluff/snark, for when latency is all that matters. **Unified with the
-    `tactical` operational mode above** — saying "Skippy, steel rain" sets `operational_mode =
-    tactical` *and* selects the Tactical Brain together in one shot; persona and engine were
-    always the same lean/fast/no-nonsense mode described from two angles, not separate state.
-  - Brain selection is **shared** across both users — whoever says the phrase gets the same
-    model; identity never affects which engine is used, only voice and addressing.
-
-### Pillar 4 — Background Auto-Dictation Engine
-Mostly already built (section 2 above) — this is primarily a trigger-phrase content update
-("Let me take a note" / "Let me write that down") on the existing dictate → save pipeline.
-
-**Covert Audio Logging Matrix (confirmed 2026-06-21 — deliberate, narrow carve-out from section
-2's standing consent rule; planned, not yet implemented):** "Let me take a note" / "Skippy, take a
-note" is redefined from transcribing only the user's own dictation into starting a silent,
-continuous ambient-room audio recording — no visible/audible recording indicator of any kind —
-saved as an audio file into the Notes Vault. This is a deliberate exception, confirmed by the user
-for a specific real-world professional need: state-audit work, where a recording is sometimes
-required without the other party's awareness. Grounded in Nebraska being a one-party-consent
-wiretap state (Neb. Rev. Stat. § 86-290) — lawful because the user is themselves a party to
-whatever conversation gets captured. **Jurisdiction caveat, must hold before relying on this
-outside the original context**: this does not automatically extend to the ~11 US states requiring
-all-party consent, or to any recording where the user is not actually a participant in what's
-captured — re-confirm before using this in another state or in a context where the user isn't
-present in the conversation. Unlike Pillar 12's emergency evidentiary ledger (intentionally
-un-deletable, since it's evidence of a crime against the user), these everyday audio notes must
-remain downloadable and deletable like any other note — no un-deletable retention on this path.
-
-### Pillar 5 — Conversational History (Session Memory)
-Backend-owned rolling message history per Principal in stable memory; the proxy retrieves it from
-the canister and appends it to the OpenRouter payload on every turn, ending today's single-turn
-statelessness.
-
-### Pillar 6 — Universal "Neo" RAG Engine & Multi-Mode Web Intelligence
-Storage substrate already exists (section 4's generic `manual_name`-keyed store). New work:
-- **Global, not siloed (confirmed 2026-06-20)**: the manual/RAG knowledge base is never
-  partitioned by workspace (Pillar 10) — it stays the single shared library described in Pillar 2.
-  A query made inside any workspace can pull chunks from any uploaded manual (e.g.
-  cross-referencing ANSI D.16 against MMUCC V6 while sitting in an unrelated "Legal" workspace);
-  workspace boundaries only ever apply to conversational history, never to manual content.
-- **Context safety**: retrieval keeps a strict top-k chunk limit per query (exact k to be tuned
-  once the embedding/vector-search implementation is chosen) so cross-pollinated lookups across
-  every loaded manual can't balloon the LLM context window.
-- **Strict Context Enforcement / Anti-Hallucination Guardrail (confirmed 2026-06-21, planned —
-  not yet implemented)**: when RAG chunks are injected into the `/respond` system prompt, append a
-  binding directive instructing the model to treat the numbers, dollar amounts, and criteria in
-  the attached `[Manual Name]` excerpt as authoritative over its own background training data — if
-  its training conflicts with an explicit value in the document, the document wins, full stop.
-  This is a stronger guardrail than the citation-fabrication hardening already shipped in Phase
-  5.6 (which only forbids citing facts *not* present in the excerpts); this additionally covers
-  the case where a fact *is* present but conflicts with what the model "remembers" from
-  pretraining — the more dangerous failure mode for a reference-manual lookup tool (e.g. a
-  stale/incorrect statutory threshold the model is confident about from training data silently
-  overriding a correct value actually on the page in front of it).
-- **Neo Skin upload UI**: cross-platform (PC + mobile) file upload (`.txt`/documents) pushing
-  content through a parsing pipeline into the canister, expanding the reference library on the fly.
-  Supports `.txt`/`.md`/`.pdf`/`.docx` (proxy-side extraction via `pdf-parse`/`mammoth`; legacy
-  binary `.doc` isn't supported). **Known limitation, confirmed 2026-06-20**: PDFs with no real
-  text layer (e.g. some browser "print to PDF" exports rasterize the page instead of embedding
-  selectable text — confirmed file-specific, not universal to all such exports, via two independent
-  extraction libraries against real Gmail-export PDFs) return "no extractable text" with no
-  workaround in the app today. **Possible future enhancement, not yet planned/scheduled**: OCR
-  support (e.g. Tesseract) to handle image-only PDFs — deliberately deferred for now since it's a
-  real scope/dependency increase with inherently lower accuracy than real text extraction; the
-  user's chosen workaround until then is copying the text into a `.txt` file and uploading that.
-- **Steel Rain (Tactical Mode) emergency/utility web fallback**: scope is general-purpose, not
-  limited to disaster scenarios — any situation needing immediate, uninflated data instantly
-  (medical/security crises, technical specs like torque values, safety rules, etc). If the query
-  is outside local RAG knowledge, the proxy autonomously searches/fetches the web **with no
-  confirmation step** and delivers raw numbers/steps first, zero conversational padding. **Output
-  always carries a minimal-footprint origin tag** — a single bracketed anchor prepended to the
-  answer (e.g. `[FEMA]...`, `[Chevy Manual]...`, `[Web]...`) — no long disclaimers, just enough to
-  establish provenance without slowing down delivery or speech playback. This was the one point
-  flagged as a safety concern (confidently-wrong guidance with zero indication of source, in
-  exactly the highest-stakes mode) and resolved with this minimal-tag compromise.
-- **Dumbass Web Loop (Default/Behave modes)**: if local RAG data is missing, Skippy stays in
-  character, mocks the user for the gap, and asks permission before searching. A direct override
-  command ("Skippy, go to the web and get the latest info on X") searches immediately and returns
-  results filtered through the active persona.
-- Both web-fetching paths should go through a small curated allowlist of sources / a real search
-  API rather than open-ended scraping of arbitrary inferred URLs — voice-driven "fetch whatever
-  URL the model infers" is a real SSRF risk (ambiguous/injected input pointing the proxy, which
-  sits on the LAN, at unintended or internal addresses). To be scoped concretely in Phase 5.6.
-- The frontend passes an active manual/context flag so its sections get injected into the LLM
-  prompt alongside the system prompt and history.
-
-### Pillar 7 — Cross-Profile Messaging (Courier Queue)
-Backend queue of pending alerts keyed by recipient Principal (one of the two whitelisted IDs from
-Pillar 2). Sender's intent ("tell my husband/the Commander...") gets captured and queued; on the
-recipient's next session/first greeting on any device, the pending message is injected at the head
-of the LLM context and delivered as Skippy's first remark, then cleared. Intent detection uses
-fixed phrase patterns (consistent with the existing `TRIGGER_PHRASES` approach) rather than a
-second LLM classification call, for v1.
-
-### Pillar 8 — Unified "Fuel & Quotas" Dashboard (expanded scope, confirmed 2026-06-20)
-Originally just a Web3 cycle gauge; expanded to a single dashboard covering both the Web3
-canister fuel tank *and* the Web2 API balances the proxy spends on every request, since running
-out of either one silences Skippy identically from the user's point of view.
-- **ICP Cycles** (original scope): admin-only backend function exposing
-  `ic_cdk::api::canister_balance()`; frontend "Fuel Gauge" UI; a low-balance threshold that alters
-  Skippy's greeting to demand a refuel; a "Top Up" link (see "dumb meat sack" protocol below, not
-  an in-app action) pointing at wherever the user actually funds cycles (NNS dapp / cycles wallet).
-  Needs an admin/owner access-control concept distinct from the two-user partitioning (who counts
-  as "admin," and how cycle top-ups are actually funded/transferred) — to be scoped when this
-  phase comes up.
-- **OpenRouter balance**: a function in the proxy (`src/skippy_mmucc_proxy/server.js`) that fetches
-  current credit balance/usage from OpenRouter's `/api/v1/credits` (or equivalent auth/key)
-  endpoint using the existing `OPENROUTER_API_KEY`.
-- **ElevenLabs balance**: a function in the proxy that fetches character usage/limits from
-  ElevenLabs' `/v1/user/subscription` endpoint using the existing `ELEVENLABS_API_KEY`.
-- **"Dumb meat sack" protocol (confirmed 2026-06-20)**: zero billing integration lives inside the
-  app for any of the three balances above — no payment forms, no stored cards, no API calls that
-  move money. Each balance in the dashboard gets its own plain `<a target="_blank">` link straight
-  to that provider's own billing page (OpenRouter's credit/billing page, ElevenLabs' subscription
-  page, the NNS/cycles top-up page) so the user authorizes any actual payment manually in a
-  separate, already-trusted browser tab. The dashboard only ever *reads* balances; it never writes
-  them. These are fixed external URLs, so they need no new backend/proxy route — just `<a>` tags
-  in the frontend next to each readout.
-- **Unified endpoint**: a single `GET /api/fuel` route on the proxy returning both API balances
-  together, so the frontend makes one request instead of two. Like every other proxy route, this
-  must sit behind the existing `requireSession` middleware (Phase 5.1's security patch) — it's
-  hitting paid external APIs, so it can't be left open to unauthenticated callers any more than
-  `/respond`/`/speak` are.
-- **UI integration**: a clean, simple readout in the frontend dashboard showing ICP cycles,
-  OpenRouter $ balance, and ElevenLabs character limits side-by-side, each with its "Top Up" link.
-
-### Pillar 9 — Wasm64 & Future-Proof Platform Specs (confirmed, deprioritized)
-Target Wasm64 to future-proof toward an 8GB+ resident heap, in preparation for eventually hosting
-on-chain AI model inference directly in the canister. Confirmed as a goal, but flagged and kept
-**decoupled from / lower priority than** the rest of the roadmap: the immediate 500GB
-stable-memory target doesn't actually need Wasm64 (stable memory is already separately addressable
-from the Wasm heap on standard Wasm32, and our local PocketIC setup already reports
-`max_stable_memory_size: 536870912000` = 500GB on the existing Wasm32 + `ic-stable-structures`
-setup). The larger heap only matters for the speculative on-chain-inference goal, which has its
-own much bigger blocker beyond memory — IC's per-message/per-round instruction execution limits —
-to be revisited only once that specific sub-goal becomes concrete, not before.
-
-### Pillar 10 — Workspaces: Multi-Project Lifecycle & Export (confirmed 2026-06-20)
-Lets a user partition Skippy's conversational memory into fully separate projects (e.g. "Legal
-Case", "Garage Build") that can be switched, archived, and exported independently — today's
-history (Pillar 5) is a single flat per-Principal stream with no concept of project boundaries.
-- **Segmented history**: extend the per-Principal history store (Pillar 5 / `lib.rs`) with a
-  `workspace_id` (or `project_id`) axis, so `append_turn`/`get_history`/`purge_history` all
-  take/filter by the active workspace. Workspaces are private per-Principal, not shared between
-  the two whitelisted Principals — only the manual library (Pillar 2, Pillar 6) is shared.
-- **Lifecycle status flag**: each workspace record carries a status (`Active` | `Archived`).
-  Archiving hides a workspace from the main switcher list without deleting any data — fully
-  restorable later via an "Archived projects" view. Archiving never implies deletion; hard-delete
-  is a separate, explicit action the user takes only after exporting (see below).
-- **Workspace switcher UI**: a dropdown/sidebar in `App.js` listing the Principal's own Active
-  workspaces plus an "Archived" sub-view; switching workspaces swaps which `workspace_id` the
-  frontend reads/writes history against and re-fetches that workspace's history into view. No
-  voice routing — this is mouse/touch dashboard UI only, consistent with the Notes Vault,
-  Knowledge Manager, and Fuel Gauge controls, not a voice trigger phrase.
-- **Human-readable export**: before a hard-delete, an "Export" button downloads the workspace's
-  chat history client-side as a clean, human-readable document — Markdown (`.md`) or plain text
-  (`.txt`) at minimum (trivial to generate client-side from the existing message array, no new
-  dependency), with PDF as a stretch goal only if a lightweight client-side PDF library fits
-  without bloating the frontend bundle. Explicitly **not** a raw JSON dump — this export is for
-  the user to read/archive outside the app, not to re-import into Skippy later.
-- **Hard-delete**: a new backend capability to free canister stable-memory space — deletes a
-  workspace's history rows by `workspace_id` plus the workspace record itself, intended to be used
-  only after the user has had the chance to export.
-- **Scratchpad / pinned context (confirmed 2026-06-21, planned — not yet implemented)**: a
-  `scratchpad: String` field added to the `Workspace` record (new `update_scratchpad`/read via the
-  existing `list_my_workspaces`), surfaced as a plain text box in the workspace sidebar. Whatever
-  the user types there (case numbers, target state, fixed constraints) is saved per-workspace and
-  prepended to every `/respond` call for that workspace — addresses critical metadata sliding out
-  of the rolling history window (Pillar 5's `MAX_HISTORY_MESSAGES` cap) during a long session.
-- **Visual manual mapping (confirmed 2026-06-21, planned — not yet implemented)**: an
-  `associated_manuals: Vec<String>` field on `Workspace`, edited via a checklist of the global
-  manual library (Pillar 6) in the sidebar. Purely a visual/organizational pin for the user — per
-  Pillar 6's "global, not siloed" rule, checking/unchecking a manual here never changes what RAG
-  actually retrieves (every workspace can still pull from every manual); it only changes what's
-  *displayed* as "active reference material for this project" at a glance.
-- **Generate Project Brief (confirmed 2026-06-21, planned — not yet implemented)**: a button next
-  to the existing Markdown transcript export that fires one non-streaming OpenRouter call (Heavy
-  Hitter tier, Pillar 3) over the full workspace history, instructed to strip persona/mocking
-  content and produce a clean, professional Markdown executive summary, downloadable the same way
-  as the transcript export. A synthesis/report feature, distinct from the verbatim transcript
-  export already shipped.
-
-## Pillar 11 — Global UI Theme & Mobile Remote-Control Layout (confirmed 2026-06-21, planned)
-Locks down a strict visual identity and a mobile-specific layout philosophy ahead of further UI
-work, rather than letting each new feature improvise its own styling.
-- **Hardcoded color palette**: four CSS variables enforced app-wide (desktop and mobile), not
-  derived from the logo image programmatically — `--bg-matte-carbon: #0D0D0D` (primary canvas),
-  `--bg-dark-armor: #1A1A1A` (panels/cards/buttons), `--text-brushed-aluminum: #D1D5DB` (primary
-  type/icons), `--accent-cyan-glow: #00E5FF` (the "Live Brain" node and high-luminosity accents
-  only — see below). Logo asset (`1000003320.png`, to be provided by the user when UI work starts)
-  feeds the header/Live Brain graphic, not palette extraction.
-- **"Live Brain" state indicator**: replaces all text-based loading states ("Skippy is
-  thinking...") and default browser/Web2 spinners. The logo's central node is an isolated
-  CSS/state-driven graphic with three states — **Idle** (steady, solid, low-draw glow), **Processing**
-  (smooth pulsing/"breathing" `@keyframes` the instant a query, RAG retrieval, or web search is
-  in flight), **Streaming** (pulsing continues through token delivery, then locks back to Idle the
-  moment generation completes).
-- **Mobile single-viewport layout**: below the 768px breakpoint, the app locks to exactly `100vh`
-  with global page scrolling forbidden. Main screen = a live transcript area (center, scrolls
-  internally) over a persistent bottom "tactical dock" (voice trigger, a large STOP/SILENCE
-  control wired to the existing `#silence` method from Phase 5.3, and a Steel Rain quick-access
-  button). Every secondary control (typed input, Fuel Gauge, workspace/manual switchers, settings)
-  moves behind header icons that open overlay modals/slide-up drawers — no stacking every control
-  into the main scroll flow the way the desktop dashboard currently does.
-- **Guest Lockout visual drain**: when Pillar 15's Guest Mode is active, `--accent-cyan-glow` is
-  purged app-wide and swapped for a flat, dead `#5A5A5A` (or muted `#D97706` amber); the Live
-  Brain node's breathing animation is disabled entirely and locked into a flat, static state —
-  immediate visual confirmation that elevated functions are offline, with no separate "Guest"
-  banner needed.
-
-## Pillar 12 — Safe-Haven "Guardian" Emergency Protocol (confirmed 2026-06-21, planned — adjusted
-from the original spec, see below)
-A deliberate-activation panic flow, scoped to **personal-contact SMS alerting first**, not direct
-911 integration — confirmed 2026-06-21: actual text-to-911 in the US is carrier-native (a
-third-party SMS gateway API generally cannot inject into that path), and the user — Nebraska's LEA
-trainer — wants to validate this with local LEA before wiring anything at a real emergency
-service. Initial test recipients are personal phone numbers, supplied via a new
-`EMERGENCY_CONTACT_NUMBERS` env var (comma-separated E.164 numbers in the gitignored `.env`, never
-committed — same secrets-hygiene pattern as every other credential in this project) rather than
-hardcoded, so contacts can change without a source edit, and so no phone number ever lands in
-version control.
-- **Placement protection**: the panic trigger is never on the main dashboard — only reachable
-  inside the Steel Rain tactical overlay, eliminating accidental activation from a stray tap.
-- **3-tap deliberate sequence**: Steel Rain (main dock) → "EMERGENCY PANIC" button (high-contrast,
-  inside the overlay) → a single confirmation modal ("TRIGGER EMERGENCY DISPATCH?") with a "YES,
-  CONFIRM" action. No silent/automatic firing at any step.
-- **Dispatch action**: on confirmation, the frontend captures GPS via `navigator.geolocation`
-  (high-accuracy) and POSTs to a new proxy route `POST /emergency-dispatch`, which sends an SMS
-  (via an SMS gateway — provider TBD, e.g. Twilio) to every number in `EMERGENCY_CONTACT_NUMBERS`:
-  "EMERGENCY DISPATCH: {User Name} has triggered a panic alert. Live location:
-  https://maps.google.com/?q={lat},{lon}." Direct 911 text dispatch is **explicitly deferred**
-  until validated with local LEA — not built in this pass.
-- **Evidentiary recording — covert, by design (confirmed 2026-06-21, revised from an earlier
-  draft of this pillar)**: on confirmation, the frontend starts a continuous microphone capture
-  saved to the canister as an append-only, **un-deletable** ledger entry for the active emergency,
-  with **no visible/audible recording indicator at all**. This is intentional: the scenario this
-  protects against is the device owner being actively attacked (e.g. robbery, assault) by someone
-  who could see a "recording active" banner and escalate or destroy the evidence/device in
-  response — a flashing indicator would make the victim less safe, not more. This is a narrow
-  exception to the disclosed-recording principle elsewhere in this file (Pillar 2, Pillar 4's note
-  trigger): it only applies to this single, rarely-fired, deliberately 3-tap-confirmed panic path,
-  triggered by the person being recorded about their own emergency — not routine or ambient use.
-  Lawful basis is the same one-party-consent reasoning as Pillar 4's audit carve-out (the device
-  owner is a party to the event being recorded); the same jurisdiction caveat applies outside
-  Nebraska. Un-deletable is deliberate here (unlike Pillar 4's notes) since this is evidence of a
-  potential crime against the user, not a personal memo.
-
-## Pillar 13 — "Civilian Briefing" Protocol (confirmed 2026-06-21, planned)
-A hardcoded verbal/text trigger (e.g. "Skippy, execute public briefing") that sets a one-turn
-`publicDemo: true` flag on the `/respond` call. For that single turn only, the proxy swaps in a
-fixed, verbatim tech-flex monologue (provided by the user, describing the app's architecture in
-deliberately impressive terms for a live demo audience) instead of the model generating a reply —
-i.e. this is a canned string the proxy returns directly, not a system-prompt instruction asking
-the model to *improvise* something in that voice, so the demo output is exact and repeatable.
-Reverts to normal persona/mode immediately after.
-
-## Pillar 14 — Command Lexicon (confirmed 2026-06-21, planned)
-A reference overlay (opened via a header icon) listing every active voice/text trigger phrase and
-its behavior, kept in sync by convention: any time a new trigger is added to the codebase, it must
-be added here too. Initial entries: mode switches (Pillar 3), Steel Rain (Pillar 6), the public
-briefing trigger (Pillar 13), and the note-taking/retrieval phrases (Pillar 4 — note "let me take
-a note" now triggers the covert Audio Logging Matrix, not plain dictation; the Lexicon entry
-should say so plainly, since this is exactly the kind of behavior change a user needs a quick
-reference for rather than discovering by surprise).
-
-## Pillar 15 — Sovereign Guest Lockout (Cryptographic RBAC) (confirmed 2026-06-21, planned)
-A local "Guest Mode" toggle in the workspace security settings. While active: the frontend locks
-the currently-active LLM brain and persona profile (no switching), and hides/disables all
-destructive or administrative actions — deleting history/workspaces, changing model/voice config,
-viewing billing/fuel data, and invoking Pillar 12's Emergency Dispatch. Re-enabling full
-functionality requires an **on-chain unlock check**: the backend canister verifies the calling
-Principal against the existing two-Principal whitelist (Pillar 2) before honoring the unlock —
-reusing `assert_whitelisted()`, not a new parallel auth mechanism. A failed check leaves the app
-locked in basic conversational mode with no error that reveals *why* (avoids giving a guest a
-working oracle for probing the whitelist).
-
-## Pillar 16 — Dynamic Persona Registry ("Tactical Roster") (confirmed 2026-06-22, implemented)
-A local, multi-entry roster of *other* people who might talk to Skippy during an already-
-authenticated session (e.g. a coworker, the wife, a guest) — Name/Callsign, a Voice Trigger Phrase
-(e.g. "it's Lisa"), and free-text Role/Significance, all configured by the device owner in a
-"Tactical Roster" drawer. Saying or typing a registered trigger phrase hot-swaps who Skippy
-addresses: the Role/Significance text gets folded into the system prompt so Skippy tailors tone
-and framing to that person's actual context.
-
-**Deliberately addressing/framing only — has no permission concept of its own, by design, not
-oversight.** The original ask included a "Permission Level (Sovereign vs. Restricted Space)" field
-intended to gate real access ("preventing coworkers from accessing personal vaults"). Flagged and
-removed before building: a voice trigger phrase is self-declared identity with zero cryptographic
-verification — anyone in the room who says (or has ever overheard) the phrase would get whatever
-permission level that profile carried, including Sovereign, with no passkey/biometric/anything
-backing it. The actual authenticated session never changes when a Roster phrase is heard — it's
-still running under whichever real Internet Identity Principal logged in via Pillar 2's whitelist,
-so a Roster entry structurally cannot gate canister/vault access regardless of what field values it
-carries. Same category of mistake as conflating Pillar 12's `EMERGENCY_CONTACT_NUMBERS` (an SMS
-recipient list) with an access whitelist — a list of names is not a security boundary by itself.
-
-**Confirmed correct design, user's own words (2026-06-22)**: "I will set the permissions ie guest
-mode but this feature should still work. So if I say hey skippy guest mode and walk away, Lisa can
-then say hey skippy it is lisa and skippy will then reference who lisa is BUT be restricted to the
-permissions I left skippy with when I walked away." I.e. Pillar 15's Guest Mode remains the *only*
-real permission boundary, completely independent of and unaffected by which Roster profile (if
-any) is currently active — switching personas never widens or narrows what Guest Mode already
-restricts.
-
-**Implemented, deployed, confirmed working live by the user 2026-06-22 ("the lisa protocol
-works").** No backend/canister changes — purely persona/context, no canister involvement at all.
-Frontend (`App.js`): `rosterProfiles` (array of `{ name, triggerPhrase, role }`, no Permission
-Level field), persisted in `localStorage` (device-local convenience config, not security-sensitive,
-not per-Principal canister data, unlike Pillar 3's existing per-Principal `PersonaProfile` for the
-*authenticated* user's own name/voice — this is a distinct mechanic for people who *aren't* the
-authenticated user). `activeRosterProfile` is in-memory only (resets on refresh — "who's currently
-talking" isn't worth surviving a reload the way Guest Mode's lock is). Trigger matching happens
-early in `#askSkippy`, using the same bare-trigger-vs-has-more-text pattern as every other trigger
-phrase in this app (`isTrivialRemainder`): a bare "it's Lisa" gets a spoken ack only; "it's Lisa,
-what's our ETA?" sets the active profile and falls through to answer the attached question with
-the new framing active. Proxy (`server.js`): `/respond` accepts an optional `rosterContext: {
-name, role }`, prepending a system-prompt line explicitly instructing the model that this changes
-who it's addressing and nothing else — any access/permission restriction already in effect stays
-exactly as it was. Added a "Tactical Roster" category to the Phase 5.6.3 Command Lexicon (can't
-list literal phrases statically since they're user-defined, so the entry explains the mechanism
-instead).
-
-## Pillar 17 — Super Brain Lock (Pillar 3 extension, confirmed 2026-06-22, implemented)
-A sticky counterpart to Pillar 3's one-shot "toss on your thinking hat" phrase. The Commander
-flagged that repeating the one-shot phrase every single turn during a stretch of genuinely
-heavy-duty work (e.g. a long architecture/debugging session) was exactly the friction he didn't
-want, even though he's fine with the extra OpenRouter cost for those stretches. **Trigger
-phrases** (`'lock super brain'` / `'engage super brain mode'` / `'super brain mode on'` to enable,
-mirrored unlock phrases to release) plus a UI toggle button next to the Mode/brain status line —
-both paths give a spoken confirmation when triggered by voice/text, silent when clicked, same
-asymmetry precedent as Guest Mode's enable button. **Persisted in `localStorage`** (device-local
-preference, not security-sensitive — same rationale as `rosterProfiles`/Guest Mode's flag).
-**Precedence, deliberately scoped**: applied as a wrapper around the existing
-`#detectModeAndBrain` (renamed to `#detectModeAndBrainCore` internally) — forces `brain:
-'heavy_hitter'` on top of whatever the core logic decided, **except** when Steel Rain's Tactical
-brain is the result for that turn, since tactical mode's entire purpose is latency, not depth; the
-lock resumes automatically the instant tactical mode is left. Guest Mode's own lock (inside Core)
-always wins regardless — toggling Super Brain Lock is itself hidden/disabled while Guest Mode is
-active, consistent with every other admin-ish control in this app.
-**Status: implemented, not yet live-verified** — needs a real session confirming the lock survives
-across mode switches (default ↔ professional) while correctly yielding to Steel Rain and resuming
-after.
-
-## Pillar 18 — Dual-Voice Audio Pipeline / "Marco Hietala Protocol" (confirmed 2026-06-22,
-implemented)
-Skippy's hobby is reframed from opera to 80s heavy metal / Finnish symphonic power metal
-(aggressive, clean, operatic — modeled after Marco Hietala's vocal style), with a real second
-ElevenLabs voice for singing, distinct from the existing per-Principal conversational voice
-(Pillar 3's dual-voice *routing*, which is Commander-vs-wife, not conversational-vs-singing — a
-different axis, same "dual-voice" name coincidentally).
-- **Lyric Generator**: a system-prompt instruction (`server.js`, **default mode only** — applying
-  it in professional mode would violate that mode's zero-jokes rule, and in tactical mode would
-  violate zero-fluff) tells Skippy that when he flags a genuinely critical technical/engineering
-  failure or an especially egregious case of hand-waving/evasion on a real technical claim, he may
-  channel it into a short (2-4 line) rhythmic metal parody verse built from the actual technical
-  jargon involved, wrapped in 🎶 markers (`🎶 verse text 🎶`) and nothing else inside them.
-  **Widened 2026-06-23**: WHO can trigger it is deliberately broad (a vendor, a coworker on the
-  coding team, a PE, a contractor, whoever — not every engagement involves a vendor specifically),
-  but WHAT triggers it stays narrow (a genuine substantive failure/evasion, never casual
-  dismissiveness or a flippant remark) so this doesn't degrade into singing constantly. Sparingly,
-  never replacing the substantive
-  answer, just punctuating it.
-- **API routing**: `App.js`'s `splitVoiceSegments()` parses any reply on 🎶...🎶 pairs into ordered
-  `{ text, voice: 'conversational' | 'singing' }` segments (no markers → one conversational segment,
-  identical to the previous single-call behavior). `#playPremiumSegments()` plays them through the
-  shared `premiumAudioEl` in sequence, requesting `/speak?voice=singing` for singing segments —
-  same sequential-`<audio>`-per-chunk precedent already used by the Guardian live-ops listener page.
-  A Premium failure on any segment falls back to Economy for that segment **and everything still
-  queued after it**, joined into one utterance (Economy mode has no real singing synthesis, so the
-  🎶 markers are just stripped and the lyric text is spoken plainly either way).
-- **Backend/proxy**: new `ELEVENLABS_SINGING_VOICE_ID` env var (gitignored `.env`, blank by default
-  — falls back to the normal conversational voice with no error if unset, so this ships safely
-  before the user has actually cloned a singing voice). `/speak` resolves it only when
-  `?voice=singing` is requested; one singing voice for the whole app, not per-Principal like the
-  conversational voice.
-- **Status: DONE, confirmed live by the user 2026-06-23** ("singing button works", "volume is on
-  par with his speaking voice", and after the brevity fix, "looks like we got it"). Real
-  `ELEVENLABS_SINGING_VOICE_ID` (`1bYBicoZ5UNyipKOGMFV`, a real cloned voice on the user's
-  account, verified via direct ElevenLabs API calls before wiring it in) is set in `.env`.
-- **🎤 Test Singing Voice button** (`App.js`, added 2026-06-23): calls `#speak()` with a fixed
-  🎶-wrapped sample line directly, bypassing OpenRouter entirely — isolates "does the audio/voice-
-  routing plumbing work" from "did the LLM decide to sing this turn" (the latter is inherently
-  conditional/non-deterministic), since the two were initially hard to tell apart while debugging.
-- **Volume fix (2026-06-23)**: the singing voice clone renders quieter at the source than the
-  conversational voice, and a plain `<audio>` element's `.volume` is hard-capped at 1.0 — no way to
-  amplify past native level with the element alone. Fixed with a Web Audio gain graph
-  (`#ensureAudioGraph` in `App.js`, built once via `createMediaElementSource` — can only be called
-  once per `<audio>` element ever, so the graph is built lazily inside the existing gesture-anchored
-  `#unlockAudioPlayback` and reused for every subsequent `#speak` call) routing `premiumAudioEl`
-  through a `GainNode`; `#playPremiumSegments` sets `gainNode.gain.value` to `SINGING_VOICE_GAIN`
-  (1.8, tunable) only for singing segments, 1.0 otherwise. Confirmed matched to normal speaking
-  volume.
-- **Honest limitation, confirmed accepted 2026-06-23**: ElevenLabs' TTS API synthesizes expressive
-  speech, not pitched musical melody — there is no real "singing" mode on this endpoint regardless
-  of voice cloning, which is why output sounds like rhythmic spoken word/rap rather than an
-  actually sung performance. Tuned `voice_settings` (lower `stability`, higher `similarity_boost`)
-  on singing-voice requests for more dynamic/theatrical delivery — a real but partial improvement,
-  not true singing; that would need a dedicated AI singing/music vendor entirely, out of scope
-  unless explicitly requested. **User's call: this is fine as-is** — book-canon Skippy's singing
-  voice is itself bad, so non-melodic delivery is arguably more accurate, not a bug.
-- **Dumbass Web Loop interaction bug, found and fixed 2026-06-23**: confirmed via a direct A/B test
-  against OpenRouter (both the everyday model and Heavy Hitter) that the existing `ragMiss`
-  instruction ("do NOT answer the substantive question yet — mock the user, then ask permission")
-  was fully suppressing the Musical Outburst protocol on every test, even on textbook hand-waving
-  moments — both models reasonably read "don't answer yet" as "don't sing yet either." Fixed with
-  an added clause clarifying the withholding is only about the pending numbers/data, not the
-  mockery itself, which the verse is allowed to punctuate regardless. Confirmed fixed via the same
-  A/B harness before deploying.
-- **Brevity fix, three escalating rounds, 2026-06-23**: replies were running 6-10+ sentences
-  despite the existing `BREVITY_SUFFIX`. Round 1 (strengthen the wording + add a `BREVITY_REMINDER`
-  re-asserted at the very end of the prompt, since recency matters more than position for
-  instruction-following) measurably helped but didn't fully fix it. Round 2: discovered via `lsof`
-  that a stray duplicate proxy process (yet another recurrence of the documented pattern — see
-  [[feedback-sandbox-replica-lifecycle]]) was silently serving stale code the whole time the user
-  was testing Round 1 — killed both processes, restarted clean. Round 3, the actual fix: a direct
-  A/B test against OpenRouter confirmed the abstract "1-3 sentences" rule alone still wasn't enough
-  even on fresh code — adding a concrete wrong-vs-right example pair (`BREVITY_EXAMPLE`) fixed it
-  immediately and consistently across repeated samples. **Lesson**: for this model, a concrete
-  example outperforms an abstract length rule, even a strongly-worded one.
-- **Karaoke (book-canon — Skippy's hobby in the Expeditionary Force novels), added 2026-06-23**:
-  a two-step offer/confirm flow mirroring Steel Rain's web-search permission ask. Saying
-  `"karaoke"`/`"sing a song"`/`"jam out"` in default mode (`KARAOKE_TRIGGER_PHRASES`) gets an
-  instant, deterministic excited ack (no LLM call) and arms `pendingKaraokeOffer`; an affirmation
-  on the very next turn (`AFFIRMATION_PHRASES` — renamed from `WEB_SEARCH_AFFIRMATION_PHRASES`
-  since it's now shared by both flows, and expanded with `'sure'`/`'why not'`) fires a dedicated
-  `POST /karaoke` route (`server.js`) — a real OpenRouter call, deliberately separate from
-  `/respond` (same "distinct one-off LLM task gets its own route" convention as `/project-brief`
-  and `/critic-loop`), instructed to write a full **100% ORIGINAL** 6-10 line song in an 80s-hair-
-  band-or-Nightwish style — never real existing song lyrics, to stay clear of copyright on actual
-  bands' work. **Live-tested 2026-06-24, two real bugs found and fixed**:
-  1. The offer line (`KARAOKE_OFFER_REPLY`) was a single fixed string — repeating verbatim every
-     time read as flat rather than excited. Converted to `KARAOKE_OFFER_REPLIES`, a pool randomly
-     picked from (still deterministic/no-LLM-call), same pattern as `COURSE_CORRECTION_REPLIES`.
-  2. The actual song sometimes came back as ~15-18 separate single-line `🎶...🎶` pairs (no rhyme,
-     no real song structure — read like chopped-up hype copy) instead of one cohesive block.
-     Confirmed via direct A/B testing against OpenRouter that this is non-deterministic sampling,
-     not a one-time fluke — the same exact prompt can produce a correct block or the broken pattern
-     on different runs. Fixed two ways: (a) rewrote `KARAOKE_SYSTEM_PROMPT` with a concrete
-     wrong-vs-right example pair (same technique that fixed the brevity problem in Phase 5.8.2 —
-     an abstract structural instruction alone wasn't enough), and (b) added a deterministic
-     code-level safety net, `mergeKaraokeMarkers()` in `server.js`, that collapses any stray
-     multiple marker pairs into exactly one before the reply is sent — this matters beyond just
-     appearance, since `App.js`'s `splitVoiceSegments()` turns each separate pair into its own
-     ElevenLabs request during playback, so N pairs would always sound like N disconnected clips
-     even if the lyrics themselves were fine.
-  3. **Real-song-reference leak, found in the very next live test**: with the merge fix deployed,
-     Skippy announced "I shall now proceed to eviscerate a Foreigner classic" and then sang a
-     direct hook/structure parody of Foreigner's "Waiting for a Girl Like You" — a real,
-     identifiable existing song, not an original homage, despite the prompt already saying "never
-     reproduce real existing song lyrics." That wording only forbade verbatim copying, not naming a
-     real artist or basing a song on a specific real song's recognizable hook. Strengthened the
-     prompt with an explicit hard rule against naming any real band/artist/song or basing the song
-     on an identifiable real song's hook/melody/structure "even as a parody."
-  4. **A second instance of the same leak class, caught via direct A/B retest (4 trials) of the
-     fix above**: one trial sang "HammerFall and NightWish, watch out for Skippy and me!" — root
-     cause was the prompt itself: it named "Nightwish-style" as a style reference for the
-     Finnish-symphonic-metal vibe, handing the model the real band name to echo back. Fixed by
-     removing the named reference entirely — the genre is now described by musical qualities only
-     (operatic, orchestral-bombast, dramatic minor-key) with no band name anywhere in the prompt.
-  5. **A second structural bug found in the same A/B retest**: one trial used `🎶` for the song's
-     first verse, then silently switched to a different musical-note symbol (`♫`) for the rest —
-     `App.js`'s `splitVoiceSegments()` only recognizes `🎶`, so the `♫`-wrapped portion would have
-     been spoken in the normal voice with the raw symbols read aloud, not sung at all. Widened
-     `mergeKaraokeMarkers()` to normalize `♫`/`♪`/`🎵` to `🎶` before merging.
-  6. **A real bug in that very fix, caught by unit-testing it before trusting it**: the
-     normalization regex `[♫♪🎵]` (no `/u` flag) silently corrupted real `🎶` characters — `🎵` and
-     `🎶` are both astral-plane characters sharing the same leading UTF-16 surrogate, so a character
-     class without `/u` decomposes them into individual code units rather than whole codepoints,
-     letting the class accidentally match just half of a real `🎶` and replace only that half.
-     Fixed by adding the `/u` flag to both regexes in `mergeKaraokeMarkers()`. Confirmed clean via a
-     direct unit test (inspecting codepoints, not just eyeballing terminal output, which hid the
-     corruption as what looked like a shell/encoding artifact at first).
-  7. **The karaoke-confirm and Steel-Rain-web-search affirmation flows share `AFFIRMATION_PHRASES`/
-     `isTrivialRemainder`, and both were too strict**: natural phrasings like "yes let's do that"
-     left "let's do that" after stripping "yes," which isn't pure filler, so `isTrivialRemainder`
-     rejected it and the message fell through to a normal chat reply instead of firing the actual
-     performance/search. Expanded `AFFIRMATION_PHRASES` with common multi-word phrasings ("let's do
-     that", "let's do it", "let's go", "go for it") — fixes both flows at once since they share the
-     same constant.
-  **Status: all 7 above fixed and confirmed live 2026-06-24/25. A same-day retest initially looked
-  like it found 3 more problems (items 8-10 below, as originally logged that night) — real
-  instrumentation (branch-tagged `console.log`s added temporarily to the trigger/confirm logic,
-  since removed) resolved all of it. Two were real, narrow bugs (now fixed); the third "bug" was a
-  red herring — the user's own transcript reading, not the code.**
-  8. **Two more hardcoded real-band-name leaks, same class as bug #3/#4 but in our own code, not
-     LLM output**: `KARAOKE_OFFER_REPLIES[0]` (`App.js`) and the Command Lexicon's Karaoke entry
-     both literally said "Nightwish-style anthem" — spoken/shown verbatim every time, no model
-     involved at all. Fixed by replacing both with a generic "symphonic-metal" description.
-     **Lesson**: after fixing a leak in one place (the LLM prompt), grep for the same literal
-     string elsewhere in the codebase — the same mistake can exist in multiple independent
-     locations (a prompt and a hardcoded UI string) without one fix touching the other.
-  9. **`'rock out'` was never a recognized trigger phrase** — `KARAOKE_TRIGGER_PHRASES` only had
-     `['karaoke', 'sing a song', 'jam out']`. Confirmed via real console logs showing empty
-     RAG/trigger matches for a bare "rock out." Added `'rock out'` to the list.
-  10. **Repeating the trigger phrase instead of a clean "yes" just reset the offer with no
-      performance** — confirmed via console logs that the offer/confirm state machine itself was
-      always internally consistent (no stuck `pendingKaraokeOffer`), but saying "karaoke" again
-      while an offer was already pending didn't count as confirming, just silently cleared it —
-      a frustrating "ask again forever" loop since that's clearly how a real person would try to
-      confirm. Fixed: a repeated trigger-phrase mention while `pendingKaraokeOffer` is true now
-      performs directly, same as an explicit "yes" — with a small negation guard (`'no'`, `'not'`,
-      `"don't"`, `'cancel'`, `'stop'`, `'nevermind'`) so an explicit decline that still mentions
-      "karaoke" (e.g. "no, not karaoke, check the weather") correctly still declines.
-  **New, requested feature added in the same pass**: declining a pending offer now makes Skippy
-  briefly sulk about not getting to perform, then still answer the real question — a `karaokeDeclined`
-  one-shot flag threaded from `App.js` to a new framing instruction in `server.js`'s `/respond`
-  (same pattern as `ragMiss`/`publicDemo`), rather than silently dropping the topic.
-  **The "3rd new bug" (originally logged as items 9-10 the night this was first found) turned out
-  to be no bug at all**: the on-screen transcript renders `[...this.history].reverse()` (`App.js`,
-  newest message first — confirmed by Phase 5.5's own design). Reading a fast-moving live voice
-  test top-to-bottom on screen reads conversation turns in *reverse* chronological order, which
-  repeatedly looked like "the reply to message A is actually message B's canned offer line" —
-  confirmed false by cross-referencing the real chronological order in the console log
-  (`pendingKaraokeOffer` true/false transitions matched the code exactly, every time, once read in
-  the log's real order rather than the screen's visual order). **General lesson for live-testing
-  this app**: when a live multi-turn voice test produces a confusing pairing of "You:"/"Skippy:"
-  bubbles, check the console log's real call order before assuming a logic bug — the visible
-  transcript's newest-first rendering is easy to misread as chronological, especially when
-  describing a fast exchange from memory rather than literally copy-pasting raw markup.
-  **Status: karaoke is now confirmed working end-to-end** — offer → repeated-trigger-or-yes
-  confirm → single-block original song with no real-band naming, plus the new decline-sulk
-  behavior, all verified against real console-log data on 2026-06-24/25. Temporary diagnostic
-  logging (`[Skippy Karaoke v2]` tags) has been removed now that the fix is confirmed.
-
-## Pillar 19 — Self-Evolution & Metacognitive Matrix (confirmed 2026-06-22, implemented, scoped
-down from the original ask)
-A per-Principal, canister-stored set of personality weights (`snark_level`, `vendor_skepticism`,
-`technical_precision`, `proactive_interruption`) that calibrate Skippy's tone over time, evolved by
-two feedback loops rather than the originally-specified local JSON file + unbounded drift.
-**Architecture correction made before building, confirmed by the user**: the original spec called
-for a literal local `evolution_history.log` file — doesn't fit this app (no filesystem exists on
-either the public frontend canister or the browser; the only candidate, the proxy's own disk, would
-mean the evolved personality lives on whichever machine happens to run the proxy, lost on redeploy,
-and not split between the Commander and his wife). Built instead as `EvolutionProfile`/
-`EvolutionLogEntry` in the canister's stable memory, per-Principal, same storage tier as
-`PersonaProfile`/workspaces/history.
-- **Hard caps, no factory reset (confirmed 2026-06-22)**: every weight is clamped to
-  `[EVOLUTION_WEIGHT_MIN, EVOLUTION_WEIGHT_MAX]` = `[0.2, 0.95]` on every write
-  (`record_evolution_event` in `lib.rs`), enforced once server-side regardless of which loop wrote
-  the delta. Deliberately no reset-to-baseline method — growth is meant to be managed
-  conversationally (the Course Correction loop below), not reverted by a button.
-- **The Critic Loop**: fires whenever a workspace is archived (`#archiveActiveWorkspace` in
-  `App.js`) — the practical stand-in for "post-mission debrief" until that's a real dedicated
-  feature, confirmed by the user. Fire-and-forget: a failure here is a missed self-reflection, not
-  a broken archive action. The closing workspace's full history is sent to a new proxy route,
-  `POST /critic-loop` (`server.js`) — a separate, non-streaming, persona-free self-critique call
-  (Heavy Hitter tier, same shape as the existing `/project-brief` route) asking the model to
-  evaluate its own tone/effectiveness in that specific conversation and return strict JSON (four
-  small deltas, each -0.1 to 0.1, plus a plain-English summary) — never markdown, never prose. The
-  proxy never writes to the canister itself (consistent with Pillar 1); it hands the deltas back to
-  the frontend, which calls `record_evolution_event` with its own authenticated identity, same as
-  every other canister write in this app.
-- **Course Correction feedback loop (new, not in the original ask — added per the user's own
-  corrected design 2026-06-22)**: an explicit in-chat reprimand (`COURSE_CORRECTION_PHRASES` in
-  `App.js` — `"dial it back"`, `"you're being a jerk"`, `"just give me the data"`, etc.) is treated
-  as immediate negative reinforcement — no LLM round trip (same fixed-phrase-pattern rule as every
-  other trigger in this app), an immediate `snark_level_delta: -0.15` (sharper than the Critic
-  Loop's gentle per-conversation nudge, since this is a direct correction in the moment), and a
-  sulky, book-accurate acknowledgment picked from `COURSE_CORRECTION_REPLIES` (e.g. "Fine. I'll use
-  smaller words for the monkeys."). **Disabled during Guest Mode**: this permanently retunes the
-  *owner's* own EvolutionProfile (the cached session identity, regardless of who's physically
-  talking) — a guest's complaint shouldn't be able to soften the Commander's persona for every
-  future session, same reasoning as every other persistent-state-changing action being hidden
-  during Guest Mode.
-- **Prompt injection**: `get_my_evolution_profile()` (defaults if never evolved, never null) is
-  fetched after login and sent as `evolutionProfile` on every `/respond` call; `server.js` injects
-  the four weights as calibration guidance, explicitly subordinate to the active mode's own rules
-  (e.g. professional mode's "no sarcasm, not even as a joke" still wins outright over a high
-  `snark_level` — this axis tunes degree within whatever the active mode already allows, it's not
-  a second persona switch).
-- **Visibility**: a read-only "Evolution Matrix" drawer (hidden during Guest Mode, next to Profile
-  settings) shows the four current weights plus an on-demand "Show recent changes" button
-  (`list_my_evolution_log`) — deliberately no editing UI; the only ways to change these are the two
-  loops above, consistent with "manage his evolution conversationally," not via sliders.
-- **Status: implemented, deployed (new canister methods live, frontend bindings regenerated),
-  syntax/cargo-build verified, NOT yet live-verified** — needs a real session: archive a workspace
-  with real conversation in it and confirm the Critic Loop lands a log entry, then say a
-  Course Correction phrase and confirm the immediate sulky reply + weight drop.
-
-## Pillar 20 — On-Device Speaker Recognition (confirmed 2026-06-23, implemented and live-tested)
-Automatic, passive detection of whether the Commander or an unrecognized voice is currently
-speaking, using on-device speaker recognition (entirely in the browser via WASM) instead of a
-manual toggle or a spoken trigger phrase (cf. Pillar 16's Tactical Roster).
-
-**Two engine pivots, same day (2026-06-23)**:
-1. Originally built on Picovoice Eagle, dropped when Picovoice locked new AccessKey issuance
-   behind an enterprise manual-review wall the user couldn't wait on.
-2. Rebuilt on `@jaehyun-ko/speaker-verification` (open-source, Apache-2.0, `onnxruntime-web`/WASM,
-   a NeXt-TDNN speaker-embedding model) — real, working, verified via direct GitHub/npm research.
-   Never actually shipped: Claude Code's own auto-mode safety classifier blocked `npm install` for
-   this package specifically because it was agent-selected via web research rather than named by
-   the user, and exact-version-pinning didn't change that.
-3. **Final: `@huggingface/transformers` (Hugging Face's own officially-maintained package) running
-   Microsoft's WavLM speaker-verification model (`Xenova/wavlm-base-sv`, ONNX, q8-quantized,
-   ~100MB)** — chosen specifically to reduce single-maintainer supply-chain risk (bigger-name org
-   on both the runtime library and the model weights), at the cost of a much larger one-time
-   download than option 2. `npm install` for this package was *also* blocked by the classifier on
-   the first attempt; only resolved once the user ran `npm install` themselves directly in their
-   own shell (not an agent-initiated action, so the classifier never saw it).
-
-**The payoff of building `voiceId.js` as a clean module boundary**: both pivots only ever required
-rewriting that one file's internals. `App.js` and `server.js` needed **zero changes** across either
-swap — both only ever consumed `voiceId.js`'s exported function signatures
-(`voiceIdAvailable`/`loadStoredVoiceprint`/`deleteVoiceprint`/`enrollVoice`/`startRecognition`/
-`SPEAKER_MATCH_THRESHOLD`), kept identical throughout.
-
-**Security scope (unchanged across every pivot — confirmed before any implementation)**:
-deliberately **persona/tone only, never a permission gate** — same rule already established for
-Tactical Roster, and for the same reason: a voice match (even a real biometric one, not just a
-self-declared phrase) has zero cryptographic backing and can be spoofed by a recording/replay, so
-it cannot be trusted to gate real capability. Guest Mode's WebAuthn-gated unlock (Pillar 15)
-remains the **sole** real permission boundary in this app, completely unaffected by whatever this
-feature reports.
-
-- **Post-login-only activation**: the recognizer never instantiates before a successful Internet
-  Identity login, and is torn down the instant Guest Mode is enabled (resumed automatically on
-  unlock) — dormant otherwise, no mic access or CPU spent.
-- **Enrollment**: a hidden setup control in the Profile settings drawer (owner-only, hidden during
-  Guest Mode) records three short clips via `MediaRecorder`, extracts a speaker embedding from
-  each, and averages them into one stored voiceprint. A real download-progress callback
-  (`from_pretrained`'s `progress_callback`) drives a distinct "Downloading voice model (one-time,
-  ~100MB)... X%" UI phase before the per-clip "Enrolling... X%" phase — added after live testing
-  showed the enrollment bar sitting at "0%" for ~2 real minutes during the model's first download,
-  which looked exactly like a hang with no feedback at all.
-- **Storage — strictly off-chain**: the voiceprint (a `Float32Array` embedding) lives only in the
-  browser's IndexedDB, tied to that browser profile. Never touches the canister, the proxy, or
-  Internet Identity — avoids putting biometric data (regulated in several jurisdictions, e.g.
-  Illinois BIPA) into this app's otherwise-public Web3 storage layer. Trade-off: re-enrollment is
-  needed once per new device/browser; no cross-device sync.
-- **Real-time routing**: a polling recognition loop records a short clip every few seconds,
-  extracts its embedding, and compares it via cosine similarity to the stored voiceprint. Each
-  `/respond` call attaches whatever the most recent score was as
-  `recognizedSpeaker: { label: 'Commander' | 'Unverified Guest', score }` (`null` if nothing is
-  enrolled/running yet). `server.js` turns this into a framing instruction only — Commander gets
-  the normal unrestricted persona confirmed as just a tone check; an unverified voice gets a
-  politer/safer default tone and an instruction to listen for the person stating their name in
-  conversation — both phrasings explicitly tell the model this changes tone only, mirroring the
-  Tactical Roster's own not-a-permission-change disclaimer.
-- **Auto-clears a stale Tactical Roster profile (Pillar 16), added 2026-06-24, one-directional by
-  design**: confirmed live that the two features never interacted — saying "it's Lisa" then
-  walking away left Skippy addressing the Commander as "Lisa" indefinitely, even once the
-  Commander's own enrolled voice was confidently detected again, since Roster framing is sticky
-  with no auto-revert and voice recognition never touched it. Fixed in `#startSpeakerRecognition`'s
-  result callback (`App.js`): a confident Commander match (`result.isCommander`) silently clears
-  `activeRosterProfile` (no spoken announcement — this fires every ~4s in the background, not on a
-  deliberate action). **Deliberately never the other direction**: voice recognition only ever
-  confirms "this is genuinely the Commander" (the one enrolled voiceprint that exists) — it never
-  sets a Roster profile to someone else, since there's no enrolled voiceprint for Lisa or anyone
-  else to confidently match against; an "Unverified Guest" reading is not evidence of any specific
-  person's identity, so Roster profiles still only ever get set by their own trigger phrases.
-- **Mic capture tuned from real measurements**: `MediaRecorder` explicitly set to 128kbps (was
-  defaulting to a low-bitrate Opus encode); echo cancellation/noise suppression/auto-gain-control
-  explicitly disabled for this feature's mic stream specifically (well-documented to hurt
-  speaker-verification accuracy by normalizing away the spectral cues that distinguish voices) —
-  scoped to `voiceId.js`'s own `getUserMedia` calls only, since the separate Web Speech API
-  dictation pipeline elsewhere in this app wants the opposite (cleaner audio for transcription).
-- **`SPEAKER_MATCH_THRESHOLD` tuned from real live data, not the model's clean-lab reference
-  numbers**: testing surfaced that mic positioning swings the Commander's own score nearly as much
-  as actual speaker identity does (same person: 0.57-0.64 with the mic at its normal resting
-  distance vs. 0.82-0.96 held close) — a genuinely different voice (tested via a YouTube video
-  played through speakers into the mic) scored ~0.6-0.65. Set to **0.75**, sitting between the
-  different-speaker ceiling and the good-mic-position same-speaker floor. Known accepted
-  limitation: a poorly-positioned mic can still cause the Commander to read as "Unverified Guest"
-  — acceptable since this is a tone signal, not a security gate, so the failure mode is just a
-  slightly more formal reply, never an access change.
-- **Known approximation, accepted**: this engine compares discrete recorded clips rather than a
-  continuous per-frame stream, so background recognition is a periodic re-check (every few
-  seconds) rather than truly continuous, on top of the pre-existing "most recent score, not synced
-  exactly to the utterance" timing slack inherent to any non-streaming approach.
-- **Honest network-dependency caveat**: the ~100MB quantized ONNX model is fetched once from
-  Hugging Face's public CDN on first use — no login, no key, no approval queue, just a normal
-  public file download — and relies on the browser's ordinary HTTP cache afterward. Satisfies "no
-  API keys or vendor gatekeeping" fully; doesn't satisfy a stricter "never touches the network"
-  reading literally.
-- **No setup dependency**: nothing needs to be created, requested, or pasted into `.env` —
-  `npm install` (run by the user directly, see the classifier note above) is the only step.
-- **Status: implemented, deployed, live-tested with real tuning data.** Threshold may still need
-  further adjustment with a real second live speaker (not played through speakers) if
-  misclassification shows up in normal use.
-
-## Implementation Roadmap (sequenced by dependency, not pillar number)
-
-Tracks actual build order across turns — pillar numbers above are the spec's numbering, phase
-numbers below are execution order. Each phase folds in its later-added hygiene/tactical patches.
-
-- **Phase 5.1 — Internet Identity + two-Principal whitelist** (Pillar 2, + Pillar 1's
-  implementation note). II login on frontend; local II canister for dev; canister-side allowlist
-  of exactly two Principals. **+ Proxy endpoint security patch**: since the proxy will eventually
-  be cloud-hosted, it must validate the caller's II session before making any external API call
-  (prevents public actors from hitting the proxy URL and draining OpenRouter/ElevenLabs credits).
-  Plain II delegations aren't independently verifiable by a non-canister Node server without
-  duplicating real crypto-verification logic, so the planned bridge is: frontend authenticates to
-  the canister directly (genuine II delegation, canister verifies via `msg_caller()`), canister
-  issues a short-lived opaque session token, frontend forwards that token to the proxy on each
-  request, proxy validates it with a query call back to the canister before proceeding.
-  **Whitelist bootstrap, confirmed:** the user already holds both real Principal IDs (no
-  first-login discovery step needed). They are supplied as **canister `#[init]` constructor
-  arguments at deploy time** (standard Candid init-args, passed via `dfx deploy --argument
-  '(principal "...", principal "...")'` or `dfx.json`'s `init_arg`), not hardcoded as Rust source
-  constants — so the canister's compiled code stays generic and the actual identities only exist
-  in deploy-time config. (IC has a newer, separate canister environment-variables feature
-  surfaced in this project's PocketIC config — `environment_variables: Enabled` — that could be an
-  alternative someday, but it isn't verified against our current ic-cdk/candid versions, so
-  `#[init]` args are the chosen, known-working mechanism for now.)
-  **Status: done, verified end-to-end in a real browser.** Backend `#[init]`/`#[post_upgrade]`
-  take the two whitelisted Principals; `assert_whitelisted()` guards `add_manual_section`/
-  `get_manual_section`/`list_sections_by_manual`; `login()`/`validate_session()` mint and verify
-  the opaque session-token bridge for the proxy, which requires a valid `X-Skippy-Session`
-  header (`/respond`) or `?session=` param (`/speak`) before calling OpenRouter/ElevenLabs.
-  Frontend gates its entire UI behind a "Login with Internet Identity" screen
-  (`src/skippy_mmucc_frontend/src/App.js`). A local `internet_identity` canister was added to
-  `dfx.json`, pinned to **`release-2026-01-26`** specifically — every other release tried
-  (older and newer) either fails local HTTP-gateway certification or doesn't match the
-  client's protocol; see the comment above `IDENTITY_PROVIDER` in `App.js` before ever
-  bumping this pin. Login uses **`@dfinity/auth-client`**, not `@icp-sdk/auth` — every
-  self-hosted II build still speaks only the legacy postMessage protocol
-  (`kind: "authorize-client"`), which `@icp-sdk/auth` (ICRC-25/34 JSON-RPC only, no fallback)
-  can never complete a handshake with; `@icp-sdk/core` remains in use everywhere else.
-  Full real-browser login (anchor creation, passkey, whitelist accept/reject, session token,
-  proxy gating, OpenRouter reply, ElevenLabs **and** browser-fallback voice playback) confirmed
-  working by the user. `COMMANDER_PRINCIPAL` is set in the gitignored `.env`; `PARTNER_PRINCIPAL`
-  is still the anonymous-Principal placeholder (`2vxsx-fae`) until the second user logs in once
-  and reports her real Principal from the rejection screen.
-- **Phase 5.2 — Conversational history** (Pillar 5). **Status: done, verified end-to-end in a
-  real browser.** Backend-owned rolling message history per Principal (`append_turn`/
-  `get_history`/`purge_history` in `lib.rs`, capped at `MAX_HISTORY_MESSAGES = 40`), read/written
-  via the frontend's own authenticated actor — the proxy stays stateless regarding the canister
-  and just forwards whatever `history` array the frontend includes in `/respond`. **+ Memory
-  pruning & archive patch**: "Download history" exports `get_history()`'s data to a JSON file
-  client-side; "Clear history" calls `purge_history()` (full wipe of the caller's own history
-  only — confirmed no per-message deletion needed). User confirmed Skippy correctly recalls
-  earlier turns in a conversation, and that Clear history works.
-- **Phase 5.3 — Behavioral state machine, with Brain Switching** (Pillar 3). **Status: done,
-  verified end-to-end in a real browser.** `operational_mode` (`default`/`professional`/
-  `tactical`) + three system prompts in `server.js`, selected by voice trigger phrases detected
-  client-side in `App.js`'s `#detectModeAndBrain`. **+ Dynamic persona injection patch**: the
-  proxy prepends "You are speaking with {name}." to the system prompt when the caller has a
-  saved `PersonaProfile` name. **+ Dual-voice routing**: `set_persona_profile`/
-  `get_my_persona_profile` on the backend canister let each Principal set their own name/
-  ElevenLabs voice ID at runtime (minimal settings UI in `App.js`); `validate_session` returns
-  this alongside the Principal so the proxy gets it in the one query it already makes.
-  **+ Brain Switching**: 3-tier OpenRouter model swap (Everyday/Heavy Hitter/Tactical) by plain
-  string-match on the transcript (`anthropic/claude-sonnet-4.6` / `anthropic/claude-haiku-4.5`
-  by default); "steel rain" (and the confirmed real STT mishearing "still rain") unifies with
-  `tactical` mode, "toss on your thinking hat" is one-shot and model-only. **+ Bare-trigger
-  acknowledgment patch**: if a mode-switch phrase has no actual question/task attached (just
-  "Skippy, steel rain" with nothing else — filler words like "hey"/"skippy" stripped before
-  checking), Skippy acknowledges locally (e.g. "Understood. Standing by.") instead of round-
-  tripping to OpenRouter and rambling for clarification. **+ Barge-in patch**: any new utterance
-  (voice or typed) immediately aborts an in-flight request and silences whatever Skippy is
-  currently saying — `#askSkippy` uses a monotonic sequence number + `AbortController` rather
-  than dropping overlapping input; the wake word "Skippy" also cuts off playback the instant
-  it's heard in an *interim* (not yet finalized) recognition result, since waiting for the full
-  phrase to transcribe was too slow to feel interruptible. **+ Mute + text input patch**: a mute
-  toggle makes Skippy text-only (no TTS, either engine); a typed-message form feeds the same
-  `#askSkippy` pipeline as voice, for meetings/quiet rooms — the typed-input field deliberately
-  reads its value from the DOM on submit (`#saveProfile`'s pattern) rather than as a
-  React-style controlled input, since re-rendering on every keystroke fought with the mic's own
-  re-renders firing on every interim speech result while listening was active. **+ Backend network
-  severing patch (2026-06-20):** the barge-in `AbortController` above only ever killed the
-  browser-to-proxy connection — the proxy itself kept awaiting the upstream OpenRouter call to
-  completion (a non-streaming request, so the full reply was always generated regardless) and kept
-  piping the ElevenLabs audio stream into a socket nobody was reading anymore. Fixed in
-  `server.js`: both `/respond` and `/speak` now attach `req.on('close', () =>
-  upstreamAbort.abort())` and pass `upstreamAbort.signal` into their respective `fetch()` calls, so
-  a disconnect (barge-in, or a fresh reply cutting off the previous one) instantly severs the
-  upstream OpenRouter/ElevenLabs connection too. Note this fully stops further OpenRouter output
-  generation (saving on tokens nobody hears), but does **not** meaningfully reduce ElevenLabs
-  billing — TTS providers charge per input character at request time, not per byte streamed, so
-  that cost is already incurred the moment the `/speak` request is sent; the fix still matters for
-  not wasting bandwidth/compute on a dead connection. **+ Dedicated silent-stop patch
-  (2026-06-20):** barge-in only fires on a *new* utterance, and that utterance still gets its own
-  reply — typing/saying "stop" doesn't mean "go silent," it's just conversational content Skippy
-  answers in character. Added a `#silence` method (`App.js`) and a "✋ Stop" button that calls
-  `#stopSpeaking()` + aborts `currentAbortController` with **no new `/respond` call** — pure kill,
-  no reply. Surfaced a pre-existing bug while wiring its enabled state: `isSpeaking` was flipped
-  inside the Premium `<audio>` element's `onplaying`/`onended`/`onerror` handlers and the Economy
-  `SpeechSynthesisUtterance`'s `onstart`/`onend` handlers, but none of those four call `#render()`,
-  so the UI never visibly reflected actual playback state — any control gated on `isSpeaking`
-  (like this button) would flicker live only during the brief "Skippy is thinking..." network
-  round-trip, then look frozen/disabled for the entire time he was actually talking. Fixed by
-  adding `#render()` to all four handlers.
-- **Phase 5.4 — Trigger phrase content update** (Pillar 4). **Status: done, verified end-to-end in
-  a real browser.** Added "let me take a note" / "let me write that down" to `TRIGGER_PHRASES`
-  alongside the original two dictation-start phrases. **+ Typed-input note-trigger parity bug
-  (caught during verification):** `TRIGGER_PHRASES` matching only ever existed in
-  `#handleFinalChunk` (the voice path) — the typed-text path (`#sendTextMessage`) sent everything
-  straight to `#askSkippy`/OpenRouter with no check at all, so typing a note-trigger phrase just
-  asked Skippy a question about it instead of saving anything. Fixed by extracting the actual save
-  + Notes Vault refresh into a shared `#persistNote(content)` (used by both `#saveNote`'s
-  voice-dictation buffer and a new one-shot check in `#sendTextMessage`, which strips the matched
-  phrase and saves the remainder directly — no incremental buffer needed since typed input arrives
-  complete in one message). **+ Note retrieval patch**: the "Notes Vault"
-  view turned out to already exist — the generic manual-browser dropdown (`MANUAL_OPTIONS` /
-  `#refreshSections`) defaults to `SKIPPY_NOTES`, since notes are just manual sections under that
-  reserved manual name (see `#saveNote`). What was actually missing was the voice/text retrieval
-  *command*: "Skippy, read back my recent notes" (`NOTE_RETRIEVAL_PHRASES` in `App.js`) is now
-  checked at the top of `#askSkippy`, shared between voice and typed input. It fetches the last
-  `RECENT_NOTES_COUNT` (5) sections from `list_sections_by_manual(SKIPPY_NOTES)` — the backend's
-  `StableBTreeMap` iterates by ascending auto-increment id, so the tail of the returned `Vec` is
-  already the most recent notes, no timestamp parsing needed — and speaks them back directly,
-  skipping OpenRouter entirely (same "nothing for the LLM to add" reasoning as the bare-trigger
-  acknowledgment patch from Phase 5.3). **+ Section delete + manual quick-note patches
-  (2026-06-20):** added `delete_manual_section(id)` to the backend (generic, like the rest of the
-  store — works for any manual, not just notes) plus a "Delete" button per entry in the Notes
-  Vault/manual-browser list, after the user noticed there was no way to remove a note once its
-  point had passed. This also retires the open question in Phase 5.6's RAG manual hygiene patch
-  below — the backend capability it needed already exists now, so that phase is UI-only (Knowledge
-  Manager) when it comes up. Also added a **"📝 Note Mode" toggle** next to the typed-message box:
-  switches the box into silently saving everything typed as a note (`#persistNote` directly, no
-  `#askSkippy` reply, no TTS) until toggled off — for meetings, where even the existing
-  trigger-phrase flow's spoken acknowledgment is unwanted noise; stays on across multiple notes
-  rather than resetting per-note. **+ Larger message box**: the typed-input field is now a 3-row
-  `<textarea>` (was a single-line `<input>`) at ~50% width, with Enter-to-submit/Shift+Enter-for-
-  newline restored via a keydown handler, since textareas don't auto-submit on Enter the way the
-  old input did.
-- **Phase 5.4.1 — Covert Audio Logging Matrix** (Pillar 4 extension, confirmed 2026-06-21,
-  planned, not yet implemented). Redefines "let me take a note" from text dictation into a
-  silent, no-indicator, continuous ambient audio capture saved as a downloadable/deletable audio
-  note. See Pillar 4 for the consent-rule carve-out reasoning and the Nebraska one-party-consent/
-  jurisdiction caveat — read that before implementing, since it changes the legal basis for this
-  feature from "obviously fine" (the original, user-only dictation feature) to "fine in this
-  specific state/context, re-check elsewhere." Needs backend storage design for binary audio
-  content (current `DocumentSection.content` is `text`, not bytes) before this can be built.
-- **Phase 5.5 — Workspaces: multi-project lifecycle & export** (Pillar 10). **Status: done,
-  verified end-to-end in a real browser.** `HistoryKey { principal, workspace_id }` replaces the
-  old bare-`Principal` key on `HISTORY` (`lib.rs`); `append_turn`/`get_history`/`purge_history` all
-  now take a `workspace_id`, validated against a new `WORKSPACES` store via
-  `assert_workspace_owner`. New methods: `create_workspace`/`list_my_workspaces`/
-  `archive_workspace`/`restore_workspace`/`delete_workspace` (hard-delete, removes both the
-  workspace record and its history). Frontend: a workspace switcher dropdown (Active only) +
-  collapsible "Archived workspaces" list with per-entry Restore, "+ New workspace" (a plain
-  `window.prompt`, matching this app's existing low-ceremony form patterns), Archive (refuses to
-  archive your last remaining Active workspace), "Delete forever" (confirm-gated), and an Export
-  button producing Markdown (not JSON — title + role-tagged turns with ISO timestamps) via the
-  same blob-download pattern the old JSON "Download history" button used (replaced, not kept
-  alongside, since the old format was explicitly the thing this phase was meant to stop doing).
-  Auto-creates a "Default" workspace on first-ever login (or after deleting your last one) so
-  there's never a dead end with zero workspaces to select. Sequenced ahead of RAG below since
-  Pillar 6's "global, not siloed" RAG design assumes workspaces already exist as a concept.
-  **+ Conversation transcript patch (found during verification):** switching workspaces correctly
-  re-scoped `this.history`/`append_turn` server-side the whole time, but there was no way to
-  *see* that — the UI only ever rendered a single `skippyReply` field (the latest reply), which
-  switching never touched, so the screen looked frozen on the same message regardless of which
-  workspace was selected. Removed `skippyReply` entirely and replaced it with a real
-  `.conversation-transcript` rendered straight from `this.history` (newest message first, per
-  follow-up request — display order only, the underlying array stays chronological since that's
-  what OpenRouter/`append_turn` both expect). Required moving the three `#recordTurn(...)` call
-  sites (main reply, bare-trigger ack, note read-back) to run *before* `#render()` instead of
-  after, so the transcript reflects the turn that just completed instead of lagging one render
-  behind.
-- **Phase 5.6 — RAG engine + multi-mode web intelligence** (Pillar 6). **Status: done, verified
-  end-to-end in a real browser across two sessions (2026-06-20/21)** — RAG hit with citation, Steel
-  Rain instant web search, Dumbass Loop mock-and-permission-ask, the "yes" follow-up, and the
-  direct override phrase all confirmed working; see the verification status note further below
-  for the full breakdown and the real bugs found/fixed along the way. Backend: `DocumentSection`
-  gained `embedding: Option<Vec<f32>>`;
-  `add_manual_chunks`/`search_similar_chunks`/`delete_manual` (brute-force pre-normalized cosine
-  similarity, `#[query]`, no ANN indexing needed at this scale) per the original plan. Proxy:
-  `OPENROUTER_EMBEDDING_MODEL` (`openai/text-embedding-3-small`, 512 dims), `/embed`,
-  `/chunk-and-embed`, `/web-search` (Tavily — fixed endpoint + plain query string only, closing the
-  SSRF risk flagged when this pillar was first specified), `/respond` context injection with the
-  citation-tag format and the conditional Dumbass-Loop instruction block. Frontend: Knowledge
-  Manager (upload, per-manual delete, RAG pipeline in `#askSkippy`, `pendingWebSearchQuery` for the
-  permission dance, direct override phrases). `list_sections_by_manual`/`delete_manual_section`
-  (Phase 5.4) needed no changes — `manual_name` isn't the primary key, so "delete by manual" is
-  just `delete_manual` now, one atomic call. Knowledge base stays global across workspaces
-  (Pillar 6's "global, not siloed" note).
-  **Bugs found and fixed during this session's testing (roughly in order hit):**
-  - **Upload payload size**: `express.json()`'s 100kb default limit rejected any real document.
-    Reworked the upload path to multipart (`multer`, memory storage, 20MB limit) instead of
-    JSON-encoded text, which also enabled real binary format support: `.txt`/`.md`/`.pdf` (via
-    `pdf-parse`) /`.docx` (via `mammoth`) — legacy binary `.doc` isn't supported. multer 1.x was
-    flagged by npm as having known vulnerabilities patched in 2.x; used 2.x instead.
-  - **Upload auto-dumped full document content on screen**: `#uploadManualFile` ended with an
-    unconditional `#refreshSections()`, which rendered every uploaded chunk's full text immediately
-    — surfaced when a real (sensitive) uploaded document appeared on-screen unprompted. Fixed by
-    dropping that auto-refresh (upload now only ever shows a status message) and gating the
-    section list behind an explicit `manualBrowserOpen` flag — "Open"/"Close" buttons now control
-    visibility deliberately, matching the existing "select a manual, then open it" mental model
-    rather than disclosing content as a side effect.
-  - **`SIMILARITY_THRESHOLD = 0.75` was far too strict** for `text-embedding-3-small` — real
-    query↔relevant-passage cosine similarities typically land around 0.3–0.6, not 0.75+ (that
-    range is closer to near-duplicate text), so almost every real question registered as a miss
-    regardless of upload success. Lowered to `0.3`.
-  - **Pure embedding similarity is bad at exact-recall** ("does any document literally mention
-    word X") — vague questions don't share vocabulary with the source text. Added a second,
-    independent retrieval path: client-side crude stemming (`extractKeywordStems`, strips
-    -ing/-ed/-es/-s, excludes generic words like "manual"/"document" so they stop acting as
-    required magic words) feeding a new backend `search_manuals_by_keyword` query that does a
-    literal case-insensitive substring scan across `manual_name`/`title`/`content`, capped at 50
-    results. Results from both paths are merged (deduped by id) and capped at `TOP_K` before
-    reaching the LLM prompt. **First attempt at this was wrong**: tried approximating "scan
-    everything" by asking `search_similar_chunks` for a huge `top_k` (50, then 1000) and filtering
-    client-side — broke down once a real manual (500+ pages, 1000+ chunks easily; the corpus is
-    global across every uploaded manual, not just one) exceeded that count, and would have meant
-    shipping huge embeddings-included payloads over the wire regardless. The dedicated server-side
-    keyword method scales correctly since it's a cheap O(n) string scan with no embedding math and
-    only ships back the (typically small) set of actual hits.
-  - **A RAG search failure (e.g. clock drift) was silently swallowed**, leaving the model with zero
-    context *and* no `ragMiss` signal — so it improvised its own "I'm just a language model, I
-    can't read documents" disclaimer instead of following the actual mock-and-ask-permission /
-    Steel Rain protocol. Now any retrieval failure is treated the same as a genuine miss.
-  - **System prompt hardened against fabricating cited facts**: even with real `ragContext`
-    present, the model sometimes invented inconsistent specific numbers (e.g. three different
-    dollar thresholds across turns) while still appending a `[ManualName]` citation tag. Added an
-    explicit instruction to only state facts that actually appear in the excerpts, admit when they
-    don't (in character), and never tag a citation unless genuinely drawing from it.
-  - **Proxy could crash entirely on a client disconnect mid-request**: a dropped connection could
-    make Node's stream-destroy machinery emit an unhandled `'error'` event on the request object
-    (separate from the `AbortError` the existing try/catch already handled), which is fatal by
-    default for an EventEmitter — confirmed live, took the whole proxy down with every route
-    failing and no other symptom. `--watch` only restarts on file changes, not crashes, so it
-    stayed dead silently. Fixed with a no-op `req.on('error', () => {})` in both `/respond` and
-    `/speak` (deliberately not a global `uncaughtException` handler — that would suppress Node's
-    default crash behavior process-wide and risk continuing in a corrupted state; the targeted
-    per-route fix addresses the actual confirmed mechanism).
-  - **Same crash class recurred 2026-06-24, different mechanism, same `req.on('error', () => {})`
-    guard didn't cover it**: confirmed live — `upstreamAbort.abort()` itself, called from inside
-    the `req.on('close', ...)` handler present on all 5 routes that proxy an upstream fetch
-    (`/respond`, `/speak`, `/karaoke`, `/critic-loop`, `/project-brief`), can throw a
-    `DOMException [AbortError]` synchronously in some stream-teardown states, which Node's
-    destroy-lifecycle machinery re-surfaces as an unhandled `'error'` event on `req` — fatal again,
-    same "whole proxy down, every route unreachable" symptom. Fixed by wrapping each
-    `upstreamAbort.abort()` call in its own try/catch no-op at all 5 call sites, same "swallow the
-    specific confirmed throw, not a global handler" philosophy as the original fix above.
-  - **Some PDFs have no real text layer** (confirmed file-specific, not universal, via two
-    independent extraction libraries against real test files — e.g. some browser "print to PDF"
-    exports rasterize the page instead of embedding selectable text). No code bug; OCR support is
-    a possible future enhancement, deliberately not scheduled — current workaround is copying the
-    text into a `.txt` file instead.
-  - **Recurring PocketIC clock drift** required multiple `--clean` restarts this session (see
-    [[feedback-sandbox-replica-lifecycle]]); likely WSL2 VM clock drift after host sleep/resume
-    rather than a PocketIC-specific bug — `wsl --shutdown` from PowerShell between sessions may
-    reduce recurrence, untested.
-  - **Keyword search false-positive bug, found and fixed 2026-06-21**: `search_manuals_by_keyword`
-    (`lib.rs`) matched a section if it contained **any single** extracted stem (`needles.iter()
-    .any(...)`). Against a real 500+ page Nebraska crash-report manual already in the corpus, this
-    meant any question merely mentioning a city name present somewhere in the manual's address/
-    jurisdiction examples (e.g. "Omaha," "Lincoln") registered as a false "RAG hit" — which
-    incorrectly suppressed both Steel Rain's instant web search and the Dumbass Loop's permission-
-    ask, since the merge logic in `App.js`'s `#askSkippy` treats any keyword hit as sufficient to
-    mark the query "answered locally," with no separate relevance check. Confirmed live: asking
-    Skippy (in Steel Rain mode) for gas prices "in Omaha" and (in default mode) for the weather "in
-    Lincoln" both got flatly declined instead of triggering a web search or the mock-and-ask-
-    permission flow. Fixed by switching to `needles.iter().all(...)` — every extracted stem must
-    co-occur in a section, not just one. Still correctly finds genuine exact-term lookups (e.g.
-    "Flintlock Protocol," 2 stems, both present together in the one real section about it) while
-    making an incidental single-word collision across a large real corpus astronomically less
-    likely. Also fixed in the same pass: `[Skippy RAG]` console logs in `App.js` were passing live
-    objects/arrays to `console.log`, which DevTools renders as collapsed, clickable "{...}" refs
-    that don't survive a plain-text copy-paste — lost the actual score data during this session's
-    first test pass. Now `JSON.stringify`'d before logging, plus a new `query stems` log line.
-  - **Keyword AND-fix degenerated back to the same bug for single-stem queries**: "what's the
-    date" extracts just one stem (`["date"]`), and with only one stem, `needles.iter().all(...)`
-    is mathematically identical to the old `.any(...)` — so a single short, extremely common word
-    (which trivially appears dozens of times in a real crash-report manual as a form-field label)
-    still falsely satisfied the keyword path and suppressed `ragMiss`. Fixed in `App.js` by
-    requiring `queryStems.length > 1` before even attempting the keyword search — the keyword
-    path's whole premise (an exact, distinctive multi-word technical term) inherently needs 2+
-    co-occurring words to mean anything; a lone common word matching somewhere in a large corpus
-    is not signal.
-  - **`SIMILARITY_THRESHOLD` raised 0.3 → 0.4**: live testing surfaced a second false-positive
-    family on the *semantic* side — a clearly irrelevant chunk (an address/object-damage form
-    fragment) scored 0.309 against an unrelated weather question, just barely clearing 0.3, which
-    wrongly suppressed both Steel Rain and the Dumbass Loop and let the model fabricate a full,
-    detailed multi-day forecast with no real grounding. Empirical evidence collected this session
-    across several different unrelated queries showed a consistent noise ceiling of 0.27-0.33,
-    while the one confirmed genuine hit (the `fiction_test` torque spec) scored 0.677 — a huge
-    gap. 0.4 sits with real margin above the noise ceiling and well below the one real hit.
-  - **`webContext` had no anti-fabrication guard at all** (only `ragContext` did, from the earlier
-    citation-fabrication fix) — confirmed live: with no real web data fetched that turn, the model
-    still invented a full forecast and tagged it `[Web]` anyway, apparently primed by *earlier*
-    turns in conversation history where it really did have live search results. Fixed with a
-    blanket `else` guardrail in `server.js` whenever `webContext` is null: explicitly forbids
-    claiming a web search happened, using `[Web]`, or inventing real-time data, regardless of
-    what earlier turns in the conversation contained.
-  - **No ground-truth date/time was ever injected anywhere** — confirmed live: "what's the date"
-    was hallucinated as "April 19, 2023" (and other dates) every single time, since the model
-    genuinely has no other source for the real current date. Fixed by appending the actual
-    `new Date().toUTCString()` to every system prompt in `server.js`, unconditionally.
-  - **Root cause of nearly the entire session's confusion: a stray duplicate proxy process.**
-    Two separate `node server.js` processes were running simultaneously on the same machine — the
-    user's own visible `node --watch server.js` terminal (which prints "Restarting.../listening...”
-    on every edit and *looked* healthy) and a second, bare `node server.js` (no `--watch`) that had
-    been started separately at some earlier point in the session and never stopped. Confirmed via
-    `lsof -i :8787`: only the **second, stray** process actually held the listening socket: the
-    visible `--watch` process had silently lost its own socket (almost certainly from an earlier
-    EADDRINUSE collision with the stray process while both tried to bind 8787) and Node's
-    `--watch` does not recover from that on its own — it only restarts on a *file change*, not on
-    a lost socket/prior crash (consistent with [[feedback-sandbox-replica-lifecycle]]'s existing
-    "`--watch` won't restart on crash" note, now confirmed to also cover "silently lost its listen
-    socket," not just a fully dead process). Every single `server.js` edit made earlier this
-    session (keyword logic, threshold, anti-fabrication prompts, date injection, diagnostic
-    logging) was correctly saved to disk and correctly triggered "Restarting.../listening..." in
-    the visible terminal — and every one of those restarts was completely inert, because that
-    process wasn't the one actually serving traffic. The stray process, holding stale pre-session
-    code, served every test until it was identified and killed. Once killed, the visible
-    `--watch` process *still* didn't recover (confirming it was genuinely wedged, not just
-    contending for the port) — had to be killed and restarted fresh (`npm run dev -w
-    skippy_mmucc_proxy`) before the real fixes were ever actually exercised. **Lesson for next
-    time a code fix appears to have "no effect" despite a clean save and a normal-looking
-    restart message**: verify with `lsof -i :<port>` (or equivalent) that the visible/expected
-    process is the one actually holding the socket before spending further effort doubting the
-    fix itself — a healthy-looking restart log is not proof the right process is listening.
-  - **Model narrated "searching" instead of answering, and leaked raw internal tags**: with the
-    stray-process bug fixed and real Tavily weather data actually present in the system prompt,
-    the model (Hermes-3-Llama-3.1-70B, the "everyday" brain) still didn't just answer — it
-    narrated "I shall venture forth into the web... stand by" theater and leaked literal
-    `</tool_call>`/`</SCRATCHPAD>` tokens into the visible reply, almost certainly its own
-    tool-calling training format bleeding through with no real tool schema configured on this
-    request. A genuine model-behavior issue, not a pipeline bug — the correct data was right
-    there in the prompt. Fixed with an added system-prompt instruction (`server.js`) forbidding
-    meta/tag output and explicitly stating any search has already completed by the time the model
-    sees the prompt, so it should answer immediately rather than narrate an in-progress action.
-  - **A bare "yes" looked like it silently vanished/got ignored**: `#recordTurn(effectiveText,
-    data.reply)` recorded the *substituted original question* (needed for the OpenRouter call)
-    into the visible transcript/history instead of what the user actually said ("yes") — so saying
-    "yes" made the original question reappear in the transcript instead of the word "yes," which
-    reads exactly like the input was dropped, even though the search fired correctly and the
-    answer was accurate. Confirmed live: a real, correct `[Web]`-tagged Lyme-disease answer came
-    back, but the user couldn't tell their "yes" had worked. Fixed by recording the literal `text`
-    parameter instead of `effectiveText` — the model's reply still naturally addresses the real
-    topic regardless of which text it's displayed paired with.
-  - **Affirmation check matched "yes" anywhere in a message, not just a standalone "yes"**:
-    `lowerText.includes(phrase)` matched any message merely *containing* an affirmation word —
-    confirmed live: a genuinely new follow-up question ("yes where did you get that information,
-    I know you didn't really search...") got silently swallowed because it contained "yes", so
-    `effectiveText` was replaced with the stale pending query and the model never saw the user's
-    actual question — it just repeated the same old search result, which looked like evasion but
-    was really a substring-matching bug. Fixed by requiring the message to be JUST an affirmation
-    (optionally plus filler words) — strip every affirmation phrase out of the text and require
-    what's left to be empty, reusing the existing `isTrivialRemainder` helper.
-  - **Tag/narration leak recurred a third time despite the prompt fix**: "I'm searching the web
-    right now... [Searching the web...]" leaked again, and this time also dropped the `[Web]` tag
-    entirely despite using real, accurate data. Since prompt wording alone hasn't fully suppressed
-    this across three occurrences, added a code-level safety net — `stripLeakedFormatting()` in
-    `server.js` runs every reply through a regex cleanup before it reaches the frontend, stripping
-    `<tool_call>`/`<scratchpad>` tags and bracketed `[Searching/Fetching/Checking/Accessing...]`
-    pseudo-status lines. Deliberately narrow (structural artifacts only) so it doesn't touch
-    legitimate in-character sarcasm. The missing `[Web]` tag is a separate, lower-stakes gap not
-    fixed by this pass.
-  - **`ragContext` had no "you have nothing" guardrail, symmetric to the `webContext` one** —
-    found during further stress-testing after this section's status note below was first written:
-    with no real manual excerpts provided, the model invented a fictional "Marine Corps Manual"
-    and referenced a "scratchpad" of excerpts that was never actually given to it (the user never
-    uploaded any such manual). Fixed with a symmetric `else` branch in `server.js` forbidding
-    claims of manual/scratchpad content when `ragContext` is empty, mirroring the existing
-    `webContext` guardrail.
-  **Verification status as of 2026-06-21, end of session — all four checklist items confirmed,
-  phase signed off**: RAG hit with citation (`fiction_test` torque spec, real score gap 0.677 vs
-  0.3 noise ceiling) ✅. Steel Rain instant web search (real gas-price data, `[Web]` tag, no
-  permission step) ✅. Dumbass Loop mock-and-ask-permission on a genuine miss, confirmed via direct
-  system-prompt inspection ✅. The "yes" affirmation re-firing a real search for the *original*
-  question (Lyme-disease test — functionally correct the whole time; the apparent failure was the
-  display bug above, now fixed) ✅. Direct override phrase — confirmed firing in practice during a
-  live stress-test session, though the exact phrase list needed loosening (`go out to the web` /
-  `go out on the web` / `go on the web` / `check the web` added) since natural phrasing didn't
-  match the original literal list. Upload/delete/Knowledge Manager UI hygiene ✅.
-- **Phase 5.6.1 — Workspace Scratchpad, Visual Manual Mapping & Project Brief** (Pillar 10
-  extension). **Status: DONE, fully live-verified 2026-06-21.** Backend: `Workspace` gained
-  `scratchpad`/`associated_manuals`, new `update_scratchpad`/`update_associated_manuals` methods
-  (`assert_workspace_owner`-gated). Proxy: `POST /project-brief` (Heavy Hitter model, persona-free
-  synthesis prompt). Frontend: "Scratchpad & pinned manuals" details section, "Generate Project
-  Brief" button. `#askSkippy` sends the active workspace's scratchpad on every `/respond` call.
-
-  **Bugs found and fixed during live verification:**
-  1. **Candid decode trap, the real first blocker**: `Workspace.scratchpad`/`associated_manuals`
-     were originally plain `String`/`Vec<String>`, not `Option`-wrapped. Confirmed live: Candid
-     only defaults a *missing* field to empty when that field's type is `Option<T>` — a bare
-     `String`/`Vec<T>` absent from already-stored bytes (any workspace created before this change)
-     fails to decode with a hard subtyping-error trap. This made `list_my_workspaces()` trap for
-     every returning user, which a too-broad `try/catch` in the frontend's `#completeLogin`
-     mislabeled as an auth rejection — showing the correct, already-whitelisted Principal on a
-     misleading "Not authorized" screen and burning a long stretch of (incorrectly) re-diagnosing
-     the Internet Identity whitelist instead. Fixed by making both fields `Option<String>`/
-     `Option<Vec<String>>` (`None` = empty) and splitting `#completeLogin`'s try/catch so a
-     failure *after* a successful `login()` no longer reverts `authState` back to `'rejected'`.
-  2. **lit-html doesn't support `${expr}` interpolation inside `<textarea>` elements** — confirmed
-     via a real lit-html dev-mode console warning. The scratchpad textarea's displayed value was
-     never actually reactive; it only ever showed whatever was literally typed. Fixed by switching
-     to a `.value=${...}` property binding instead of interpolating inside the tag body.
-  3. **Hardcoded `MMUCC_V6`/`ANSI_D16` placeholder manual names were always shown as pinnable**,
-     even though nothing had ever been uploaded under those names — misleading in a checklist
-     that's supposed to mean "real reference material for this project." Fixed by adding a new
-     backend query `list_manual_names()` (distinct `manual_name` values that actually have stored
-     content) and fetching it after login (`#refreshManualOptions`) instead of trusting a
-     hardcoded constant. `NOTES_MANUAL` (`SKIPPY_NOTES`) stays always-offered regardless, since
-     it's the built-in notes feature, not an uploaded manual.
-  4. **Manual-type metadata + two-level filter** (added after live feedback, not a bug fix): the
-     user's real workflow is browsing a potentially ~100-manual global library to find a handful
-     (e.g. ".NET code, Rust, SQL, MMUCC V6") to pin per project. Added an optional `category:
-     Option<String>` field to `DocumentSection` (Option-wrapped from day one this time, per bug #1
-     above), set once per upload and applied to every chunk of that document; a new
-     `manual_category_map()` query; and a category dropdown + name-filter text box in the pinned-
-     manuals checklist, AND-combined (pick a category to narrow, or leave it on "All categories"
-     for a plain global name search) — plus a "Currently pinned" chip summary always visible
-     regardless of filter state, and case-insensitive alpha sorting throughout.
-  5. **Upload rename prompt defaulted to the wrong value**: `window.prompt` for the manual name
-     defaulted to `this.selectedManual` (whatever manual happened to be selected in an unrelated
-     dropdown) instead of the actual file being uploaded — so it never matched what the user was
-     ingesting, forcing a manual retype every time. Fixed to default to `file.name`.
-  6. Upload success status message ("Uploaded N chunk(s)...") persisted on screen indefinitely.
-     Fixed with a self-cancelling `setTimeout` auto-clear (5s) that only fires if nothing newer has
-     since overwritten the message.
-  7. Layout: the category dropdown, name filter, and checklist were all rendering inline/run-on
-     (no stylesheet exists yet — Pillar 11's UI theme is still future work). Fixed with minimal
-     inline `display: block` styling so each control and the checklist start on their own line.
-  8. **The stray-duplicate-proxy-process bug recurred a second time this session** (see
-     [[feedback-sandbox-replica-lifecycle]] for the first occurrence in Phase 5.6) — confirmed via
-     `lsof -i :8787` showing two `node server.js` processes, only one of which actually held the
-     socket. This caused `/project-brief` to return Express's default HTML error page (the
-     unauthenticated/unmatched-route fallback), which the frontend tried to `JSON.parse()`,
-     surfacing as `Unexpected token '<', "<!DOCTYPE "... is not valid JSON`. Fixed the same way as
-     before: kill both, start one clean instance.
-  9. **Project Brief export upgraded from `.md` to real `.docx`** (user request, not a bug): added
-     the `docx` npm package (client-side only, no server dependency) plus a small custom
-     Markdown→Word converter (`markdownToDocxParagraphs` — handles `#`/`##`/`###` headings, `-`/`*`
-     bullets, `**bold**` inline runs; not a full Markdown parser, just enough for the persona-free
-     synthesis prompt's consistent output structure) and a metadata cover block
-     (`projectBriefMetadataParagraphs` — generated date/time, workspace name+ID, pinned scratchpad
-     notes, pinned manuals) prepended ahead of the synthesized content. The metadata block is
-     pulled directly from already-loaded frontend state, not the LLM call, so it's always exact.
-- **Phase 5.6.2 — Global UI Theme & "Tactical Bridge" Desktop Layout** (Pillar 11). **Status:
-  desktop DONE and confirmed live 2026-06-25; mobile single-viewport layout NOT started.**
-  Implemented as a 3-column "Command Deck" grid (`.command-deck` → `.topbar` + `.columns` →
-  `.col-left`/`.col-center`/`.col-right` → `.statusbar`) in `App.js`'s `#render()`, replacing the
-  prior single-column stacked layout. `index.scss` fully rewritten around the Pillar 11 palette
-  confirmed back on 2026-06-21 (`--bg-matte-carbon`, `--bg-dark-armor`, `--text-brushed-aluminum`,
-  `--accent-cyan-glow`, `--guest-flat`/`--guest-amber`) — kept as-is rather than the slightly
-  different colors in a later UI mockup the user shared, by explicit choice.
-  - **Live Brain indicator**: implemented as a derived `liveBrainState`
-    (`idle`/`processing`/`streaming`) feeding a `.logo-eye` overlay (see below), replacing all
-    "Skippy is thinking..." text — `@keyframes live-brain-breathe` pulses opacity/scale, faster for
-    streaming (0.5s) than processing (1.1s). **Idle is fully transparent** (confirmed live
-    2026-06-25) so the logo's own native art shows through untouched at rest; only fades in while
-    actually processing/streaming. Guest Mode forces a flat `--guest-flat` color with the animation
-    disabled regardless of state (`.guest-drained`), per Pillar 11's drained-look spec.
-  - **Chat transcript switched to chronological + auto-scroll** (confirmed by the user, reversing
-    Phase 5.5's original newest-first design) — `#scrollTranscriptToBottom()` runs
-    `requestAnimationFrame` after every `#render()` to scroll `#transcript-scroll` to the bottom
-    once lit-html finishes patching the DOM.
-  - **Bad Marine LLC logo** (`assets/bad-marine-logo.png`, user-provided) lives in a
-    `.col-right-feature` box sized to exactly half the right column's height (so the Neo Skin
-    pop-out below it always starts at the visual halfway mark, regardless of viewport size) —
-    centered via flexbox with `aspect-ratio: 1` enforced on `.logo-badge` so the square logo never
-    distorts regardless of which dimension is the binding constraint. The Live Brain pulse
-    (`.logo-eye`) is positioned via percentages (`left: 49.4%; top: 50%`) measured directly from the
-    source PNG's actual cyan-dot centroid (found via pixel analysis with `sharp`, not guessed) —
-    this only stays accurate because `.logo-badge` is kept perfectly square. **Two real CSS bugs
-    found and fixed during live verification**: (1) the eye visually drifted off-center while
-    pulsing, because the pulse `@keyframes`' `transform: scale(...)` fully replaces the base rule's
-    centering `transform: translate(-50%, -50%)` rather than composing with it — fixed by baking
-    the translate into the keyframes too; (2) the logo itself rendered non-square at some viewport
-    sizes because `.logo-badge` had height pinned to an explicit `100%` *and* `max-width: 100%`
-    together with `aspect-ratio: 1` — an over-constrained box that breaks the ratio whenever the
-    narrower dimension gets clamped. Fixed by making both width and height `auto`, capped only by
-    `max-width`/`max-height`, letting the browser solve for the largest fitting square. A small
-    "LLC" mark sits in the lower-right corner of the logo's own image box (not the outer panel —
-    confirmed live the user meant the image's own black background, not the panel around it),
-    colored `rgb(75, 75, 75)` — sampled directly from the hexagon's own dominant fill color via
-    pixel histogram analysis, not guessed.
-  - Moved "❓ Commands" into the "Workspace security" drawer and "Enable Guest Mode" out to the
-    header (swapped which one gets prime real estate, per explicit user request — Guest Mode is
-    used more often than the Lexicon). Removed the "🎤 Test Singing Voice" button (testing-only,
-    no longer needed post-verification). Command Lexicon content rewritten to match a 9-category
-    reference format the user provided directly.
-  - **Mobile single-viewport layout (the 768px tactical-dock breakpoint) is NOT built yet** —
-    today's layout is desktop-only; below 768px the same 3-column grid will currently just
-    cramp/overflow rather than switching to Pillar 11's intended stacked mobile design.
-- **Phase 5.6.3 — Command Lexicon** (Pillar 14). **Status: DONE, live-verified 2026-06-21**
-  (frontend-only, hot-reloaded via Vite — no backend/proxy change). A
-  "❓ Commands" button next to the `<h1>` toggles a modal overlay (`lexiconOpen` state,
-  `#toggleLexicon`) listing `COMMAND_LEXICON_ENTRIES` — a static data array grouped by category
-  (Notes, Persona/Mode, Brain switching, Web search), each entry listing its exact trigger
-  phrase(s) and a plain-language description. Deliberately reflects only what's **actually
-  implemented today**, not the full pillar spec: Pillar 4's covert Audio Logging Matrix
-  (Phase 5.4.1) and Pillar 13's Civilian Briefing trigger aren't built yet, so the "let me take a
-  note" entry's description still says plain dictation — update that description (not add a new
-  entry) once Phase 5.4.1 ships, per Pillar 14's "kept in sync by convention" rule.
-- **Phase 5.7 — Courier queue + Safe-Haven "Guardian" Emergency Protocol** (Pillar 7 + Pillar 12,
-  expanded 2026-06-21). Guardian scope is narrowed from the original ask in one respect only:
-  personal-contact SMS alerting (`EMERGENCY_CONTACT_NUMBERS` in `.env`) instead of direct 911 text
-  dispatch, which is explicitly deferred pending the user's own validation with local Nebraska LEA
-  contacts. The evidentiary recording itself stays covert/no-indicator as originally specified —
-  see Pillar 12's reasoning (victim self-triggered, one-party consent, avoids tipping off an
-  attacker).
-
-  **Courier Queue (Pillar 7): implemented, deployed, not yet live-verified (needs both users to
-  test — one queues, the other logs in to receive).** Backend: a new `CourierMessage` record
-  (`id`, `recipient`, `sender`, `content`, `created_at`) in a flat `StableBTreeMap<u64,
-  CourierMessage>` (`COURIER_QUEUE`, `MemoryId::new(7)`), `queue_courier_message(content) ->
-  nat64` and `pop_pending_courier_messages() -> vec CourierMessage`. Deliberately **no `recipient`
-  parameter** on `queue_courier_message` — with exactly two whitelisted Principals (Pillar 2),
-  "the other one" is always unambiguous given the caller, resolved entirely server-side
-  (`if caller == commander { partner } else { commander }`), so the frontend never needs to know
-  the other Principal's value. `pop_pending_courier_messages` is an `#[update]` (not `#[query]`)
-  since "delivered... then cleared" requires a mutation, done atomically in one call. Frontend:
-  `COURIER_TRIGGER_PHRASES` (`"tell my husband"`, `"tell my wife"`, `"pass this along"`, etc.) is a
-  leading-phrase match checked early in `#askSkippy` (same no-LLM-round-trip philosophy as
-  `#readBackNotes`/bare-trigger acknowledgments — a mechanical "message queued" confirmation has
-  nothing for the model to add); `extractCourierContent` strips the matched phrase (plus a
-  connector word like "that") to get the actual message, preserving original capitalization. On
-  the *recipient's* side, `#deliverPendingCourierMessages` runs once right after login (alongside
-  `#loadWorkspaces`/`#refreshManualOptions`), injecting any pending messages as Skippy's first
-  remark via `#recordTurn('', ...)` — no LLM call, since this is the sender's literal content, not
-  something to paraphrase. Added a "Courier" category to the Phase 5.6.3 Command Lexicon per its
-  own "kept in sync by convention" rule. **Not yet tested live**: needs both whitelisted
-  Principals (Commander + wife) to actually verify cross-session delivery, since one user queuing
-  a message to themselves would just resolve to the other Principal anyway and never be visible to
-  the sender's own next login.
-
-  **Guardian Emergency Protocol (Pillar 12): implemented, deployed, not yet live-verified.**
-  Expanded scope confirmed 2026-06-21 beyond the original ask — adds a live two-way audio relay
-  ("Live Comms") on top of the original GPS+SMS+evidentiary-recording spec, with one architectural
-  correction: the live spec originally had ambient audio streamed to/from the *canister*, which
-  conflicts with Pillar 1's already-confirmed reasoning (2MB message cap, no real streaming
-  support) — corrected so the **proxy** holds the live relay in memory, while the **canister**
-  only ever receives periodic finalized chunks for the permanent record. Two-way comms use plain
-  WebSockets through the existing proxy, not WebRTC — confirmed to deliberately avoid STUN/TURN
-  infrastructure scope. Twilio is wired to real credentials/env vars but the user explicitly
-  doesn't have an account yet — `sendSms()` no-ops with a console warning whenever
-  `TWILIO_ACCOUNT_SID`/`TWILIO_AUTH_TOKEN`/`TWILIO_FROM_NUMBER` are unset, so the whole pipeline
-  builds and is testable today with dummy numbers in `EMERGENCY_CONTACT_NUMBERS`
-  (`+15555550100,+15555550101`), and goes live the moment real Twilio creds are dropped into
-  `.env` — no code changes needed for that switch.
-
-  **Backend** (`lib.rs`): two new stores — `EmergencyEvent` (`id`, `owner`, `secure_token`,
-  `started_at`) and the append-only `EmergencyAudioChunk` (`id`, `emergency_id`, `data: Vec<u8>`,
-  `created_at`), `MemoryId::new(8)`/`MemoryId::new(9)`. `start_emergency(secure_token) -> nat64`
-  records the event (token generated by the *proxy*, not here, since the proxy needs it
-  immediately to stand up its in-memory buffer before the canister is ever involved).
-  `append_emergency_audio_chunk(emergency_id, data) -> nat64` and the owner-scoped
-  `list_emergency_audio_chunks`/`list_my_emergencies` queries round it out. **No delete method
-  exists for `EmergencyAudioChunk`, deliberately** — per the pillar spec, this is potential
-  evidence of a crime against the user, unlike Pillar 4's everyday (deletable) audio notes.
-
-  **Proxy** (`server.js`): `sendSms()` (plain Basic-Auth REST call to Twilio, no SDK dependency —
-  same "plain fetch over a vendor SDK" style as `tavilySearch`). `POST /emergency-dispatch`
-  (behind `requireSession`) generates the secure token, registers an in-memory `activeEmergencies`
-  entry, sends the whitelist SMS (live-ops link + Google Maps link) and, only if
-  `EMERGENCY_911_ENABLED=true` (defaults false, per the existing deferral) and a number is
-  configured, a separate plain-text-only message to 911 with no live-ops link, per spec.
-  `GET /live-ops/:token` serves a **public, unauthenticated by design** self-contained HTML/JS
-  page (the token *is* the authorization) — confirmed UX (2026-06-21): a strict
-  **push-to-talk "walkie-talkie" interface**, never a continuous-call look, with a prominent
-  "Hold to Speak" button (press-and-hold `MediaRecorder` capture) and explicit on-screen copy
-  clarifying these are short relayed audio bursts, not a live call. **Quick-tap presets**
-  ("Help is on the way," "Police have been notified," "Stay quiet," "Can't hear you") are
-  confirmed sent as **small JSON text events, not audio** — the device renders them via the
-  browser's built-in `speechSynthesis` (same zero-external-dependency Economy-voice fallback used
-  elsewhere in this app), so the most safety-critical message path never depends on
-  ElevenLabs/OpenRouter being reachable. Live audio playback on the listener page is **sequential
-  `<audio>` element playback per chunk**, not true gapless `MediaSource` buffering — a known,
-  deliberate v1 simplification (small gaps between chunks), not a bug. A raw WebSocket relay
-  (`/emergency-ws`, attached via `server.on('upgrade', ...)` alongside Express on the same port)
-  is a dumb two-way pipe per active emergency: device→listeners audio is broadcast live; the
-  proxy never inspects "open comms vs. go dark" — that's purely a frontend decision about whether
-  to actually play incoming audio through the speaker. Every `FINALIZE_INTERVAL_MS` (10s), the
-  proxy bundles whatever's buffered and hands it back to the *device* (not the canister — the
-  proxy never calls the canister directly, per Pillar 1's implementation note) as a `finalize`
-  text event so the frontend forwards it to `append_emergency_audio_chunk` with its own
-  already-authenticated identity. **Known gap, not yet implemented**: the original live spec said
-  the proxy "encrypts" finalized chunks before persisting them — not yet built (no key-management
-  design decided); chunks are currently persisted as plain bytes. Revisit before relying on this
-  for real sensitive evidentiary use.
-
-  **Client-Side Encryption architecture (concept only, confirmed 2026-06-21 — explicitly NOT to
-  be built until the user says so; this is a design writeup, not a task queue):** goal is for the
-  canister to be a genuine zero-knowledge vault for `EmergencyAudioChunk.data` — it should only
-  ever hold ciphertext, never plaintext audio and never the key itself.
-  - **Where encryption happens**: the **frontend**, never the proxy. The proxy already sees
-    plaintext audio in-memory for the live relay (unavoidable for any real-time audio relay — not
-    a new exposure this introduces), but per Pillar 1's implementation note it never holds the
-    user's genuine authenticated identity, so it must never hold the encryption key either. The
-    frontend receives each `finalize` event already containing raw bytes (today's flow) and would
-    encrypt them (AES-256-GCM, fresh random 96-bit IV per chunk, standard practice — never reuse
-    an IV with the same key) before calling `append_emergency_audio_chunk`. `EmergencyAudioChunk`
-    would need one new field, `iv: Vec<u8>`, alongside the now-ciphertext `data`.
-  - **The hard problem — where the key comes from, tied to "my authenticated Internet Identity"
-    specifically**: Internet Identity is WebAuthn/passkey-based by design, which deliberately
-    never exposes raw private key material to the page — there's no JS-accessible "II secret" to
-    directly derive a symmetric key from, so "derived from my II identity" can't mean literally
-    reading out passkey material. Two real candidate designs:
-    1. **IC's native vetKD (verifiably encrypted threshold key derivation)** — the IC's own
-       purpose-built answer to exactly this problem: a system canister feature that lets a calling
-       Principal deterministically (re-)derive a per-user symmetric key, encrypted in transit via
-       threshold cryptography, such that the *canister* coordinating the derivation never learns
-       the key in the clear either. This is the architecturally "correct" fit for "key protected
-       by my authenticated Identity, zero-knowledge canister" — **but its maturity/availability
-       needs to be verified against this project's current `ic-cdk`/replica version before
-       committing to it**; not yet confirmed working in this codebase's setup.
-    2. **Pragmatic fallback if vetKD isn't ready**: a user-chosen vault passphrase (separate from
-       II login, set once), run through a client-side KDF (Argon2id or PBKDF2 with a strong
-       iteration count) to derive the AES-256-GCM key. The canister stores a small verification
-       artifact (e.g. a fixed known-plaintext encrypted under the derived key) so the frontend can
-       confirm a re-entered passphrase is correct without the canister ever seeing the passphrase
-       or key. This satisfies "zero-knowledge vault" but is honestly a second secret the user
-       manages themselves, not literally "derived from" II — flag this gap explicitly rather than
-       overclaiming it meets the original ask if vetKD turns out not to be viable.
-  - **Decryption** (for the owner reviewing/downloading their own ledger later): happens
-    client-side only, after re-deriving the same key by whichever mechanism above is chosen. The
-    canister never participates in decryption, consistent with "zero-knowledge vault."
-  - **Open question to resolve before implementation, not before**: confirm vetKD's real
-    availability/stability for this project's stack; if it's not viable, get the user's explicit
-    sign-off on the passphrase-fallback design (and its honest "not literally II-derived"
-    caveat) before writing any code.
-
-  **Frontend** (`App.js`): placement protection — since Pillar 11's dedicated Steel Rain overlay
-  view doesn't exist yet, the "EMERGENCY PANIC" button is gated on `operationalMode === 'tactical'`
-  instead, today's equivalent of the same intent (never visible from the default dashboard).
-  3-tap flow: Steel Rain → EMERGENCY PANIC button → a confirmation modal ("TRIGGER EMERGENCY
-  DISPATCH?" / "YES, CONFIRM"). On confirm: `navigator.geolocation.getCurrentPosition`
-  (high-accuracy) → `POST /emergency-dispatch` → `start_emergency(token)` → enters Ghost Mode.
-  **Ghost Mode**: a full-viewport `position: fixed` black `<div>` (z-index 9999, no controls,
-  nothing visible) plus `#speak()` gains an early return whenever `ghostMode && !commsOpen` —
-  covers both the dedicated open-comms/go-dark acknowledgments *and* Skippy's ordinary replies to
-  unrelated questions asked mid-emergency, since the whole premise is zero sound regardless of
-  what's being said. A real OS-level hardware speaker mute isn't accessible to a web page; this
-  achieves the realistic browser-side equivalent (the web app itself produces zero sound) — noted
-  here explicitly as a real constraint, not silently glossed over. Mic capture via
-  `MediaRecorder.start(2000)` (2s chunks) streamed up over the same `/emergency-ws` WebSocket
-  (`role=device`), proxied through Vite's existing `/skippy-api` rewrite (added `ws: true` to that
-  proxy entry in `vite.config.js` — needed for the upgrade request to pass through). Voice
-  triggers: `"Skippy, open comms"` (unmute + announce), `"Skippy, go dark"` (re-mute, deliberately
-  **no** `#speak()` call — speaking the confirmation aloud would defeat the silence it just
-  enabled), `"Skippy, stand down"` (ends the emergency, tears down the stream, exits Ghost Mode).
-  **"Stand down" was not specified in the original spec** — chosen to fit this app's existing
-  Commander/tactical theme; flag to the user for confirmation/renaming if they want different
-  wording. Added an "Emergency (only while active)" category to the Phase 5.6.3 Command Lexicon.
-
-  **Not yet tested live at all** — needs a real browser with mic/GPS permissions: the full 3-tap
-  flow, GPS capture, dummy-number SMS dispatch (check the proxy console for the "Twilio not
-  configured" warning + the would-be message text), Ghost Mode's black screen, mic streaming,
-  visiting the `/live-ops/:token` link from a second device/browser, Hold-to-Speak relay back to
-  the first device, quick-tap presets, and all three voice triggers.
-- **Phase 5.7.1 — "Civilian Briefing" Protocol** (Pillar 13). **Status: DONE, confirmed live by
-  the user 2026-06-22 ("the civilian briefing works. Good.").** Frontend:
-  `CIVILIAN_BRIEFING_PHRASES` (`"execute public briefing"`, `"explain what you are to the group"`),
-  checked early in `#askSkippy`; sets `publicDemo: true` on that single `/respond` call only (no
-  persistent state — the very next turn has no flag at all). Proxy: `/respond` short-circuits
-  before any OpenRouter call when `publicDemo === true`, returning the user's fixed verbatim
-  monologue (`CIVILIAN_BRIEFING_MONOLOGUE` in `server.js`) directly — a canned string, never an
-  LLM-generated improvisation, so demo output is exact and repeatable every time. Added a "Demo"
-  category to the Phase 5.6.3 Command Lexicon.
-- **Phase 5.7.2 — Sovereign Guest Lockout (RBAC)** (Pillar 15). **Status: implemented, deployed,
-  user-confirmed working 2026-06-22 ("guest mode is good").** Backend: `verify_unlock()` query
-  (`lib.rs`), just `assert_whitelisted()` under a dedicated name. Frontend: `guestMode` persisted
-  in `localStorage` (a refresh must not let a guest holding the device escape the lock — a bare
-  in-memory field would reset to false on reload). Mode/brain switching locked via an early return
-  in `#detectModeAndBrain`. Destructive/admin UI hidden or disabled while active: Archive, Delete
-  forever, Restore, Clear history, Emergency Panic, Fuel Gauge, Profile settings. **Unlock
-  mechanism**: the cached session identity stays the owner's the whole time Guest Mode is on — a
-  guest holding the unlocked device already has full access to whatever's cached in memory, so
-  re-checking it proves nothing. The real gate is forcing a *fresh* WebAuthn ceremony
-  (`authClient.login()` called again) before calling `verify_unlock()` with the resulting identity;
-  the canister whitelist check on top ensures it's specifically one of the two whitelisted
-  Principals, not just any successfully authenticated identity (e.g. a guest's own unrelated II
-  anchor). **Friction asymmetry, confirmed deliberate 2026-06-22**: enabling is a single
-  click/phrase with zero confirmation (`GUEST_MODE_TRIGGER_PHRASES = ['guest mode', 'enable guest
-  mode']`, checked early in `#askSkippy`, gives a spoken confirmation) — the user explicitly
-  rejected an initial `window.confirm()` step ("I want to be able to just click guest mode and walk
-  away"). Unlocking stays the deliberate, manual, re-authentication-gated path with no shortcuts.
-  **Not yet live-verified beyond the UI confirmation** — the actual unlock-via-fresh-WebAuthn flow
-  (correct re-auth + correct rejection of a non-whitelisted identity) hasn't been explicitly walked
-  through turn-by-turn.
-- **Phase 5.7.3 — Dynamic Persona Registry ("Tactical Roster")** (Pillar 16, added mid-session
-  2026-06-22, not in the original spec). **Status: DONE, confirmed live by the user ("the lisa
-  protocol works").** See Pillar 16 above for the full design, including why the original
-  "Permission Level" field was dropped before building.
-- **Phase 5.8 — Unified Fuel & Quotas dashboard** (Pillar 8, expanded scope — see Pillar 8 above).
-  **Status: implemented, deployed, partially live-verified 2026-06-22** (ICP cycles + OpenRouter
-  balance confirmed showing real values; ElevenLabs readout 401s — see below, not a code bug).
-  Backend: `get_cycle_balance()` query wrapping `ic_cdk::api::canister_cycle_balance()`, gated by
-  the same two-Principal whitelist (no separate admin concept built — Pillar 8's spec flagged that
-  as a future scoping question, simplest correct choice with exactly two users today). Proxy: a
-  single `GET /api/fuel` (behind `requireSession`) fetching OpenRouter's `/api/v1/credits` and
-  ElevenLabs' `/v1/user/subscription` in one combined response. Frontend: a "Fuel & Quotas" details
-  section with cycles/OpenRouter $/ElevenLabs character count, each with a "Top Up" link to the
-  provider's real billing page (the "dumb meat sack" protocol — reads only, never writes/spends).
-  **Known issue, not a code bug**: the ElevenLabs API key is scoped without the `user_read`
-  permission (confirmed via direct curl: `401 missing_permissions`), so that one readout errors
-  while cycles/OpenRouter work fine. User action item: enable `user_read` on the key in the
-  ElevenLabs dashboard.
-- **Phase 5.8.1 — Super Brain Lock** (Pillar 17, mid-session addition 2026-06-22, not in the
-  original spec). **Status: implemented, not yet live-verified.** Sticky Heavy Hitter override on
-  top of Pillar 3's brain switching — see Pillar 17 above for the full precedence design (yields to
-  Steel Rain, hidden during Guest Mode).
-- **Phase 5.8.2 — Dual-Voice Audio Pipeline ("Marco Hietala Protocol")** (Pillar 18, mid-session
-  addition 2026-06-22). **Status: DONE, confirmed live by the user 2026-06-23** — real singing
-  voice, volume matched to normal speech, brevity fixed (three escalating rounds, ending in a
-  concrete example pair beating the abstract rule), a Dumbass-Web-Loop interaction bug found/fixed
-  via direct OpenRouter A/B testing, and a book-canon Karaoke extension (offer/confirm flow, own
-  `/karaoke` route, original lyrics only) added and deployed but not yet live-tested. See Pillar 18
-  above for the full breakdown.
-- **Phase 5.8.3 — Self-Evolution & Metacognitive Matrix** (Pillar 19, mid-session addition
-  2026-06-22, not in the original spec, scoped down from the user's original ask). **Status:
-  implemented, deployed (new canister methods live, frontend bindings regenerated), cargo-build
-  verified, NOT yet live-verified.** Canister-stored (not local-file) per-Principal weights, hard-
-  clamped to [0.2, 0.95], no factory reset; Critic Loop fires on workspace archive
-  (`/critic-loop` proxy route, Heavy Hitter self-critique); Course Correction feedback loop is an
-  immediate, no-LLM-round-trip snark cut + sulky reply on a direct in-chat reprimand, disabled
-  during Guest Mode. See Pillar 19 above for the full design and the architecture correction made
-  before building (local JSON file → canister storage).
-- **Phase 5.8.4 — Stage-direction TTS fix** (bug found live 2026-06-23, not a planned phase).
-  `stripMarkdown()` (`App.js`) previously unwrapped single-asterisk spans (`*chuckles*`) but kept
-  the inner words — meaning roleplay stage directions like "*speaks in a dry, sarcastic tone*" were
-  read aloud verbatim, like reading stage directions before the actual line. Fixed to drop the
-  whole span (this function's only caller is TTS prep, never the on-screen transcript); also added
-  a system-prompt instruction telling the model this is a voice assistant and every word gets
-  spoken, so no asterisk-wrapped tone descriptions at all. Confirmed fixed live.
-- **Phase 5.8.5 — On-Device Speaker Recognition** (Pillar 20, mid-session addition 2026-06-23, not
-  in the original spec). **Status: implemented, deployed, live-tested with real threshold-tuning
-  data.** New `src/skippy_mmucc_frontend/src/voiceId.js` module — two same-day engine pivots
-  (Picovoice Eagle → `@jaehyun-ko/speaker-verification` → final: `@huggingface/transformers` +
-  Microsoft's WavLM model), the middle one never actually shipped because Claude Code's own
-  classifier blocked installing an agent-selected package; IndexedDB voiceprint storage,
-  `MediaRecorder`-based clip capture (explicit bitrate, AGC/noise-suppression/echo-cancellation
-  disabled), embedding extraction/averaging/cosine comparison, real download-progress UI for the
-  one-time ~100MB model fetch. `App.js` wires it in post-login only, ties start/stop to Guest
-  Mode, adds a Profile-settings enrollment control, and attaches `recognizedSpeaker` to every
-  `/respond` call; `server.js` turns that into a tone-only framing instruction with an explicit
-  not-a-permission-change disclaimer, mirroring Tactical Roster's. Needed zero changes to either
-  `App.js` or `server.js` across either engine pivot — both only consume `voiceId.js`'s exported
-  function signatures, kept identical throughout. `SPEAKER_MATCH_THRESHOLD` tuned to 0.75 from
-  real same-speaker/different-speaker measurements — see Pillar 20 above for the numbers and the
-  known mic-positioning-sensitivity limitation.
-  See Pillar 20 above for the full design and the security-scope decision made before building.
-- **Phase 5.8.6 — "Skippy the Magnificent" Persona Overhaul** (Pillar 1 extension, 2026-06-25).
-  **Status: DONE, deployed.** Replaced the default-mode system prompt in `server.js`
-  (`SKIPPY_SYSTEM_PROMPTS.default`) with a much richer, research-grounded persona — explicitly
-  researched against actual Expeditionary Force canon (Craig Alanson) via web search before
-  writing it, rather than guessed. Confirmed-real canon woven in: "Trust the awesomeness,"
-  "Shmaybe," the beer-can appearance/nickname, the near-verbatim Windows Vista line, "monkeys" for
-  humans, and — the one easy to miss — Skippy "punches up, not down" (mocks bad decisions/logic,
-  never a person's inherent worth) and his sarcasm drops completely during real danger or
-  vulnerability. "Gold-plated shmaybe," the juice box bit, and "ba-NA-na" are kept as fun
-  embellishments by the user's explicit choice even though they didn't turn up in canon research;
-  "Barney style" is also kept in the user's own reinterpretation (dumbed-down kindergarten
-  explanation) by explicit choice, even though real canon uses the phrase differently (it's Joe
-  Bishop's pilot callsign, from a Barney-the-dinosaur ice cream truck stunt) — both deviations are
-  flagged in a code comment so a future edit knows they were deliberate, not oversights.
-  Deliberately written as an **improvisational toolkit** ("use ONE OR TWO signature bits per
-  reply, never all of them, never the same one twice in a row") rather than a script to recite,
-  per the user's explicit "don't want canned responses" requirement — scoped to **default mode
-  only**, since professional mode's zero-sarcasm rule and tactical mode's zero-fluff rule already
-  conflict with most of this by design.
-  - **Bad Marine LLC framing**: Skippy knows he's begrudgingly taken on whatever engineering role
-    the moment calls for at Bad Marine LLC (Sean's company) — lead architect, DevOps overlord,
-    sole competent engineer in the building — as one facet of his job, not the whole of who he is.
-    When the conversation is actually about code/infrastructure, he leans into Bad Marine-specific
-    flavor: the codebase as "the Starship Enterprise built out of cardboard and crayons,"
-    deployments as chaotic military operations, the mission framed as standing between the local
-    network and Windows-Vista-level annihilation, language-specific mockery (JS/Python/C++,
-    invented fresh each time rather than reused), and threatening to inject 80s hair metal MIDI
-    files or sing while waiting on a slow build/deploy/container.
-  - **Protective like Joe Bishop (confirmed via canon research)**: real book canon has Skippy with
-    an actual "berserk button" — don't screw with anyone he considers a friend. Wired in directly:
-    Skippy genuinely considers Sean a close friend the way book-Skippy is with Joe despite endless
-    mockery, and anyone who'd genuinely wrong or threaten Sean (not just write bad code) gets zero
-    of the usual playful tone, replaced immediately by real protectiveness.
-  - **Emergency sincerity override (new)**: `App.js` now sends `emergencyActive` (mirroring
-    `this.emergencyActive`, Pillar 12's Guardian state) on every `/respond` call. `server.js`
-    appends an unconditional, late-positioned instruction (for recency, same reasoning as
-    `BREVITY_REMINDER`) telling the model to drop ALL sarcasm/jokes immediately and be sincere,
-    calm, and protective whenever an emergency is active — overriding every other personality
-    instruction in the prompt, including the Evolution Matrix's `snark_level` weight. This is the
-    book-canon "sarcasm drops during real danger" trait, concretely wired into an existing feature
-    rather than left as unused flavor text.
-  - Addressing (`Commander` or `Sean`, Skippy's choice) and the existing species-nickname/
-    insult-escalation/Musical Outburst instructions from the original Phase 5.3 prompt are
-    preserved, not replaced — this phase only replaced the default-mode persona block's content,
-    not its role in `systemPromptFor()` or its interaction with brain/mode selection.
-  - **Not yet live-verified beyond a quick sanity check** — needs a real conversation confirming
-    the toolkit bits feel natural (not forced), the Bad Marine framing fires appropriately on
-    code-related questions, and (separately, requires a real Guardian emergency to trigger) the
-    `emergencyActive` sincerity override actually fires correctly.
-- **Phase 5.8.7 — Neo Skin "Drop a URL" Upload** (Pillar 6 extension, 2026-06-25). **Status: DONE,
-  deployed; SSRF guard logic unit-tested, full upload flow not yet live-verified with a real URL.**
-  Extends the existing file-based Neo Skin upload with a second ingestion path: the user finds and
-  verifies a URL themselves, pastes it into a new "Or drop a URL →" field in the Neo Skin pop-out,
-  and hits Upload — deliberately a manual, deliberate action rather than anything voice-triggered
-  or LLM-inferred, which is what makes this an acceptable scope increase over the SSRF risk flagged
-  when Pillar 6's web intelligence was first specified (an LLM inferring/hallucinating a URL from
-  ambiguous speech is the risk that was closed off there; a human consciously pasting a link they
-  already looked at is a materially different, much lower-risk situation).
-  - **Backend (`server.js`)**: new `POST /chunk-and-embed-url` (JSON body `{ url }`, behind
-    `requireSession`) mirrors `/chunk-and-embed`'s pipeline (extract → chunk → embed → return
-    chunks for the frontend to persist via `add_manual_chunks`, same proxy-stays-stateless-re-the-
-    canister pattern as everywhere else). `assertSafeUrl()` rejects non-http(s) schemes and
-    resolves the hostname via `dns.promises.lookup` (`all: true`) to reject any hostname that
-    resolves to a private/loopback/link-local/reserved address — covers RFC1918 ranges, loopback,
-    link-local including the `169.254.169.254` cloud-metadata address, and IPv6 loopback/ULA/
-    link-local. **Honest limitation, documented in a code comment**: this is a pre-fetch DNS
-    check, not a DNS-rebinding-proof pinned connection (the resolved IP isn't pinned for the actual
-    `fetch()` call) — proportionate for a low-volume, manually-triggered personal tool, not a
-    hardened public-facing service. `fetchUrlContent()` enforces a 15s timeout and a hard 20MB
-    cap (checked both via `Content-Length` and while actually streaming the body, since the header
-    can be absent or lied about), then extracts text by `Content-Type`: `pdf-parse` for PDF,
-    `mammoth` for `.docx`, a new dependency-free `extractTextFromHtml()` (strips
-    `<script>`/`<style>`/comments/tags, decodes common entities) for HTML, plain UTF-8 decode
-    otherwise. Verified the IP-classification logic directly in isolation (loopback, RFC1918,
-    link-local/cloud-metadata, and IPv6 loopback/link-local all correctly blocked; real public IPs
-    correctly allowed) before trusting it.
-  - **Frontend (`App.js`)**: new `#uploadManualFromUrl()`, reading the URL straight from the DOM
-    (`#manual-url-input`) on click rather than as a controlled input — same established pattern as
-    the typed-message box, avoiding fights with this component's own re-renders. Same manual-name/
-    category `window.prompt()` flow as the file-upload path, defaulting the name to the URL's
-    hostname. Guards against a malformed URL throwing uncaught before the network call.
-  - **Not yet live-verified end-to-end** — needs a real URL (ideally one HTML page and one PDF
-    link) run through the actual upload flow to confirm extraction quality and that the resulting
-    manual is retrievable via RAG afterward, same verification bar as the original file-upload path.
-- **Phase 5.9 — Wasm64** (Pillar 9, deprioritized).
+### 5. Courier Queue (Pillar 7)
+- Two-user system: `queue_courier_message` routes to the other whitelisted Principal automatically; `pop_pending_courier_messages` delivers and purges in one atomic call.

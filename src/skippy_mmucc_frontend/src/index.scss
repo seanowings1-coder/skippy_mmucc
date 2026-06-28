@@ -137,7 +137,22 @@ button:disabled {
   background: var(--accent-cyan-glow);
   box-shadow: 0 0 6px var(--accent-cyan-glow);
   opacity: 0;
-  transition: opacity 0.2s ease;
+  transition: opacity 0.2s ease, background 0.6s ease, box-shadow 0.6s ease;
+
+  // Mode color shifts — Skippy's beer can changes color per operational mode,
+  // book-canon (Expeditionary Force novels). Default stays cyan (see base rule).
+  &.mode-professional {
+    background: #60a5fa;
+    box-shadow: 0 0 6px rgba(96, 165, 250, 0.8);
+  }
+  &.mode-focus {
+    background: #f59e0b;
+    box-shadow: 0 0 6px rgba(245, 158, 11, 0.8);
+  }
+  &.mode-tactical {
+    background: #ef4444;
+    box-shadow: 0 0 8px rgba(239, 68, 68, 0.9);
+  }
 }
 
 .logo-eye.processing,
@@ -184,6 +199,25 @@ button:disabled {
   border-color: var(--guest-amber);
   color: var(--guest-amber);
   box-shadow: none;
+}
+
+// Paid-tier LED — small dot in the header badge row that glows amber when
+// the everyday brain has escalated past the free-tier primary model.
+.tier-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #2a2a2a;
+  border: 1px solid #444;
+  transition: background 0.4s ease, box-shadow 0.4s ease, border-color 0.4s ease;
+  align-self: center;
+
+  &.paid {
+    background: #f59e0b;
+    border-color: #f59e0b;
+    box-shadow: 0 0 6px rgba(245, 158, 11, 0.7);
+  }
 }
 
 // --- Live Brain indicator (the logo's "eye" — see .logo-eye above) --------
@@ -441,6 +475,17 @@ button:disabled {
   font-size: 0.85em;
 }
 
+.workspace-manage {
+  font-size: 0.85em;
+
+  button {
+    display: block;
+    width: 100%;
+    margin-top: 0.4em;
+    text-align: left;
+  }
+}
+
 .archived-workspaces ul {
   list-style: none;
   padding: 0;
@@ -548,6 +593,20 @@ button:disabled {
   color: var(--accent-cyan-glow);
   text-shadow: 0 0 20px rgba(0, 229, 255, 0.4);
   margin: 0;
+}
+
+.principal {
+  font-family: monospace;
+  font-size: 1em;
+  font-weight: 700;
+  color: var(--accent-cyan-glow);
+  background: rgba(0, 229, 255, 0.08);
+  border: 1px solid var(--accent-cyan-glow);
+  padding: 0.5em 1em;
+  border-radius: 4px;
+  word-break: break-all;
+  text-align: center;
+  user-select: all;
 }
 
 .login-btn {

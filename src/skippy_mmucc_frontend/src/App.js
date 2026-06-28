@@ -276,6 +276,13 @@ const COURSE_CORRECTION_PHRASES = [
   'tone it down',
   'knock it off',
 ];
+const BRAIN_DOWNGRADE_QUIPS = [
+  "Credit reserves depleted, Commander — switching to the backup brain. Try not to notice the drop in quality.",
+  "Sean, I'm out of premium brain juice. Backup brain online — keep the questions simple.",
+  "Budget exceeded. Dropping to the civilian-grade brain. Don't blame me if it's slightly less magnificent.",
+  "Main brain's broke, switching to the spare. It's like downgrading from a starship to a rowboat, but here we are.",
+];
+
 const COURSE_CORRECTION_REPLIES = [
   "Fine. I'll use smaller words for the monkeys.",
   "Ugh, FINE. Dialing it back. Don't get used to it.",
@@ -289,6 +296,22 @@ const COURSE_CORRECTION_REPLIES = [
 // nothing for the model to add to "want to jam out?"), the confirmed
 // performance is a dedicated proxy call (/karaoke, original lyrics only —
 // see server.js for why never real song lyrics).
+const WORKSPACE_CREATE_PHRASES = [
+  'create new project', 'create new workspace', 'create new workplace',
+  'new project', 'new workspace', 'new workplace',
+];
+const WORKSPACE_OPEN_PHRASES = [
+  'open workspace', 'open project', 'open workplace',
+  'switch to workspace', 'switch to project', 'switch to workplace',
+  'switch workspace', 'switch project', 'switch workplace',
+];
+const WORKSPACE_NAME_PROMPT_REPLIES = [
+  "What are we calling this one, Commander?",
+  "Roger. What's the name?",
+  "Name it.",
+  "Give me a name and I'll spin it up.",
+];
+
 const KARAOKE_TRIGGER_PHRASES = ['karaoke', 'sing a song', 'jam out', 'rock out'];
 // A pool, not one fixed line — confirmed live 2026-06-24: hearing the exact
 // same offer verbatim every single time read as flat/robotic rather than
@@ -310,8 +333,10 @@ const KARAOKE_OFFER_REPLIES = [
 // trigger phrases have no actual question/task for the LLM to respond to —
 // without this, Skippy would call OpenRouter anyway and ramble asking what
 // you want. Skip the network round trip entirely and acknowledge locally.
+const FOCUS_MODE_PHRASES = ['focus mode', 'focus up', 'just the facts', 'get focused', 'skippy focus', 'focus'];
 const MODE_SWITCH_ACKNOWLEDGMENTS = {
   tactical: 'Understood. Standing by.',
+  focus: 'Focus mode. Go.',
   default: 'Back to myself. What do you need?',
   professional: 'Understood. I will behave.',
 };
@@ -354,13 +379,19 @@ const COMMAND_LEXICON_ENTRIES = [
   {
     category: '2. Persona & Mode Switching',
     phrases: ["Skippy, behave"],
-    description: 'Switches to Professional Mode (persona toned down).',
+    description: 'Switches to Professional Mode (persona toned down, no sarcasm).',
+  },
+  {
+    category: '2. Persona & Mode Switching',
+    phrases: FOCUS_MODE_PHRASES,
+    description:
+      'Switches to Focus Mode: personality at zero, fast brain, instant web search on any miss — same response behavior as Steel Rain but without advanced function unlocks (no Emergency Panic). Use when you\'re in a groove and just want answers.',
   },
   {
     category: '2. Persona & Mode Switching',
     phrases: STEEL_RAIN_PHRASES,
     description:
-      'Switches to Tactical Mode AND locks the Tactical brain (fastest/cheapest). Instantly fires a live web search if local manuals have no match (bypasses permissions).',
+      'Switches to Tactical Mode AND locks the Tactical brain (fastest/cheapest). Instantly fires a live web search if local manuals have no match (bypasses permissions). Also unlocks the Emergency Panic button.',
   },
   {
     category: '3. Brain Selection (Model Routing)',
@@ -431,19 +462,29 @@ const COMMAND_LEXICON_ENTRIES = [
       "Auto-tags whether the Commander or an unverified guest is speaking, purely to adjust tone (softer for unrecognized voices). Never used for permission checks — security stays gated exclusively by Guest Mode.",
   },
   {
-    category: '8. Self-Evolution Matrix',
+    category: '8. Workspace Navigation',
+    phrases: WORKSPACE_CREATE_PHRASES,
+    description: 'Two-step: Skippy asks for a name, then your next utterance creates and switches to a new workspace.',
+  },
+  {
+    category: '8. Workspace Navigation',
+    phrases: WORKSPACE_OPEN_PHRASES,
+    description: 'Say the workspace name after the trigger (e.g. "open workspace Garage Build") — fuzzy-matches your active workspaces and switches immediately.',
+  },
+  {
+    category: '9. Self-Evolution Matrix (course correction)',
     phrases: COURSE_CORRECTION_PHRASES,
     description:
       'Immediate negative reinforcement. Cuts the snark_level weight in the Evolution Matrix instantly and triggers a sulky acknowledgment (no LLM round trip). Disabled during Guest Mode.',
   },
   {
-    category: '9. Demos & Entertainment',
+    category: '10. Demos & Entertainment',
     phrases: CIVILIAN_BRIEFING_PHRASES,
     description:
       'One-shot monologue. Bypasses normal generation to deliver a fixed, verbatim tech-flex monologue for live audiences. Reverts to normal persona immediately after.',
   },
   {
-    category: '9. Demos & Entertainment',
+    category: '10. Demos & Entertainment',
     phrases: KARAOKE_TRIGGER_PHRASES,
     description:
       'Default Mode only. Skippy offers to jam out — confirm with an affirmation phrase or just repeat the trigger phrase, and he performs an original 80s-hair-band or symphonic-metal song (never real song lyrics) in his singing voice.',
@@ -602,6 +643,7 @@ class App {
   // *original* question while Skippy waits for permission to search the
   // web, so a follow-up "yes" searches for that, not for the literal "yes".
   pendingWebSearchQuery = null;
+  pendingWorkspaceCreate = false; // true after create-trigger, waiting for name utterance
   // Karaoke offer/confirm — armed when the trigger phrase fires, resolved
   // (yes or no) on the very next utterance, same pending-state shape as
   // pendingWebSearchQuery above.
@@ -742,6 +784,10 @@ class App {
   // brain/model actually answered the last message. Drop once confirmed.
   lastBrain = '';
   lastModel = '';
+  onPaidTier = false;
+  brainFamily = 'dolphin'; // 'dolphin' | 'other' — quip only fires on transition
+  lastSpeakEndTime = 0; // timestamp when TTS last finished — used to discard
+                        // recognition results that arrived during the cooldown window
 
   constructor() {
     if (SpeechRecognitionImpl) {
@@ -818,6 +864,7 @@ class App {
       } else {
         this.authState = 'rejected';
         this.authError = result.Err;
+        console.warn('[Skippy] Not whitelisted. Your principal:', this.principalText);
         this.#render();
         return;
       }
@@ -826,6 +873,7 @@ class App {
       // caller — see assert_whitelisted() in lib.rs.
       this.authState = 'rejected';
       this.authError = err.message;
+      console.warn('[Skippy] Not whitelisted. Your principal:', this.principalText);
       this.#render();
       return;
     }
@@ -1154,8 +1202,10 @@ class App {
     this.workspaces = [];
     this.activeWorkspaceId = null;
     this.pendingWebSearchQuery = null;
+    this.pendingWorkspaceCreate = false;
     this.operationalMode = 'default';
     this.profileName = '';
+    this.brainFamily = 'dolphin';
     this.profileVoiceId = '';
     this.authState = 'logged-out';
     this.#render();
@@ -1567,12 +1617,24 @@ class App {
     }
   }
 
+  // How long after TTS ends to ignore mic input — catches recognition results
+  // that were queued during playback but arrive just after isSpeaking flips false.
+  static #SPEAK_COOLDOWN_MS = 1200; // ms to ignore mic after TTS ends
+
   #handleFinalChunk = (chunk) => {
     // Discard anything the mic picked up while Skippy is speaking — prevents
     // his own audio output from looping back through speech recognition and
     // triggering a new reply. Barge-in is unaffected (it fires on interim
     // results in onresult, not here).
     if (this.isSpeaking) return;
+    // Also discard results that arrived during the cooldown window after TTS
+    // ended — these are the tail of Skippy's own audio being finalized by the
+    // recognition engine a split-second after isSpeaking flipped to false.
+    // Skip the cooldown when waiting for a deliberate one-word confirmation
+    // (karaoke offer or web-search permission) — the user's "yes"/"go" is
+    // intentional, not Skippy's own voice looping back.
+    const awaitingConfirmation = this.pendingKaraokeOffer || !!this.pendingWebSearchQuery;
+    if (!awaitingConfirmation && Date.now() - this.lastSpeakEndTime < App.#SPEAK_COOLDOWN_MS) return;
     if (this.state === 'listening') {
       const lowerChunk = chunk.toLowerCase();
       const matchedPhrase = TRIGGER_PHRASES.find((phrase) =>
@@ -1729,6 +1791,12 @@ class App {
       const ack = isTrivialRemainder(remainder) ? MODE_SWITCH_ACKNOWLEDGMENTS.tactical : undefined;
       return { mode: 'tactical', brain: 'tactical', ack };
     }
+    const focusPhrase = FOCUS_MODE_PHRASES.find((phrase) => lower.includes(phrase));
+    if (focusPhrase) {
+      const remainder = lower.replace(focusPhrase, '');
+      const ack = isTrivialRemainder(remainder) ? MODE_SWITCH_ACKNOWLEDGMENTS.focus : undefined;
+      return { mode: 'focus', brain: 'tactical', ack };
+    }
     if (lower.includes('skippy')) {
       for (const [phrase, mode] of Object.entries(MODE_TRIGGER_PHRASES_WITH_LEAD_IN)) {
         if (lower.includes(phrase)) {
@@ -1740,7 +1808,7 @@ class App {
     }
     return {
       mode: this.operationalMode,
-      brain: this.operationalMode === 'tactical' ? 'tactical' : 'everyday',
+      brain: this.operationalMode === 'tactical' ? 'tactical' : this.operationalMode === 'focus' ? 'tactical' : 'everyday',
     };
   }
 
@@ -1806,6 +1874,69 @@ class App {
       return;
     }
 
+    // ── Workspace create (voice, two-step) ───────────────────────────────────
+    // Step 1: trigger heard — ask for the name.
+    if (
+      !this.guestMode &&
+      !this.pendingWorkspaceCreate &&
+      WORKSPACE_CREATE_PHRASES.some((phrase) => lowerText.includes(phrase))
+    ) {
+      this.pendingWorkspaceCreate = true;
+      const prompt = WORKSPACE_NAME_PROMPT_REPLIES[Math.floor(Math.random() * WORKSPACE_NAME_PROMPT_REPLIES.length)];
+      this.#recordTurn(text, prompt);
+      this.#render();
+      this.#speak(prompt);
+      return;
+    }
+    // Step 2: next utterance is the workspace name.
+    if (!this.guestMode && this.pendingWorkspaceCreate) {
+      this.pendingWorkspaceCreate = false;
+      const name = text.trim();
+      if (name) {
+        try {
+          const id = await this.backendActor.create_workspace(name);
+          this.workspaces = await this.backendActor.list_my_workspaces();
+          await this.#switchWorkspace(id);
+          const ack = `Workspace "${name}" is live, Commander.`;
+          this.#recordTurn(text, ack);
+          this.#render();
+          this.#speak(ack);
+        } catch (err) {
+          const errMsg = `Couldn't create workspace: ${err.message}`;
+          this.#recordTurn(text, errMsg);
+          this.#render();
+        }
+      }
+      return;
+    }
+
+    // ── Workspace open/switch (voice, one-step) ───────────────────────────────
+    // "open workspace Alpha" / "switch to project Garage Build" — fuzzy-match
+    // the remainder against active workspace names (case-insensitive substring).
+    const openMatch = WORKSPACE_OPEN_PHRASES.find((phrase) => lowerText.includes(phrase));
+    if (!this.guestMode && openMatch) {
+      const remainder = lowerText.slice(lowerText.indexOf(openMatch) + openMatch.length).replace(FILLER_WORDS_PATTERN, '').trim();
+      const target = this.workspaces.find(
+        (w) => 'Active' in w.status && w.name.toLowerCase().includes(remainder) && remainder.length > 0,
+      );
+      if (target) {
+        await this.#switchWorkspace(target.id);
+        const ack = `Switched to "${target.name}".`;
+        this.#recordTurn(text, ack);
+        this.#render();
+        this.#speak(ack);
+      } else {
+        const names = this.workspaces.filter((w) => 'Active' in w.status).map((w) => w.name).join(', ');
+        const notFound = remainder
+          ? `Can't find a workspace matching "${remainder}". Active workspaces: ${names || 'none'}.`
+          : `Which workspace? Active: ${names || 'none'}.`;
+        this.#recordTurn(text, notFound);
+        this.#render();
+        this.#speak(notFound);
+      }
+      return;
+    }
+
     if (!this.guestMode && GUEST_MODE_TRIGGER_PHRASES.some((phrase) => lowerText.includes(phrase))) {
       this.#enableGuestMode(text);
       return;
@@ -1844,15 +1975,31 @@ class App {
     // forbids fluff, neither fits hamming up a song). A two-step offer/
     // confirm dance, same shape as the Steel Rain web-search permission ask:
     // mentioning karaoke gets an excited, deterministic ack (no LLM call —
-    // nothing for the model to add yet) and arms pendingKaraokeOffer; the
-    // *next* turn checks for an affirmation before actually performing.
+    // Karaoke trigger detected — arm pendingKaraokeOffer and fire a dedicated
+    // /karaoke-offer call (not /respond) so Skippy improvises an excited ask
+    // rather than treating "karaoke time" as a directive to perform immediately.
     if (
       this.operationalMode === 'default' &&
       !this.pendingKaraokeOffer &&
       KARAOKE_TRIGGER_PHRASES.some((phrase) => lowerText.includes(phrase))
     ) {
       this.pendingKaraokeOffer = true;
-      const offerReply = KARAOKE_OFFER_REPLIES[Math.floor(Math.random() * KARAOKE_OFFER_REPLIES.length)];
+      this.statusMessage = "Skippy is revving up...";
+      this.#render();
+      let offerReply;
+      try {
+        const offerRes = await fetch('/skippy-api/karaoke-offer', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'X-Skippy-Session': this.sessionToken },
+          body: JSON.stringify({ mode, evolutionProfile: this.evolutionProfile }),
+          signal: this.currentAbortController.signal,
+        });
+        const offerData = offerRes.ok ? await offerRes.json() : null;
+        offerReply = offerData?.offer || KARAOKE_OFFER_REPLIES[Math.floor(Math.random() * KARAOKE_OFFER_REPLIES.length)];
+      } catch {
+        offerReply = KARAOKE_OFFER_REPLIES[Math.floor(Math.random() * KARAOKE_OFFER_REPLIES.length)];
+      }
+      this.statusMessage = '';
       this.#recordTurn(text, offerReply);
       this.#render();
       this.#speak(offerReply);
@@ -2069,8 +2216,11 @@ class App {
           }));
         } else {
           ragMiss = true;
-          if (mode === 'tactical') {
-            // Steel Rain: instantly fire the web search, zero confirmation.
+          if (mode === 'tactical' || mode === 'focus') {
+            // Steel Rain + Focus: instantly fire web search, zero confirmation,
+            // zero permission dance. Focus differs from Steel Rain only in that
+            // it never unlocks advanced functions (Emergency Panic etc.) —
+            // the response behavior is identical.
             try {
               webContext = await this.#webSearch(text);
             } catch (err) {
@@ -2082,15 +2232,9 @@ class App {
           // and ask permission instead of guessing.
         }
       } catch (err) {
-        // Treat an infrastructure failure (clock drift, network blip, etc.)
-        // the same as a genuine RAG miss rather than silently leaving the
-        // model with zero context AND zero instructions — otherwise it has
-        // nothing to go on and improvises its own (often wrong) explanation
-        // for why it "can't" answer, instead of following the actual
-        // mock-and-ask-permission / Steel Rain protocol.
         console.error('[Skippy] RAG search failed, treating as a miss:', err);
         ragMiss = true;
-        if (mode === 'tactical') {
+        if (mode === 'tactical' || mode === 'focus') {
           try {
             webContext = await this.#webSearch(text);
           } catch (webErr) {
@@ -2171,7 +2315,23 @@ class App {
 
       this.lastBrain = data.brain || '';
       this.lastModel = data.model || '';
+      this.onPaidTier = !!data.paidTier;
       this.statusMessage = '';
+
+      // Brain downgrade: only announce once when the family actually transitions
+      // from Dolphin → backup. Don't repeat the quip on every subsequent request
+      // that happens to still be on the backup brain.
+      const newFamily = data.brainDowngrade ? 'other' : 'dolphin';
+      if (data.brainDowngrade && this.brainFamily !== 'other') {
+        const quip = BRAIN_DOWNGRADE_QUIPS[Math.floor(Math.random() * BRAIN_DOWNGRADE_QUIPS.length)];
+        this.#recordTurn('', quip);
+        // Economy voice only — this is a system notification, not Skippy's reply.
+        // No ElevenLabs characters burned on a housekeeping announcement.
+        this.#speakEconomy(quip);
+        await new Promise(r => setTimeout(r, 0));
+      }
+      this.brainFamily = newFamily;
+
       // Record what was actually said ("yes"), not effectiveText (the
       // substituted original question sent to OpenRouter) — confirmed live
       // 2026-06-21: recording effectiveText here made a real "yes" silently
@@ -2583,6 +2743,7 @@ class App {
         this.#playPremiumSegments(segments, index + 1);
       } else {
         this.isSpeaking = false;
+        this.lastSpeakEndTime = Date.now();
         this.#render();
       }
     };
@@ -2594,6 +2755,7 @@ class App {
       if (hasStartedPlaying) {
         console.warn('[Skippy] premium audio errored after playback started — ignoring fallback');
         this.isSpeaking = false;
+        this.lastSpeakEndTime = Date.now();
         this.#render();
         return;
       }
@@ -2646,6 +2808,7 @@ class App {
       };
       utterance.onend = () => {
         this.isSpeaking = false;
+        this.lastSpeakEndTime = Date.now();
         this.#render();
       };
       window.speechSynthesis.speak(utterance);
@@ -2895,7 +3058,7 @@ class App {
           </p>
           <p class="principal">${this.principalText}</p>
           ${this.authError
-            ? html`<p class="status" style="word-break: break-all;">Error detail: ${this.authError}</p>`
+            ? html`<details class="status"><summary>Error detail</summary><p style="word-break: break-all; font-size:0.8em;">${this.authError}</p></details>`
             : ''}
           <p class="status">
             Add it to <code>COMMANDER_PRINCIPAL</code> or
@@ -2992,7 +3155,7 @@ class App {
           <h1>
             Skippy Command Deck
             ${this.guestMode
-              ? html`<span class="badge active">🔒 Guest Mode Active</span>`
+              ? html`<button class="badge active" @click=${this.#unlockGuestMode} title="Click to unlock">🔒 Guest Mode Active</button>`
               : html`<button @click=${() => this.#enableGuestMode()}>Enable Guest Mode</button>`}
           </h1>
           <div class="badges">
@@ -3013,6 +3176,10 @@ class App {
                     Super Brain: ${this.superBrainLocked ? 'ON' : 'OFF'} 🧠
                   </button>
                 `}
+            <span
+              class="tier-dot ${this.onPaidTier ? 'paid' : ''}"
+              title="${this.onPaidTier ? `Fallback active — ${this.lastModel}` : `Primary — ${this.lastModel || 'free tier'}`}"
+            ></span>
           </div>
         </header>
 
@@ -3025,14 +3192,6 @@ class App {
               .map((w) => html`<option value=${w.id.toString()}>${w.name}</option>`)}
           </select>
           <button @click=${this.#createWorkspace}>+ New workspace</button>
-          <button @click=${this.#archiveActiveWorkspace} ?disabled=${this.guestMode}>Archive</button>
-          <button @click=${this.#exportWorkspace} ?disabled=${this.history.length === 0}>
-            Export (.md)
-          </button>
-          <button @click=${this.#generateProjectBrief} ?disabled=${this.history.length === 0}>
-            Generate Project Brief
-          </button>
-          <button @click=${this.#deleteActiveWorkspaceForever} ?disabled=${this.guestMode}>Delete forever</button>
 
           ${this.workspaces.some((w) => 'Archived' in w.status) && !this.guestMode
             ? html`
@@ -3053,6 +3212,20 @@ class App {
                 </details>
               `
             : ''}
+
+          ${!this.guestMode ? html`
+            <details class="workspace-manage">
+              <summary>Manage workspace</summary>
+              <button @click=${this.#archiveActiveWorkspace}>Archive</button>
+              <button @click=${this.#exportWorkspace} ?disabled=${this.history.length === 0}>
+                Export (.md)
+              </button>
+              <button @click=${this.#generateProjectBrief} ?disabled=${this.history.length === 0}>
+                Generate Project Brief
+              </button>
+              <button @click=${this.#deleteActiveWorkspaceForever}>Delete forever</button>
+            </details>
+          ` : ''}
         </section>
 
         <div class="col-section-title">Configuration</div>
@@ -3085,89 +3258,6 @@ class App {
                 <button @click=${this.#refreshFuel}>Refresh</button>
               </details>
 
-              <details class="persona-settings">
-                <summary>Profile (name &amp; voice)</summary>
-                <form @submit=${this.#saveProfile}>
-                  <label>
-                    Name
-                    <input name="profileName" type="text" .value=${this.profileName} placeholder="Commander" />
-                  </label>
-                  <label>
-                    ElevenLabs Voice ID
-                    <input name="profileVoiceId" type="text" .value=${this.profileVoiceId} placeholder="(default voice)" />
-                  </label>
-                  <button type="submit">Save profile</button>
-                </form>
-              </details>
-
-              <details class="evolution-matrix">
-                <summary>Evolution Matrix</summary>
-                ${this.evolutionProfile
-                  ? html`
-                      <p>Snark level: ${this.evolutionProfile.snark_level.toFixed(2)}</p>
-                      <p>Vendor skepticism: ${this.evolutionProfile.vendor_skepticism.toFixed(2)}</p>
-                      <p>Technical precision: ${this.evolutionProfile.technical_precision.toFixed(2)}</p>
-                      <p>Proactive interruption: ${this.evolutionProfile.proactive_interruption.toFixed(2)}</p>
-                    `
-                  : html`<p>Loading...</p>`}
-                <p class="status">
-                  Grows naturally from archived workspaces (Critic Loop) and direct in-chat
-                  reprimands (Course Correction) — no reset button by design. Clamped to 0.2-0.95.
-                </p>
-                <button @click=${this.#refreshEvolutionLog}>
-                  ${this.evolutionLog.length > 0 ? 'Hide recent changes' : 'Show recent changes'}
-                </button>
-                ${this.evolutionLog.length > 0
-                  ? html`
-                      <ul>
-                        ${this.evolutionLog
-                          .slice()
-                          .reverse()
-                          .map(
-                            (entry) => html`
-                              <li>${new Date(Number(entry.timestamp / 1_000_000n)).toLocaleString()}: ${entry.summary}</li>
-                            `,
-                          )}
-                      </ul>
-                    `
-                  : ''}
-              </details>
-
-              ${!this.guestMode
-                ? html`
-                    <details class="voice-id-settings">
-                      <summary>Voice recognition (on-device, persona-only)</summary>
-                      <p class="status">
-                        Auto-tags whether the Commander or an unverified guest appears to be
-                        speaking, purely for Skippy's tone — Guest Mode's own lock is the only
-                        thing that ever controls real access, unaffected by this. Voiceprint is
-                        stored only in this browser's IndexedDB; nothing biometric ever reaches
-                        the canister.
-                      </p>
-                      ${this.voiceEnrollmentActive
-                        ? this.voiceEnrollmentPhase === 'loading-model'
-                          ? html`<p class="status">Downloading voice model (one-time, ~100MB)... ${this.voiceEnrollmentProgress.toFixed(0)}%</p>`
-                          : html`<p class="status">Enrolling... ${this.voiceEnrollmentProgress.toFixed(0)}% (keep talking)</p>`
-                        : html`
-                              <button @click=${this.#startVoiceEnrollment}>
-                                ${this.hasEnrolledVoice ? 'Re-enroll my voice' : 'Enroll my voice'}
-                              </button>
-                              ${this.hasEnrolledVoice
-                                ? html`<button @click=${this.#deleteEnrolledVoice}>Delete enrolled voice</button>`
-                                : ''}
-                              ${this.voiceEnrollmentError ? html`<p class="status">${this.voiceEnrollmentError}</p>` : ''}
-                              ${this.hasEnrolledVoice && this.lastSpeakerScore
-                                ? html`
-                                    <p class="status">
-                                      Last detected: ${this.lastSpeakerScore.isCommander ? 'Commander' : 'Unverified guest'}
-                                      (score ${this.lastSpeakerScore.score.toFixed(2)})
-                                    </p>
-                                  `
-                                : ''}
-                            `}
-                    </details>
-                  `
-                : ''}
             `}
 
         <details class="workspace-security">
@@ -3179,7 +3269,87 @@ class App {
                 <button @click=${this.#unlockGuestMode}>Unlock (re-authenticate)</button>
                 ${this.guestUnlockError ? html`<p class="status">${this.guestUnlockError}</p>` : ''}
               `
-            : ''}
+            : html`
+                <details class="persona-settings">
+                  <summary>Profile (name &amp; voice)</summary>
+                  <form @submit=${this.#saveProfile}>
+                    <label>
+                      Name
+                      <input name="profileName" type="text" .value=${this.profileName} placeholder="Commander" />
+                    </label>
+                    <label>
+                      ElevenLabs Voice ID
+                      <input name="profileVoiceId" type="text" .value=${this.profileVoiceId} placeholder="(default voice)" />
+                    </label>
+                    <button type="submit">Save profile</button>
+                  </form>
+                </details>
+
+                <details class="voice-id-settings">
+                  <summary>Voice recognition (on-device, persona-only)</summary>
+                  <p class="status">
+                    Auto-tags whether the Commander or an unverified guest appears to be
+                    speaking, purely for Skippy's tone — Guest Mode's own lock is the only
+                    thing that ever controls real access, unaffected by this. Voiceprint is
+                    stored only in this browser's IndexedDB; nothing biometric ever reaches
+                    the canister.
+                  </p>
+                  ${this.voiceEnrollmentActive
+                    ? this.voiceEnrollmentPhase === 'loading-model'
+                      ? html`<p class="status">Downloading voice model (one-time, ~100MB)... ${this.voiceEnrollmentProgress.toFixed(0)}%</p>`
+                      : html`<p class="status">Enrolling... ${this.voiceEnrollmentProgress.toFixed(0)}% (keep talking)</p>`
+                    : html`
+                          <button @click=${this.#startVoiceEnrollment}>
+                            ${this.hasEnrolledVoice ? 'Re-enroll my voice' : 'Enroll my voice'}
+                          </button>
+                          ${this.hasEnrolledVoice
+                            ? html`<button @click=${this.#deleteEnrolledVoice}>Delete enrolled voice</button>`
+                            : ''}
+                          ${this.voiceEnrollmentError ? html`<p class="status">${this.voiceEnrollmentError}</p>` : ''}
+                          ${this.hasEnrolledVoice && this.lastSpeakerScore
+                            ? html`
+                                <p class="status">
+                                  Last detected: ${this.lastSpeakerScore.isCommander ? 'Commander' : 'Unverified guest'}
+                                  (score ${this.lastSpeakerScore.score.toFixed(2)})
+                                </p>
+                              `
+                            : ''}
+                        `}
+                </details>
+
+                <details class="evolution-matrix">
+                  <summary>Evolution Matrix</summary>
+                  ${this.evolutionProfile
+                    ? html`
+                        <p>Snark level: ${this.evolutionProfile.snark_level.toFixed(2)}</p>
+                        <p>Vendor skepticism: ${this.evolutionProfile.vendor_skepticism.toFixed(2)}</p>
+                        <p>Technical precision: ${this.evolutionProfile.technical_precision.toFixed(2)}</p>
+                        <p>Proactive interruption: ${this.evolutionProfile.proactive_interruption.toFixed(2)}</p>
+                      `
+                    : html`<p>Loading...</p>`}
+                  <p class="status">
+                    Grows naturally from archived workspaces (Critic Loop) and direct in-chat
+                    reprimands (Course Correction) — no reset button by design. Clamped to 0.2-0.95.
+                  </p>
+                  <button @click=${this.#refreshEvolutionLog}>
+                    ${this.evolutionLog.length > 0 ? 'Hide recent changes' : 'Show recent changes'}
+                  </button>
+                  ${this.evolutionLog.length > 0
+                    ? html`
+                        <ul>
+                          ${this.evolutionLog
+                            .slice()
+                            .reverse()
+                            .map(
+                              (entry) => html`
+                                <li>${new Date(Number(entry.timestamp / 1_000_000n)).toLocaleString()}: ${entry.summary}</li>
+                              `,
+                            )}
+                        </ul>
+                      `
+                    : ''}
+                </details>
+              `}
         </details>
 
         <details class="tactical-roster">
@@ -3355,7 +3525,7 @@ class App {
         <div class="col-right-feature">
           <span class="logo-badge">
             <img src="/bad-marine-logo.png" alt="Bad Marine LLC" />
-            <span class="logo-eye ${liveBrainState}${this.guestMode ? ' guest-drained' : ''}"></span>
+            <span class="logo-eye ${liveBrainState} mode-${this.operationalMode}${this.guestMode ? ' guest-drained' : ''}"></span>
             <span class="logo-llc">LLC</span>
           </span>
         </div>
