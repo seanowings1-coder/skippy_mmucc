@@ -53,7 +53,7 @@ const EVERYDAY_CASCADE = [
   { label: 'Dolphin 3.0',          model: process.env.OPENROUTER_MODEL_PAID   || 'cognitivecomputations/dolphin3.0-mistral-24b',                   paid: true  },
   { label: 'Stheno 8B',            model: process.env.OPENROUTER_MODEL_PAID2  || 'sao10k/l3-stheno-8b',                                           paid: true  },
   { label: 'Command R',            model: process.env.OPENROUTER_MODEL_PAID3  || 'cohere/command-r',                                               paid: true  },
-  { label: 'Lumimaid 70B',         model: process.env.OPENROUTER_MODEL_PAID4  || 'neversleep/llama-3.1-lumimaid-70b',                              paid: true  },
+  { label: 'Llama 3.1 70B',        model: process.env.OPENROUTER_MODEL_PAID4  || 'meta-llama/llama-3.1-70b-instruct',                              paid: true  },
 ];
 const OPENROUTER_MODEL_EVERYDAY = EVERYDAY_CASCADE[0].model;
 const OPENROUTER_MODEL_HEAVY_HITTER =
