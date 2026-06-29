@@ -312,6 +312,27 @@ const WORKSPACE_NAME_PROMPT_REPLIES = [
   "Give me a name and I'll spin it up.",
 ];
 
+const ROSTER_CLEAR_PHRASES = [
+  "it's the commander", "it's just me", "commander here", "skippy it's me",
+  "just me now", "they're gone",
+];
+
+const ROSTER_ADD_PHRASES = [
+  'add to roster', 'add roster profile', 'new roster entry', 'new roster profile',
+  'add roster entry', 'roster add', 'update roster',
+];
+const ROSTER_NAME_PROMPT_REPLIES = [
+  "Name or callsign for the new profile?",
+  "Who are we adding? Name or callsign.",
+  "Roger. What's the name?",
+  "Give me a name.",
+];
+const ROSTER_TRIGGER_PROMPT_REPLIES = [
+  (name) => `Got it — ${name}. What phrase triggers their profile? Something like "it's ${name}".`,
+  (name) => `${name}, copy. What should I listen for to know they're there?`,
+  (name) => `${name} logged. Trigger phrase?`,
+];
+
 const KARAOKE_TRIGGER_PHRASES = ['karaoke', 'sing a song', 'jam out', 'rock out'];
 // A pool, not one fixed line — confirmed live 2026-06-24: hearing the exact
 // same offer verbatim every single time read as flat/robotic rather than
@@ -470,6 +491,16 @@ const COMMAND_LEXICON_ENTRIES = [
     category: '8. Workspace Navigation',
     phrases: WORKSPACE_OPEN_PHRASES,
     description: 'Say the workspace name after the trigger (e.g. "open workspace Garage Build") — fuzzy-matches your active workspaces and switches immediately.',
+  },
+  {
+    category: '8. Workspace Navigation',
+    phrases: ROSTER_ADD_PHRASES,
+    description: 'Three-step: Skippy asks for name, then trigger phrase, then saves the profile. Role and notes can be filled in via the Tactical Roster panel afterward.',
+  },
+  {
+    category: '8. Workspace Navigation',
+    phrases: ROSTER_CLEAR_PHRASES,
+    description: 'Dismisses the active roster profile — use when the guest has left and you want Skippy back in Commander-only mode.',
   },
   {
     category: '9. Self-Evolution Matrix (course correction)',
@@ -644,6 +675,10 @@ class App {
   // web, so a follow-up "yes" searches for that, not for the literal "yes".
   pendingWebSearchQuery = null;
   pendingWorkspaceCreate = false; // true after create-trigger, waiting for name utterance
+  pendingRosterStep = null;  // 'name' | 'trigger' — voice roster add flow
+  pendingRosterName = null;  // name captured in step 1, used in step 2
+  voiceActionConfirm = null;    // 'delete' — confirm gate for voiceprint delete
+  voiceCalibrationModal = false; // calibration passage modal for enroll/re-enroll
   // Karaoke offer/confirm — armed when the trigger phrase fires, resolved
   // (yes or no) on the very next utterance, same pending-state shape as
   // pendingWebSearchQuery above.
@@ -943,6 +978,9 @@ class App {
     if (this.stopVoiceRecognition || this.guestMode) return;
     try {
       this.stopVoiceRecognition = await startRecognition((result) => {
+        // Ignore scores while Skippy is speaking or within cooldown after TTS ends —
+        // the mic picks up his own audio and he scores as Commander every time.
+        if (this.isSpeaking || Date.now() - this.lastSpeakEndTime < App.#SPEAK_COOLDOWN_MS) return;
         this.lastSpeakerScore = result;
         // A confident Commander voice match is strong evidence any active
         // Tactical Roster profile (Pillar 16) is stale — e.g. someone said
@@ -957,10 +995,7 @@ class App {
         // someone else, since there's no enrolled voiceprint for Lisa or
         // anyone else to confidently match against. An "Unverified Guest"
         // reading is not evidence of any specific person's identity.
-        if (result.isCommander && this.activeRosterProfile) {
-          this.activeRosterProfile = null;
-          this.#render();
-        }
+        this.#render();
       });
     } catch (err) {
       console.warn('[Skippy] speaker recognition failed to start:', err);
@@ -998,6 +1033,7 @@ class App {
       this.voiceEnrollmentError = err.message;
     } finally {
       this.voiceEnrollmentActive = false;
+      this.voiceCalibrationModal = false;
       this.#render();
       if (this.hasEnrolledVoice) {
         this.#startSpeakerRecognition();
@@ -1203,6 +1239,8 @@ class App {
     this.activeWorkspaceId = null;
     this.pendingWebSearchQuery = null;
     this.pendingWorkspaceCreate = false;
+    this.pendingRosterStep = null;
+    this.pendingRosterName = null;
     this.operationalMode = 'default';
     this.profileName = '';
     this.brainFamily = 'dolphin';
@@ -1633,7 +1671,7 @@ class App {
     // Skip the cooldown when waiting for a deliberate one-word confirmation
     // (karaoke offer or web-search permission) — the user's "yes"/"go" is
     // intentional, not Skippy's own voice looping back.
-    const awaitingConfirmation = this.pendingKaraokeOffer || !!this.pendingWebSearchQuery;
+    const awaitingConfirmation = this.pendingKaraokeOffer || !!this.pendingWebSearchQuery || !!this.pendingRosterStep;
     if (!awaitingConfirmation && Date.now() - this.lastSpeakEndTime < App.#SPEAK_COOLDOWN_MS) return;
     if (this.state === 'listening') {
       const lowerChunk = chunk.toLowerCase();
@@ -1907,6 +1945,60 @@ class App {
           this.#render();
         }
       }
+      return;
+    }
+
+    // ── Roster add (voice, three-step) ───────────────────────────────────────
+    // Step 1: trigger heard — ask for name.
+    if (
+      !this.guestMode &&
+      !this.pendingRosterStep &&
+      ROSTER_ADD_PHRASES.some((phrase) => lowerText.includes(phrase))
+    ) {
+      this.pendingRosterStep = 'name';
+      const prompt = ROSTER_NAME_PROMPT_REPLIES[Math.floor(Math.random() * ROSTER_NAME_PROMPT_REPLIES.length)];
+      this.#recordTurn(text, prompt);
+      this.#render();
+      this.#speak(prompt);
+      return;
+    }
+    // Step 2: name captured — ask for trigger phrase.
+    if (!this.guestMode && this.pendingRosterStep === 'name') {
+      this.pendingRosterName = text.trim();
+      this.pendingRosterStep = 'trigger';
+      const fn = ROSTER_TRIGGER_PROMPT_REPLIES[Math.floor(Math.random() * ROSTER_TRIGGER_PROMPT_REPLIES.length)];
+      const prompt = fn(this.pendingRosterName);
+      this.#recordTurn(text, prompt);
+      this.#render();
+      this.#speak(prompt);
+      return;
+    }
+    // Step 3: trigger phrase captured — save profile.
+    if (!this.guestMode && this.pendingRosterStep === 'trigger') {
+      const name = this.pendingRosterName;
+      const triggerPhrase = text.trim().toLowerCase();
+      this.pendingRosterStep = null;
+      this.pendingRosterName = null;
+      const profile = { name, triggerPhrase, role: '', notes: '' };
+      this.rosterProfiles = [...this.rosterProfiles, profile];
+      localStorage.setItem('skippy_roster_profiles', JSON.stringify(this.rosterProfiles));
+      const ack = `${name} is on the roster. Trigger: "${triggerPhrase}". Add role and notes in the panel if needed.`;
+      this.#recordTurn(text, ack);
+      this.#render();
+      this.#speak(ack);
+      return;
+    }
+
+    // ── Roster clear (voice, one-step) ───────────────────────────────────────
+    // "it's the Commander" / "just me now" — dismisses the active roster profile.
+    if (!this.guestMode && this.activeRosterProfile && ROSTER_CLEAR_PHRASES.some((p) => lowerText.includes(p))) {
+      const name = this.activeRosterProfile.name;
+      this.activeRosterProfile = null;
+      localStorage.setItem('skippy_roster_profiles', JSON.stringify(this.rosterProfiles));
+      const ack = `Copy — ${name} is off deck. Back to just you, Commander.`;
+      this.#recordTurn(text, ack);
+      this.#render();
+      this.#speak(ack);
       return;
     }
 
@@ -2299,6 +2391,9 @@ class App {
       });
       const data = await response.json();
       if (mySeq !== this.requestSeq) return; // superseded by a newer utterance
+      // Clear the stale voice score so the next turn starts fresh — prevents
+      // a Commander reading from this turn bleeding into Lisa's next turn.
+      this.lastSpeakerScore = null;
 
       if (!response.ok) {
         this.statusMessage = data.error || 'Skippy had nothing to say.';
@@ -3271,6 +3366,12 @@ class App {
                       : '...'}
                   <a href="https://elevenlabs.io/app/subscription" target="_blank" rel="noopener">Top Up</a>
                 </p>
+                ${this.fuelData?.twilio && !this.fuelData.twilio.error
+                  ? html`<p>
+                      Twilio: ${this.fuelData.twilio.currency} ${this.fuelData.twilio.balance}
+                      <a href="https://console.twilio.com/us1/billing/manage-billing/billing-overview" target="_blank" rel="noopener">Top Up</a>
+                    </p>`
+                  : ''}
                 <button @click=${this.#refreshFuel}>Refresh</button>
               </details>
 
@@ -3278,7 +3379,9 @@ class App {
 
         <details class="workspace-security">
           <summary>Workspace security</summary>
-          <button @click=${this.#toggleLexicon} aria-label="Command Lexicon">❓ Commands</button>
+          <div style="text-align:center;margin-top:0.5em;">
+            <button @click=${this.#toggleLexicon} aria-label="Command Lexicon">Commands</button>
+          </div>
           ${this.guestMode
             ? html`
                 <p class="status">🔒 Guest Mode active — brain/persona locked, destructive and admin actions hidden.</p>
@@ -3310,27 +3413,31 @@ class App {
                     stored only in this browser's IndexedDB; nothing biometric ever reaches
                     the canister.
                   </p>
-                  ${this.voiceEnrollmentActive
-                    ? this.voiceEnrollmentPhase === 'loading-model'
-                      ? html`<p class="status">Downloading voice model (one-time, ~100MB)... ${this.voiceEnrollmentProgress.toFixed(0)}%</p>`
-                      : html`<p class="status">Enrolling... ${this.voiceEnrollmentProgress.toFixed(0)}% (keep talking)</p>`
+                  ${this.voiceActionConfirm === 'delete'
+                    ? html`
+                        <p class="status">Delete your enrolled voiceprint? This cannot be undone.</p>
+                        <div style="display:flex;gap:0.5em;">
+                          <button @click=${() => { this.voiceActionConfirm = null; this.#deleteEnrolledVoice(); }}>Yes, confirm</button>
+                          <button @click=${() => { this.voiceActionConfirm = null; this.#render(); }}>Cancel</button>
+                        </div>
+                      `
                     : html`
-                          <button @click=${this.#startVoiceEnrollment}>
-                            ${this.hasEnrolledVoice ? 'Re-enroll my voice' : 'Enroll my voice'}
-                          </button>
-                          ${this.hasEnrolledVoice
-                            ? html`<button @click=${this.#deleteEnrolledVoice}>Delete enrolled voice</button>`
-                            : ''}
-                          ${this.voiceEnrollmentError ? html`<p class="status">${this.voiceEnrollmentError}</p>` : ''}
-                          ${this.hasEnrolledVoice && this.lastSpeakerScore
-                            ? html`
-                                <p class="status">
-                                  Last detected: ${this.lastSpeakerScore.isCommander ? 'Commander' : 'Unverified guest'}
-                                  (score ${this.lastSpeakerScore.score.toFixed(2)})
-                                </p>
-                              `
-                            : ''}
-                        `}
+                        <button @click=${() => { this.voiceCalibrationModal = true; this.#render(); }}>
+                          ${this.hasEnrolledVoice ? 'Re-enroll my voice' : 'Enroll my voice'}
+                        </button>
+                        ${this.hasEnrolledVoice
+                          ? html`<button @click=${() => { this.voiceActionConfirm = 'delete'; this.#render(); }}>Delete enrolled voice</button>`
+                          : ''}
+                        ${this.voiceEnrollmentError ? html`<p class="status">${this.voiceEnrollmentError}</p>` : ''}
+                        ${this.hasEnrolledVoice && this.lastSpeakerScore
+                          ? html`
+                              <p class="status">
+                                Last detected: ${this.lastSpeakerScore.isCommander ? 'Commander' : 'Unverified guest'}
+                                (score ${this.lastSpeakerScore.score.toFixed(2)})
+                              </p>
+                            `
+                          : ''}
+                      `}
                 </details>
 
                 <details class="evolution-matrix">
@@ -3512,6 +3619,49 @@ class App {
                 >
                   EMERGENCY PANIC
                 </button>
+              `
+            : ''}
+          ${this.voiceCalibrationModal
+            ? html`
+                <div style="position: fixed; inset: 0; background: rgba(0,0,0,0.75); display: flex; align-items: center; justify-content: center; z-index: 2000;">
+                  <div style="background: var(--bg-dark-armor, #1a1a2e); color: var(--text-brushed-aluminum, #d1d5db); padding: 28px 32px; border-radius: 6px; max-width: 520px; width: 90%; border: 1px solid var(--border-strong, #374151);">
+                    <h2 style="margin:0 0 0.5em;">${this.hasEnrolledVoice ? 'Re-enroll Voice' : 'Enroll Voice'}</h2>
+                    <p style="margin:0 0 1em;font-size:0.95em;opacity:0.85;">
+                      Read the passage below out loud at your normal pace and tone.
+                      ${this.voiceEnrollmentActive
+                        ? 'This screen will close automatically once enough data has been collected — keep reading until it does.'
+                        : 'Click Start when ready.'}
+                    </p>
+                    <blockquote style="border-left:3px solid var(--accent-cyan,#00e5ff);margin:0 0 1.2em;padding:0.6em 1em;font-size:1.1em;line-height:1.8;font-style:normal;">
+                      The morning light came through the window slowly, casting long shadows across
+                      the floor. She poured a cup of coffee and sat down at the kitchen table,
+                      thinking about everything that needed to happen before noon. Outside, the wind
+                      moved through the trees in long, steady waves. A dog barked somewhere down the
+                      road, then went quiet. It was the kind of morning where nothing felt urgent,
+                      and that was perfectly fine. The forecast called for rain by evening, but for
+                      now the sky was clear and the air had that sharp, clean smell that follows a
+                      cold night.
+                    </blockquote>
+                    ${this.voiceEnrollmentActive
+                      ? html`
+                          <p style="margin:0 0 0.5em;font-size:0.9em;">
+                            ${this.voiceEnrollmentPhase === 'loading-model'
+                              ? `Downloading model... ${this.voiceEnrollmentProgress.toFixed(0)}%`
+                              : `Enrolling... ${this.voiceEnrollmentProgress.toFixed(0)}% — keep reading`}
+                          </p>
+                          <div style="height:6px;background:#374151;border-radius:3px;">
+                            <div style="height:100%;width:${this.voiceEnrollmentProgress.toFixed(0)}%;background:var(--accent-cyan,#00e5ff);border-radius:3px;transition:width 0.3s;"></div>
+                          </div>
+                        `
+                      : html`
+                          <div style="display:flex;gap:0.75em;margin-top:0.5em;">
+                            <button @click=${this.#startVoiceEnrollment}>Start</button>
+                            <button @click=${() => { this.voiceCalibrationModal = false; this.#render(); }}>Cancel</button>
+                          </div>
+                          ${this.voiceEnrollmentError ? html`<p class="status" style="margin-top:0.5em;">${this.voiceEnrollmentError}</p>` : ''}
+                        `}
+                  </div>
+                </div>
               `
             : ''}
           ${this.emergencyConfirmOpen

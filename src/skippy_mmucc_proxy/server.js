@@ -43,17 +43,21 @@ const ELEVENLABS_SINGING_VOICE_ID = process.env.ELEVENLABS_SINGING_VOICE_ID;
 // plain string-matching on the transcript in App.js, never a second
 // classification call. "Everyday" is today's existing default model.
 const OPENROUTER_MODEL_EVERYDAY = process.env.OPENROUTER_MODEL || 'openai/gpt-4o-mini';
-// 4-tier everyday brain cascade (all share the same generation params):
-//   T1. Free primary   (OPENROUTER_MODEL, e.g. Dolphin :free)
-//   T2. Paid primary   — same as T1 with :free stripped → burns OpenRouter credits
-//   T3. Free fallback  (OPENROUTER_MODEL_FALLBACK, e.g. MythoMax free)
-//   T4. Paid fallback  — same as T3 but explicit paid routing → burns credits too
+// 6-tier everyday brain cascade — exhaust free options before spending credits:
+//   T1.  Free primary       (OPENROUTER_MODEL)               e.g. Dolphin :free
+//   T1.5 Free primary-2     (OPENROUTER_MODEL_FREE2)         e.g. Llama 3.3 70B :free
+//   T2.  Paid primary       (OPENROUTER_MODEL_PAID)          e.g. Dolphin 3.0 paid
+//   T3.  Free fallback      (OPENROUTER_MODEL_FALLBACK)      e.g. Qwen :free  — brainDowngrade
+//   T3.5 Free fallback-2    (OPENROUTER_MODEL_FREE4)         e.g. Hermes 3 :free
+//   T4.  Paid fallback      (OPENROUTER_MODEL_FALLBACK_PAID) e.g. Qwen paid
 // 404 "No endpoints found" = model offline. 429 = free-tier rate limit.
-// Either failure on tier N triggers tier N+1 automatically.
-// Tiers T2 & T4 set paidTier:true in the response so the frontend can light an
-// indicator — "you're burning credits right now."
+// T2 & T4 set paidTier:true so the frontend lights the amber credits indicator.
+const OPENROUTER_MODEL_EVERYDAY_FREE2 =
+  process.env.OPENROUTER_MODEL_FREE2 || 'meta-llama/llama-3.3-70b-instruct:free';
 const OPENROUTER_MODEL_EVERYDAY_FALLBACK =
   process.env.OPENROUTER_MODEL_FALLBACK || 'sao10k/l3-lunaris-8b';
+const OPENROUTER_MODEL_EVERYDAY_FREE4 =
+  process.env.OPENROUTER_MODEL_FREE4 || 'nousresearch/hermes-3-llama-3.1-405b:free';
 const OPENROUTER_MODEL_EVERYDAY_PAID =
   process.env.OPENROUTER_MODEL_PAID ||
   OPENROUTER_MODEL_EVERYDAY.replace(/:free$/, '');
@@ -132,8 +136,11 @@ const TAVILY_API_KEY = process.env.TAVILY_API_KEY;
 // warning instead of throwing, so the whole dispatch/relay pipeline is
 // buildable and testable with dummy contact numbers before a real Twilio
 // account exists (per the user's explicit 2026-06-21 instruction).
+// Auth uses API Key (SK...) + secret rather than the master Auth Token —
+// same REST endpoint, Basic Auth username = API Key SID, password = secret.
 const TWILIO_ACCOUNT_SID = process.env.TWILIO_ACCOUNT_SID;
-const TWILIO_AUTH_TOKEN = process.env.TWILIO_AUTH_TOKEN;
+const TWILIO_API_KEY_SID = process.env.TWILIO_API_KEY_SID;
+const TWILIO_API_KEY_SECRET = process.env.TWILIO_API_KEY_SECRET;
 const TWILIO_FROM_NUMBER = process.env.TWILIO_FROM_NUMBER;
 const EMERGENCY_CONTACT_NUMBERS = (process.env.EMERGENCY_CONTACT_NUMBERS || '')
   .split(',')
@@ -588,11 +595,11 @@ async function tavilySearch(query) {
 // when Twilio isn't configured yet, so /emergency-dispatch stays fully
 // testable with dummy contact numbers before a real account exists.
 async function sendSms(to, body) {
-  if (!TWILIO_ACCOUNT_SID || !TWILIO_AUTH_TOKEN || !TWILIO_FROM_NUMBER) {
+  if (!TWILIO_ACCOUNT_SID || !TWILIO_API_KEY_SID || !TWILIO_API_KEY_SECRET || !TWILIO_FROM_NUMBER) {
     console.warn(`[Skippy emergency] Twilio not configured — SMS not sent to ${to}: "${body}"`);
     return { skipped: true };
   }
-  const auth = Buffer.from(`${TWILIO_ACCOUNT_SID}:${TWILIO_AUTH_TOKEN}`).toString('base64');
+  const auth = Buffer.from(`${TWILIO_API_KEY_SID}:${TWILIO_API_KEY_SECRET}`).toString('base64');
   const response = await fetch(
     `https://api.twilio.com/2010-04-01/Accounts/${TWILIO_ACCOUNT_SID}/Messages.json`,
     {
@@ -1143,15 +1150,22 @@ app.post('/respond', requireSession, async (req, res) => {
       }
     }
 
-    // T1 → T2: Dolphin free → Dolphin paid
+    // T1 → T1.5: Dolphin free → Llama free
+    let brainDowngrade = false;
+    if (isFallbackable(response)) {
+      const t15 = await tryFallback(activeModel, OPENROUTER_MODEL_EVERYDAY_FREE2, response);
+      if (!t15) return;
+      activeModel = t15.model;
+      response = t15.response;
+    }
+    // T1.5 → T2: Llama free → Dolphin paid (both free primaries exhausted)
     if (isFallbackable(response)) {
       const t2 = await tryFallback(activeModel, OPENROUTER_MODEL_EVERYDAY_PAID, response);
       if (!t2) return;
       activeModel = t2.model;
       response = t2.response;
     }
-    // T2 → T3: Dolphin paid → Other free (different model family — brainDowngrade)
-    let brainDowngrade = false;
+    // T2 → T3: Dolphin paid → Qwen free (fallback family — brainDowngrade)
     if (isFallbackable(response)) {
       const t3 = await tryFallback(activeModel, OPENROUTER_MODEL_EVERYDAY_FALLBACK, response);
       if (!t3) return;
@@ -1159,7 +1173,14 @@ app.post('/respond', requireSession, async (req, res) => {
       response = t3.response;
       brainDowngrade = true;
     }
-    // T3 → T4: Other free → Other paid
+    // T3 → T3.5: Qwen free → Hermes free
+    if (isFallbackable(response)) {
+      const t35 = await tryFallback(activeModel, OPENROUTER_MODEL_EVERYDAY_FREE4, response);
+      if (!t35) return;
+      activeModel = t35.model;
+      response = t35.response;
+    }
+    // T3.5 → T4: Hermes free → Qwen paid (last resort)
     if (isFallbackable(response)) {
       const t4 = await tryFallback(activeModel, OPENROUTER_MODEL_EVERYDAY_FALLBACK_PAID, response);
       if (!t4) return;
@@ -1902,6 +1923,24 @@ app.get('/api/fuel', requireSession, async (req, res) => {
     }
   } catch (err) {
     result.elevenlabs = { error: err.message };
+  }
+
+  if (TWILIO_ACCOUNT_SID && TWILIO_API_KEY_SID && TWILIO_API_KEY_SECRET) {
+    try {
+      const twAuth = Buffer.from(`${TWILIO_API_KEY_SID}:${TWILIO_API_KEY_SECRET}`).toString('base64');
+      const twResponse = await fetch(
+        `https://api.twilio.com/2010-04-01/Accounts/${TWILIO_ACCOUNT_SID}/Balance.json`,
+        { headers: { Authorization: `Basic ${twAuth}` } },
+      );
+      if (twResponse.ok) {
+        const twData = await twResponse.json();
+        result.twilio = { balance: twData.balance, currency: twData.currency };
+      } else {
+        result.twilio = { error: `Twilio ${twResponse.status}` };
+      }
+    } catch (err) {
+      result.twilio = { error: err.message };
+    }
   }
 
   res.json(result);
