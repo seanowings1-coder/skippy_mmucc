@@ -2604,6 +2604,15 @@ class App {
       this.#render();
     }
 
+    // Go dark immediately — ghost mode activates on confirm, not on SMS success.
+    // Twilio delivery is best-effort; a failed SMS must never block the lockdown.
+    this.emergencyActive = true;
+    this.ghostMode = true;
+    this.commsOpen = false;
+    this.statusMessage = '';
+    this.#render();
+    await this.#startGuardianStream();
+
     try {
       const response = await fetch(`${PROXY_URL}/emergency-dispatch`, {
         method: 'POST',
@@ -2611,19 +2620,14 @@ class App {
         body: JSON.stringify({ lat, lon }),
       });
       const data = await response.json();
-      if (!response.ok) throw new Error(data.error || 'Dispatch failed.');
-
+      if (!response.ok) {
+        console.error('[Skippy] Dispatch SMS failed:', data.error || response.status);
+        return;
+      }
       this.emergencyToken = data.token;
       this.emergencyId = await this.backendActor.start_emergency(data.token);
-      this.emergencyActive = true;
-      this.ghostMode = true;
-      this.commsOpen = false;
-      this.statusMessage = '';
-      this.#render();
-      await this.#startGuardianStream();
     } catch (err) {
-      this.statusMessage = `Emergency dispatch failed: ${err.message}`;
-      this.#render();
+      console.error('[Skippy] Dispatch request failed:', err.message);
     }
   };
 
