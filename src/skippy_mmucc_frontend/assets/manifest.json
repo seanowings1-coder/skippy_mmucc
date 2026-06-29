@@ -1,0 +1,18 @@
+{
+  "name": "Skippy Command Deck",
+  "short_name": "Skippy",
+  "description": "Skippy — Bad Marine LLC personal AI command deck",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#0d0d0d",
+  "theme_color": "#0d0d0d",
+  "orientation": "portrait-primary",
+  "icons": [
+    {
+      "src": "/bad-marine-logo.png",
+      "sizes": "1254x1254",
+      "type": "image/png",
+      "purpose": "any"
+    }
+  ]
+}

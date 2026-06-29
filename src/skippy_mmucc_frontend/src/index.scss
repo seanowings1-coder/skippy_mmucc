@@ -610,3 +610,130 @@ button:disabled {
   border-color: var(--accent-cyan-glow);
   color: var(--accent-cyan-glow);
 }
+
+// --- Mobile-only / desktop-only visibility helpers ---------------------------
+// These classes rely on the media query below; put them above the breakpoint
+// so specificity doesn't fight the override.
+
+.mobile-only { display: none !important; }
+.desktop-only {} // visible by default; hidden inside the media query below
+.mobile-dock { display: none; } // shown only inside the mobile media query below
+
+// --- Mobile Remote Control layout (≤768px) -----------------------------------
+
+@media (max-width: 768px) {
+  // dvh = dynamic viewport height: shrinks when Android Chrome's nav bar or
+  // virtual keyboard appears, so the layout reflows instead of getting clipped.
+  .command-deck {
+    height: 100dvh;
+  }
+
+  // No page-level scrolling — the transcript area handles its own scrolling.
+  html, body {
+    height: 100dvh;
+    overflow: hidden;
+  }
+
+  // Compact topbar on mobile.
+  .topbar {
+    padding: 0.4em 0.6em;
+  }
+
+  .topbar h1 {
+    font-size: 0.9em;
+    gap: 0.4em;
+  }
+
+  // Hide desktop-only items on mobile.
+  .desktop-only { display: none !important; }
+
+  // Show mobile-only items.
+  .mobile-only { display: flex !important; }
+
+  // Single-column layout: hide both sidebars.
+  .columns {
+    grid-template-columns: 1fr;
+  }
+
+  .col-left, .col-right {
+    display: none;
+    border: none;
+  }
+
+  // Drawer mode: a sidebar slides in as a full-screen overlay.
+  // Close button (inside each drawer) dismisses it.
+  .col-left.mobile-drawer-open,
+  .col-right.mobile-drawer-open {
+    display: block;
+    position: fixed;
+    inset: 0;
+    z-index: 500;
+    overflow-y: auto;
+    padding: 0.75em;
+    background: var(--bg-dark-armor);
+    border: none;
+  }
+
+  // Hide the statusbar on mobile — the dock replaces it.
+  .statusbar { display: none; }
+
+  // Remove transcript bottom padding (dock is in-flow below, not fixed).
+  .conversation-transcript {
+    padding-bottom: 0;
+  }
+
+  // Mobile Tactical Dock — positioned inside .col-center as the last flex
+  // item. Stays in normal document flow so the virtual keyboard reflows the
+  // whole layout rather than sliding under it.
+  .mobile-dock {
+    display: flex !important;
+    align-items: stretch;
+    gap: 0.4em;
+    padding: 0.5em 0.6em;
+    background: var(--bg-dark-armor);
+    border-top: 2px solid var(--border-subtle);
+  }
+
+  // Voice button: left third, cyan on active.
+  .dock-voice {
+    flex: 3;
+    min-height: 52px;
+    font-size: 0.95em;
+    font-weight: 600;
+  }
+
+  // STOP button: fixed-width island, visually isolated with amber/orange so
+  // it can't be confused with voice (left) or Steel Rain (right). Slightly
+  // taller so it stands out as the "danger" action.
+  .dock-stop {
+    flex: 0 0 60px;
+    min-height: 56px;
+    font-size: 1.5em;
+    background: #7c2d12;
+    border-color: #ea580c;
+    color: #fed7aa;
+    border-radius: 8px;
+    // Extra horizontal margin creates a visual gap between it and neighbors.
+    margin: 0 0.2em;
+    padding: 0;
+  }
+
+  .dock-stop:not(:disabled):hover {
+    background: #9a3412;
+    border-color: #f97316;
+  }
+
+  // Steel Rain button: right third, red tint when active.
+  .dock-sr {
+    flex: 2;
+    min-height: 52px;
+    font-size: 0.85em;
+    font-weight: 600;
+  }
+
+  .dock-sr.active {
+    background: #7f1d1d;
+    border-color: #ef4444;
+    color: white;
+  }
+}

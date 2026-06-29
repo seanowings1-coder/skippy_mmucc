@@ -824,6 +824,8 @@ class App {
   brainTiers = null;
   showBrainGrid = false;
   tierIndex = -1;
+  showLeftDrawer = false;
+  showRightDrawer = false;
   lastSpeakEndTime = 0; // timestamp when TTS last finished — used to discard
                         // recognition results that arrived during the cooldown window
 
@@ -3269,6 +3271,12 @@ class App {
 
         <header class="topbar">
           <h1>
+            <button
+              class="mobile-only"
+              style="background:none;border:none;font-size:1.3em;padding:0.15em 0.35em;cursor:pointer;color:var(--text-brushed-aluminum);"
+              @click=${() => { this.showLeftDrawer = !this.showLeftDrawer; this.showRightDrawer = false; this.#render(); }}
+              title="Workspace &amp; Config"
+            >☰</button>
             Skippy Command Deck
             ${this.guestMode
               ? html`<button class="badge active" @click=${this.#unlockGuestMode} title="Click to unlock">🔒 Guest Mode Active</button>`
@@ -3276,7 +3284,7 @@ class App {
           </h1>
           <div class="badges">
             <button
-              class="badge ${this.voiceMode === 'premium' ? 'active' : ''}"
+              class="badge desktop-only ${this.voiceMode === 'premium' ? 'active' : ''}"
               @click=${this.#toggleVoiceMode}
               ?disabled=${this.voiceMuted}
             >
@@ -3286,7 +3294,7 @@ class App {
               ? ''
               : html`
                   <button
-                    class="badge ${this.superBrainLocked ? 'active' : ''}"
+                    class="badge desktop-only ${this.superBrainLocked ? 'active' : ''}"
                     @click=${() => this.#setSuperBrainLock(!this.superBrainLocked)}
                   >
                     Super Brain: ${this.superBrainLocked ? 'ON' : 'OFF'} 🧠
@@ -3304,11 +3312,21 @@ class App {
               })()}"
               @click=${() => { if (this.brainTiers) { this.showBrainGrid = true; this.#render(); } }}
             ></span>
+            <button
+              class="badge mobile-only"
+              style="font-size:1.1em;padding:0.2em 0.5em;"
+              @click=${() => { this.showRightDrawer = !this.showRightDrawer; this.showLeftDrawer = false; this.#render(); }}
+              title="Brain &amp; Security"
+            >⚙</button>
           </div>
         </header>
 
         <div class="columns">
-        <aside class="col-left">
+        <aside class="col-left ${this.showLeftDrawer ? 'mobile-drawer-open' : ''}">
+          <div class="mobile-only" style="align-items:center;justify-content:space-between;margin-bottom:0.6em;padding-bottom:0.6em;border-bottom:1px solid var(--border-subtle);">
+            <strong style="letter-spacing:0.05em;">WORKSPACE &amp; CONFIG</strong>
+            <button @click=${() => { this.showLeftDrawer = false; this.#render(); }}>✕ Close</button>
+          </div>
         <section class="workspace-switcher">
           <select @change=${this.#handleWorkspaceChange} .value=${this.activeWorkspaceId?.toString() ?? ''}>
             ${this.workspaces
@@ -3563,7 +3581,7 @@ class App {
                 Voice dictation isn't supported in this browser — try Chrome.
               </p>`
             : html`
-                <section class="mic-controls">
+                <section class="mic-controls desktop-only">
                   <button
                     class="mic-button ${this.state}"
                     @click=${this.state === 'idle' ? this.#startListening : this.#stopListening}
@@ -3615,7 +3633,7 @@ class App {
             <button type="submit">${this.manualNoteMode ? 'Save Note' : 'Send'}</button>
           </form>
 
-          <section class="mic-controls">
+          <section class="mic-controls desktop-only">
             <button @click=${this.#toggleVoiceMuted}>
               ${this.voiceMuted ? '🔇 Muted (text only)' : '🔊 Mute'}
             </button>
@@ -3735,9 +3753,36 @@ class App {
             ? html`<p class="status">🚨 Emergency dispatch active. Say "Skippy, stand down" to end it.</p>`
             : ''}
         </div>
+
+        <div class="mobile-dock">
+          <button
+            class="dock-voice mic-button ${this.state}"
+            @click=${this.state === 'idle' ? this.#startListening : this.#stopListening}
+          >
+            ${this.state === 'idle' ? '🎙️ Listen' : '⏹ Stop'}
+          </button>
+          <button
+            class="dock-stop"
+            @click=${this.#silence}
+            ?disabled=${!this.isSpeaking && this.statusMessage !== 'Skippy is thinking...'}
+            title="Stop speaking / cancel"
+          >✋</button>
+          <button
+            class="dock-sr ${this.operationalMode === 'tactical' ? 'active' : ''}"
+            @click=${() => {
+              this.operationalMode = this.operationalMode === 'tactical' ? 'default' : 'tactical';
+              this.statusMessage = '';
+              this.#render();
+            }}
+          >⚡ ${this.operationalMode === 'tactical' ? 'Normal' : 'Steel Rain'}</button>
+        </div>
         </section>
 
-        <aside class="col-right">
+        <aside class="col-right ${this.showRightDrawer ? 'mobile-drawer-open' : ''}">
+          <div class="mobile-only" style="align-items:center;justify-content:space-between;margin-bottom:0.6em;padding-bottom:0.6em;border-bottom:1px solid var(--border-subtle);">
+            <strong style="letter-spacing:0.05em;">BRAIN &amp; SECURITY</strong>
+            <button @click=${() => { this.showRightDrawer = false; this.#render(); }}>✕ Close</button>
+          </div>
         <div class="col-right-feature">
           <span class="logo-badge">
             <img src="/bad-marine-logo.png" alt="Bad Marine LLC" />
