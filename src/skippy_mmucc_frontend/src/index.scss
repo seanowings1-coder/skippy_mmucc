@@ -677,6 +677,10 @@ button:disabled {
   // Hide the statusbar on mobile — the dock replaces it.
   .statusbar { display: none; }
 
+  // The logo feature box is decorative and takes 50% height — too expensive
+  // for a small drawer. Hide it; Neo Skin and settings are the useful content.
+  .col-right.mobile-drawer-open .col-right-feature { display: none; }
+
   // Remove transcript bottom padding (dock is in-flow below, not fixed).
   .conversation-transcript {
     padding-bottom: 0;

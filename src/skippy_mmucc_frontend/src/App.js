@@ -3779,9 +3779,26 @@ class App {
         </section>
 
         <aside class="col-right ${this.showRightDrawer ? 'mobile-drawer-open' : ''}">
-          <div class="mobile-only" style="align-items:center;justify-content:space-between;margin-bottom:0.6em;padding-bottom:0.6em;border-bottom:1px solid var(--border-subtle);">
-            <strong style="letter-spacing:0.05em;">BRAIN &amp; SECURITY</strong>
-            <button @click=${() => { this.showRightDrawer = false; this.#render(); }}>✕ Close</button>
+          <div class="mobile-only" style="flex-direction:column;gap:0.5em;margin-bottom:0.8em;padding-bottom:0.7em;border-bottom:1px solid var(--border-subtle);">
+            <div style="display:flex;align-items:center;justify-content:space-between;">
+              <strong style="letter-spacing:0.05em;">BRAIN &amp; SECURITY</strong>
+              <button @click=${() => { this.showRightDrawer = false; this.#render(); }}>✕ Close</button>
+            </div>
+            <div style="display:flex;gap:0.5em;flex-wrap:wrap;">
+              <button
+                class="badge ${this.voiceMode === 'premium' ? 'active' : ''}"
+                style="flex:1;"
+                @click=${this.#toggleVoiceMode}
+                ?disabled=${this.voiceMuted}
+              >Voice: ${this.voiceMode === 'premium' ? 'Premium 🎙' : 'Economy 💬'}</button>
+              ${this.guestMode ? '' : html`
+                <button
+                  class="badge ${this.superBrainLocked ? 'active' : ''}"
+                  style="flex:1;"
+                  @click=${() => this.#setSuperBrainLock(!this.superBrainLocked)}
+                >Super Brain: ${this.superBrainLocked ? 'ON 🧠' : 'OFF 🧠'}</button>
+              `}
+            </div>
           </div>
         <div class="col-right-feature">
           <span class="logo-badge">
