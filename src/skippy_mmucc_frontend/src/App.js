@@ -2610,6 +2610,12 @@ class App {
     this.ghostMode = true;
     this.commsOpen = false;
     this.statusMessage = '';
+    // Force mic on so "open comms" / "stand down" work even if listening wasn't
+    // already active when the emergency fired.
+    if (this.state === 'idle' && this.recognition) {
+      this.state = 'listening';
+      this.recognition.start();
+    }
     this.#render();
     await this.#startGuardianStream();
 
