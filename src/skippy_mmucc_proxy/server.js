@@ -50,9 +50,9 @@ const EVERYDAY_CASCADE = [
   { label: 'Dolphin Venice (free)', model: process.env.OPENROUTER_MODEL       || 'cognitivecomputations/dolphin-mistral-24b-venice-edition:free', paid: false },
   { label: 'Llama 3.3 70B (free)', model: process.env.OPENROUTER_MODEL_FREE2  || 'meta-llama/llama-3.3-70b-instruct:free',                        paid: false },
   { label: 'Hermes 3 405B (free)', model: process.env.OPENROUTER_MODEL_FREE3  || 'nousresearch/hermes-3-llama-3.1-405b:free',                      paid: false },
-  { label: 'Dolphin 3.0',          model: process.env.OPENROUTER_MODEL_PAID   || 'cognitivecomputations/dolphin3.0-mistral-24b',                   paid: true  },
-  { label: 'Stheno 8B',            model: process.env.OPENROUTER_MODEL_PAID2  || 'sao10k/l3-stheno-8b',                                           paid: true  },
-  { label: 'Command R',            model: process.env.OPENROUTER_MODEL_PAID3  || 'cohere/command-r',                                               paid: true  },
+  { label: 'Lunaris 8B',            model: process.env.OPENROUTER_MODEL_PAID   || 'sao10k/l3-lunaris-8b',                                           paid: true  },
+  { label: 'MythoMax 13B',         model: process.env.OPENROUTER_MODEL_PAID2  || 'gryphe/mythomax-l2-13b',                                         paid: true  },
+  { label: 'LFM 24B',              model: process.env.OPENROUTER_MODEL_PAID3  || 'liquid/lfm-2-24b-a2b',                                           paid: true  },
   { label: 'Llama 3.1 70B',        model: process.env.OPENROUTER_MODEL_PAID4  || 'meta-llama/llama-3.1-70b-instruct',                              paid: true  },
 ];
 const OPENROUTER_MODEL_EVERYDAY = EVERYDAY_CASCADE[0].model;
