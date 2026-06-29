@@ -201,8 +201,8 @@ button:disabled {
   box-shadow: none;
 }
 
-// Paid-tier LED — small dot in the header badge row that glows amber when
-// the everyday brain has escalated past the free-tier primary model.
+// Cost-tier LED — color escalates T4→T7 from amber to red via inline style.
+// Free tiers (T1-T3) leave it dark. Color and glow are set by App.js.
 .tier-dot {
   display: inline-block;
   width: 8px;
@@ -212,12 +212,6 @@ button:disabled {
   border: 1px solid #444;
   transition: background 0.4s ease, box-shadow 0.4s ease, border-color 0.4s ease;
   align-self: center;
-
-  &.paid {
-    background: #f59e0b;
-    border-color: #f59e0b;
-    box-shadow: 0 0 6px rgba(245, 158, 11, 0.7);
-  }
 }
 
 // --- Live Brain indicator (the logo's "eye" — see .logo-eye above) --------

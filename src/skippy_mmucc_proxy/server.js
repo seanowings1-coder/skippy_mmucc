@@ -66,7 +66,7 @@ const OPENROUTER_MODEL_HEAVY_HITTER_FALLBACK_PAID =
   process.env.OPENROUTER_MODEL_HEAVY_HITTER_FALLBACK_PAID ||
   OPENROUTER_MODEL_HEAVY_HITTER_FALLBACK.replace(/:free$/, '');
 const OPENROUTER_MODEL_TACTICAL =
-  process.env.OPENROUTER_MODEL_TACTICAL || 'anthropic/claude-haiku-4.5';
+  process.env.OPENROUTER_MODEL_TACTICAL || 'anthropic/claude-sonnet-4-6';
 // Tactical 4-tier cascade: primary → paid primary → free fallback → paid fallback.
 const OPENROUTER_MODEL_TACTICAL_FALLBACK =
   process.env.OPENROUTER_MODEL_TACTICAL_FALLBACK || 'meta-llama/llama-3.3-70b-instruct:free';
@@ -1184,7 +1184,7 @@ app.post('/respond', requireSession, async (req, res) => {
         }))
       : null;
 
-    res.json({ reply, brain, model: activeModel, paidTier, brainDowngrade, brainTiers });
+    res.json({ reply, brain, model: activeModel, paidTier, brainDowngrade, brainTiers, tierIndex: activeIdx });
   } catch (err) {
     if (err.name === 'AbortError') return; // client already gone, nothing to send back
     res.status(502).json({ error: `Failed to reach OpenRouter: ${err.message}` });

@@ -823,6 +823,7 @@ class App {
   brainFamily = 'dolphin'; // 'dolphin' | 'other' — quip only fires on transition
   brainTiers = null;
   showBrainGrid = false;
+  tierIndex = -1;
   lastSpeakEndTime = 0; // timestamp when TTS last finished — used to discard
                         // recognition results that arrived during the cooldown window
 
@@ -2414,6 +2415,7 @@ class App {
       this.lastModel = data.model || '';
       this.onPaidTier = !!data.paidTier;
       if (data.brainTiers) this.brainTiers = data.brainTiers;
+      if (data.tierIndex !== undefined) this.tierIndex = data.tierIndex;
       this.statusMessage = '';
 
       // Brain downgrade: only announce once when the family actually transitions
@@ -3291,9 +3293,15 @@ class App {
                   </button>
                 `}
             <span
-              class="tier-dot ${this.onPaidTier ? 'paid' : ''}"
+              class="tier-dot"
               title="${this.onPaidTier ? `Fallback active — ${this.lastModel}` : `Primary — ${this.lastModel || 'free tier'}`}"
-              style="cursor:${this.brainTiers ? 'pointer' : 'default'}"
+              style="${(() => {
+                const TIER_COLORS = ['','','','#f59e0b','#f97316','#ef4444','#dc2626'];
+                const c = TIER_COLORS[this.tierIndex] || '';
+                return c
+                  ? `background:${c};border-color:${c};box-shadow:0 0 6px ${c}b3;cursor:pointer`
+                  : `cursor:${this.brainTiers ? 'pointer' : 'default'}`;
+              })()}"
               @click=${() => { if (this.brainTiers) { this.showBrainGrid = true; this.#render(); } }}
             ></span>
           </div>
