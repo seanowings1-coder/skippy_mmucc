@@ -821,6 +821,8 @@ class App {
   lastModel = '';
   onPaidTier = false;
   brainFamily = 'dolphin'; // 'dolphin' | 'other' — quip only fires on transition
+  brainTiers = null;
+  showBrainGrid = false;
   lastSpeakEndTime = 0; // timestamp when TTS last finished — used to discard
                         // recognition results that arrived during the cooldown window
 
@@ -2411,6 +2413,7 @@ class App {
       this.lastBrain = data.brain || '';
       this.lastModel = data.model || '';
       this.onPaidTier = !!data.paidTier;
+      if (data.brainTiers) this.brainTiers = data.brainTiers;
       this.statusMessage = '';
 
       // Brain downgrade: only announce once when the family actually transitions
@@ -3290,6 +3293,8 @@ class App {
             <span
               class="tier-dot ${this.onPaidTier ? 'paid' : ''}"
               title="${this.onPaidTier ? `Fallback active — ${this.lastModel}` : `Primary — ${this.lastModel || 'free tier'}`}"
+              style="cursor:${this.brainTiers ? 'pointer' : 'default'}"
+              @click=${() => { if (this.brainTiers) { this.showBrainGrid = true; this.#render(); } }}
             ></span>
           </div>
         </header>
@@ -3660,6 +3665,43 @@ class App {
                           </div>
                           ${this.voiceEnrollmentError ? html`<p class="status" style="margin-top:0.5em;">${this.voiceEnrollmentError}</p>` : ''}
                         `}
+                  </div>
+                </div>
+              `
+            : ''}
+          ${this.showBrainGrid && this.brainTiers
+            ? html`
+                <div style="position:fixed;inset:0;background:rgba(0,0,0,0.75);display:flex;align-items:center;justify-content:center;z-index:2000;"
+                     @click=${(e) => { if (e.target === e.currentTarget) { this.showBrainGrid = false; this.#render(); } }}>
+                  <div style="background:var(--bg-dark-armor,#1a1a2e);color:var(--text-brushed-aluminum,#d1d5db);padding:28px 32px;border-radius:6px;max-width:480px;width:90%;border:1px solid var(--border-strong,#374151);">
+                    <h2 style="margin:0 0 1em;font-size:1.1em;letter-spacing:0.05em;">AI Brain Cascade</h2>
+                    <table style="width:100%;border-collapse:collapse;font-size:0.9em;">
+                      <thead>
+                        <tr style="border-bottom:1px solid var(--border-strong,#374151);">
+                          <th style="text-align:left;padding:4px 8px;opacity:0.6;font-weight:500;">Tier</th>
+                          <th style="text-align:left;padding:4px 8px;opacity:0.6;font-weight:500;">AI Brain</th>
+                          <th style="text-align:right;padding:4px 8px;opacity:0.6;font-weight:500;">Status</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        ${this.brainTiers.map((t, i) => html`
+                          <tr style="border-bottom:1px solid rgba(55,65,81,0.4);${t.status === 'active' ? 'background:rgba(59,130,246,0.1);' : ''}">
+                            <td style="padding:6px 8px;opacity:0.5;">T${i + 1}</td>
+                            <td style="padding:6px 8px;${t.status === 'unavailable' ? 'opacity:0.4;text-decoration:line-through;' : ''}">${t.label}</td>
+                            <td style="padding:6px 8px;text-align:right;">
+                              ${t.status === 'active'
+                                ? html`<span style="color:#3b82f6;font-weight:600;">In Use</span>`
+                                : t.status === 'unavailable'
+                                  ? html`<span style="color:#ef4444;opacity:0.7;">Unavailable</span>`
+                                  : html`<span style="opacity:0.35;">Standby</span>`}
+                            </td>
+                          </tr>
+                        `)}
+                      </tbody>
+                    </table>
+                    <div style="margin-top:1.25em;text-align:right;">
+                      <button @click=${() => { this.showBrainGrid = false; this.#render(); }}>Close</button>
+                    </div>
                   </div>
                 </div>
               `

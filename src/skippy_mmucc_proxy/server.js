@@ -42,28 +42,20 @@ const ELEVENLABS_SINGING_VOICE_ID = process.env.ELEVENLABS_SINGING_VOICE_ID;
 // Brain Switching (Pillar 3) — 3-tier OpenRouter model matrix, selected by
 // plain string-matching on the transcript in App.js, never a second
 // classification call. "Everyday" is today's existing default model.
-const OPENROUTER_MODEL_EVERYDAY = process.env.OPENROUTER_MODEL || 'openai/gpt-4o-mini';
-// 6-tier everyday brain cascade — exhaust free options before spending credits:
-//   T1.  Free primary       (OPENROUTER_MODEL)               e.g. Dolphin :free
-//   T1.5 Free primary-2     (OPENROUTER_MODEL_FREE2)         e.g. Llama 3.3 70B :free
-//   T2.  Paid primary       (OPENROUTER_MODEL_PAID)          e.g. Dolphin 3.0 paid
-//   T3.  Free fallback      (OPENROUTER_MODEL_FALLBACK)      e.g. Qwen :free  — brainDowngrade
-//   T3.5 Free fallback-2    (OPENROUTER_MODEL_FREE4)         e.g. Hermes 3 :free
-//   T4.  Paid fallback      (OPENROUTER_MODEL_FALLBACK_PAID) e.g. Qwen paid
-// 404 "No endpoints found" = model offline. 429 = free-tier rate limit.
-// T2 & T4 set paidTier:true so the frontend lights the amber credits indicator.
-const OPENROUTER_MODEL_EVERYDAY_FREE2 =
-  process.env.OPENROUTER_MODEL_FREE2 || 'meta-llama/llama-3.3-70b-instruct:free';
-const OPENROUTER_MODEL_EVERYDAY_FALLBACK =
-  process.env.OPENROUTER_MODEL_FALLBACK || 'sao10k/l3-lunaris-8b';
-const OPENROUTER_MODEL_EVERYDAY_FREE4 =
-  process.env.OPENROUTER_MODEL_FREE4 || 'nousresearch/hermes-3-llama-3.1-405b:free';
-const OPENROUTER_MODEL_EVERYDAY_PAID =
-  process.env.OPENROUTER_MODEL_PAID ||
-  OPENROUTER_MODEL_EVERYDAY.replace(/:free$/, '');
-const OPENROUTER_MODEL_EVERYDAY_FALLBACK_PAID =
-  process.env.OPENROUTER_MODEL_FALLBACK_PAID ||
-  OPENROUTER_MODEL_EVERYDAY_FALLBACK.replace(/:free$/, '');
+// 7-tier everyday brain cascade: 3 free Western models, then 4 paid cheapest→most expensive.
+// brainDowngrade fires on first paid tier. paidTier lights the amber dot.
+// 404 "No endpoints found" = model offline. 429 = rate-limited. Either triggers next tier.
+// Override any slot via env vars; defaults cover the full cascade without .env changes.
+const EVERYDAY_CASCADE = [
+  { label: 'Dolphin Venice (free)', model: process.env.OPENROUTER_MODEL       || 'cognitivecomputations/dolphin-mistral-24b-venice-edition:free', paid: false },
+  { label: 'Llama 3.3 70B (free)', model: process.env.OPENROUTER_MODEL_FREE2  || 'meta-llama/llama-3.3-70b-instruct:free',                        paid: false },
+  { label: 'Hermes 3 405B (free)', model: process.env.OPENROUTER_MODEL_FREE3  || 'nousresearch/hermes-3-llama-3.1-405b:free',                      paid: false },
+  { label: 'Dolphin 3.0',          model: process.env.OPENROUTER_MODEL_PAID   || 'cognitivecomputations/dolphin3.0-mistral-24b',                   paid: true  },
+  { label: 'Stheno 8B',            model: process.env.OPENROUTER_MODEL_PAID2  || 'sao10k/l3-stheno-8b',                                           paid: true  },
+  { label: 'Command R',            model: process.env.OPENROUTER_MODEL_PAID3  || 'cohere/command-r',                                               paid: true  },
+  { label: 'Lumimaid 70B',         model: process.env.OPENROUTER_MODEL_PAID4  || 'neversleep/llama-3.1-lumimaid-70b',                              paid: true  },
+];
+const OPENROUTER_MODEL_EVERYDAY = EVERYDAY_CASCADE[0].model;
 const OPENROUTER_MODEL_HEAVY_HITTER =
   process.env.OPENROUTER_MODEL_HEAVY_HITTER || 'anthropic/claude-sonnet-4.6';
 // Heavy hitter 4-tier cascade: primary → paid primary → free fallback → paid fallback.
@@ -77,7 +69,7 @@ const OPENROUTER_MODEL_TACTICAL =
   process.env.OPENROUTER_MODEL_TACTICAL || 'anthropic/claude-haiku-4.5';
 // Tactical 4-tier cascade: primary → paid primary → free fallback → paid fallback.
 const OPENROUTER_MODEL_TACTICAL_FALLBACK =
-  process.env.OPENROUTER_MODEL_TACTICAL_FALLBACK || OPENROUTER_MODEL_EVERYDAY_FALLBACK;
+  process.env.OPENROUTER_MODEL_TACTICAL_FALLBACK || 'meta-llama/llama-3.3-70b-instruct:free';
 const OPENROUTER_MODEL_TACTICAL_FALLBACK_PAID =
   process.env.OPENROUTER_MODEL_TACTICAL_FALLBACK_PAID ||
   OPENROUTER_MODEL_TACTICAL_FALLBACK.replace(/:free$/, '');
@@ -1150,42 +1142,20 @@ app.post('/respond', requireSession, async (req, res) => {
       }
     }
 
-    // T1 → T1.5: Dolphin free → Llama free
+    // Everyday 7-tier cascade — iterate until a tier succeeds or all are exhausted.
     let brainDowngrade = false;
-    if (isFallbackable(response)) {
-      const t15 = await tryFallback(activeModel, OPENROUTER_MODEL_EVERYDAY_FREE2, response);
-      if (!t15) return;
-      activeModel = t15.model;
-      response = t15.response;
-    }
-    // T1.5 → T2: Llama free → Dolphin paid (both free primaries exhausted)
-    if (isFallbackable(response)) {
-      const t2 = await tryFallback(activeModel, OPENROUTER_MODEL_EVERYDAY_PAID, response);
-      if (!t2) return;
-      activeModel = t2.model;
-      response = t2.response;
-    }
-    // T2 → T3: Dolphin paid → Qwen free (fallback family — brainDowngrade)
-    if (isFallbackable(response)) {
-      const t3 = await tryFallback(activeModel, OPENROUTER_MODEL_EVERYDAY_FALLBACK, response);
-      if (!t3) return;
-      activeModel = t3.model;
-      response = t3.response;
-      brainDowngrade = true;
-    }
-    // T3 → T3.5: Qwen free → Hermes free
-    if (isFallbackable(response)) {
-      const t35 = await tryFallback(activeModel, OPENROUTER_MODEL_EVERYDAY_FREE4, response);
-      if (!t35) return;
-      activeModel = t35.model;
-      response = t35.response;
-    }
-    // T3.5 → T4: Hermes free → Qwen paid (last resort)
-    if (isFallbackable(response)) {
-      const t4 = await tryFallback(activeModel, OPENROUTER_MODEL_EVERYDAY_FALLBACK_PAID, response);
-      if (!t4) return;
-      activeModel = t4.model;
-      response = t4.response;
+    if (brain === 'everyday') {
+      for (let i = 1; i < EVERYDAY_CASCADE.length && isTransientFailure(response); i++) {
+        const errText = await response.text();
+        if (response.status === 404 && !errText.includes('No endpoints found')) {
+          return res.status(502).json({ error: `OpenRouter error: ${response.status} ${errText}` });
+        }
+        const next = EVERYDAY_CASCADE[i];
+        console.warn(`[Skippy] ${activeModel} ${reasonLabel(response, errText)} — trying ${next.model} (T${i + 1})`);
+        activeModel = next.model;
+        response = await callOpenRouter(activeModel, BRAIN_GENERATION_PARAMS['everyday']);
+        if (next.paid && !brainDowngrade) brainDowngrade = true;
+      }
     }
 
     if (!response.ok) {
@@ -1200,11 +1170,21 @@ app.post('/respond', requireSession, async (req, res) => {
     }
     const reply = stripLeakedFormatting(rawReply);
 
-    // paidTier lights the amber dot when burning OpenRouter credits (T2 or T4).
-    // brainDowngrade tells the frontend to show the in-character brain-switch quip.
-    const paidTier = brain === 'everyday' &&
-      (activeModel === OPENROUTER_MODEL_EVERYDAY_PAID || activeModel === OPENROUTER_MODEL_EVERYDAY_FALLBACK_PAID);
-    res.json({ reply, brain, model: activeModel, paidTier, brainDowngrade });
+    // paidTier lights the amber dot when burning OpenRouter credits.
+    // brainDowngrade tells the frontend to play the in-character brain-switch quip.
+    const activeTier = brain === 'everyday' ? EVERYDAY_CASCADE.find((t) => t.model === activeModel) : null;
+    const paidTier = !!(activeTier?.paid);
+
+    // brainTiers: ordered cascade status for the clickable brain-grid modal.
+    const activeIdx = brain === 'everyday' ? EVERYDAY_CASCADE.findIndex((t) => t.model === activeModel) : -1;
+    const brainTiers = brain === 'everyday'
+      ? EVERYDAY_CASCADE.map((t, i) => ({
+          label: t.label,
+          status: i < activeIdx ? 'unavailable' : i === activeIdx ? 'active' : 'standby',
+        }))
+      : null;
+
+    res.json({ reply, brain, model: activeModel, paidTier, brainDowngrade, brainTiers });
   } catch (err) {
     if (err.name === 'AbortError') return; // client already gone, nothing to send back
     res.status(502).json({ error: `Failed to reach OpenRouter: ${err.message}` });
@@ -1536,7 +1516,7 @@ app.post('/karaoke-offer', requireSession, async (req, res) => {
       const errText = await response.text();
       if (response.status === 429 || errText.includes('No endpoints found')) {
         console.warn(`[Skippy/karaoke-offer] ${activeModel} rate-limited — trying paid tier`);
-        activeModel = OPENROUTER_MODEL_EVERYDAY_PAID;
+        activeModel = EVERYDAY_CASCADE[3].model;
         response = await callOffer(activeModel);
       } else {
         return res.status(502).json({ error: `OpenRouter error: ${response.status} ${errText}` });
@@ -1544,12 +1524,12 @@ app.post('/karaoke-offer', requireSession, async (req, res) => {
     }
     if (!response.ok && (response.status === 404 || response.status === 429)) {
       console.warn(`[Skippy/karaoke-offer] paid tier rate-limited — trying free fallback`);
-      activeModel = OPENROUTER_MODEL_EVERYDAY_FALLBACK;
+      activeModel = EVERYDAY_CASCADE[1].model;
       response = await callOffer(activeModel);
     }
     if (!response.ok && (response.status === 404 || response.status === 429)) {
       console.warn(`[Skippy/karaoke-offer] free fallback rate-limited — trying paid fallback`);
-      activeModel = OPENROUTER_MODEL_EVERYDAY_FALLBACK_PAID;
+      activeModel = EVERYDAY_CASCADE[4].model;
       response = await callOffer(activeModel);
     }
 
@@ -1610,7 +1590,7 @@ app.post('/karaoke', requireSession, async (req, res) => {
       const errText = await response.text();
       if (response.status === 429 || errText.includes('No endpoints found')) {
         console.warn(`[Skippy/karaoke] ${activeModel} rate-limited — trying paid tier`);
-        activeModel = OPENROUTER_MODEL_EVERYDAY_PAID;
+        activeModel = EVERYDAY_CASCADE[3].model;
         response = await callKaraoke(activeModel);
       } else {
         return res.status(502).json({ error: `OpenRouter error: ${response.status} ${errText}` });
@@ -1618,12 +1598,12 @@ app.post('/karaoke', requireSession, async (req, res) => {
     }
     if (!response.ok && (response.status === 404 || response.status === 429)) {
       console.warn(`[Skippy/karaoke] paid tier rate-limited — trying free fallback`);
-      activeModel = OPENROUTER_MODEL_EVERYDAY_FALLBACK;
+      activeModel = EVERYDAY_CASCADE[1].model;
       response = await callKaraoke(activeModel);
     }
     if (!response.ok && (response.status === 404 || response.status === 429)) {
       console.warn(`[Skippy/karaoke] free fallback rate-limited — trying paid fallback`);
-      activeModel = OPENROUTER_MODEL_EVERYDAY_FALLBACK_PAID;
+      activeModel = EVERYDAY_CASCADE[4].model;
       response = await callKaraoke(activeModel);
     }
 
