@@ -67,7 +67,10 @@ const OPENROUTER_MODEL_HEAVY_HITTER_FALLBACK_PAID =
   OPENROUTER_MODEL_HEAVY_HITTER_FALLBACK.replace(/:free$/, '');
 const OPENROUTER_MODEL_TACTICAL =
   process.env.OPENROUTER_MODEL_TACTICAL || 'anthropic/claude-sonnet-4-6';
-// Tactical 4-tier cascade: primary → paid primary → free fallback → paid fallback.
+// Tactical 5-tier cascade: Sonnet → Haiku (explicit Claude T2) → free fallback → paid fallback.
+// Haiku is the dedicated T2 so Sonnet going down never jumps straight to a free model.
+const OPENROUTER_MODEL_TACTICAL_PAID =
+  process.env.OPENROUTER_MODEL_TACTICAL_PAID || 'anthropic/claude-haiku-4.5';
 const OPENROUTER_MODEL_TACTICAL_FALLBACK =
   process.env.OPENROUTER_MODEL_TACTICAL_FALLBACK || 'meta-llama/llama-3.3-70b-instruct:free';
 const OPENROUTER_MODEL_TACTICAL_FALLBACK_PAID =
@@ -1126,7 +1129,15 @@ app.post('/respond', requireSession, async (req, res) => {
         response = await callOpenRouter(primaryPaid, genParams);
         activeModel = primaryPaid;
       }
-      // T1/T2 → T3: free fallback
+      // T1/T2 → T2.5: explicit Claude Haiku fallback for tactical/focus (Sonnet has no :free
+      // variant so T2 is always skipped — Haiku ensures we stay on Claude before dropping to Llama)
+      if (isTransientFailure(response) && (brain === 'tactical' || brain === 'focus')) {
+        const errText = await response.text();
+        console.warn(`[Skippy] ${activeModel} ${reasonLabel(response, errText)} — trying Haiku fallback (${brain})`);
+        response = await callOpenRouter(OPENROUTER_MODEL_TACTICAL_PAID, genParams);
+        activeModel = OPENROUTER_MODEL_TACTICAL_PAID;
+      }
+      // T2/T2.5 → T3: free fallback
       if (isTransientFailure(response)) {
         const errText = await response.text();
         console.warn(`[Skippy] ${activeModel} ${reasonLabel(response, errText)} — trying free fallback (${brain})`);
