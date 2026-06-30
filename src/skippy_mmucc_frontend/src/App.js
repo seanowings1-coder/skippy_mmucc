@@ -3625,6 +3625,9 @@ class App {
             )}
           </ul>
         </details>
+          <div class="mobile-only" style="margin-top:1em;padding-top:0.8em;border-top:1px solid var(--border-subtle);">
+            <button style="width:100%;opacity:0.7;" @click=${this.#logout}>Log Out</button>
+          </div>
         </aside>
 
         <section class="col-center">
@@ -4000,9 +4003,6 @@ class App {
             </div>
           </fieldset>
         </details>
-          <div class="mobile-only" style="margin-top:1em;padding-top:0.8em;border-top:1px solid var(--border-subtle);">
-            <button style="width:100%;opacity:0.7;" @click=${this.#logout}>Log Out</button>
-          </div>
         </aside>
         </div>
 
