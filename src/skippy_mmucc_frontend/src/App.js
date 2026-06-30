@@ -3288,7 +3288,12 @@ class App {
               @click=${() => { this.showLeftDrawer = !this.showLeftDrawer; this.showRightDrawer = false; this.#render(); }}
               title="Workspace &amp; Config"
             >☰</button>
-            <span class="${this.statusMessage === 'Skippy is thinking...' ? 'skippy-thinking' : ''}" style="letter-spacing:0.03em;">Skippy</span>
+            <span
+              class="${this.statusMessage === 'Skippy is thinking...' ? 'skippy-thinking' : ''}"
+              style="letter-spacing:0.03em;cursor:pointer;${this.voiceMuted ? 'opacity:0.45;text-decoration:line-through;' : ''}"
+              title="${this.voiceMuted ? 'Text-only mode — click to unmute' : 'Click to mute (text only)'}"
+              @click=${this.#toggleVoiceMuted}
+            >Skippy</span>
             <span class="desktop-only">${this.guestMode
               ? html`<button class="badge active" @click=${this.#unlockGuestMode} title="Click to unlock">🔒 Guest Mode Active</button>`
               : html`<button @click=${() => this.#enableGuestMode()}>Enable Guest Mode</button>`}</span>
@@ -3675,13 +3680,20 @@ class App {
               `}
 
           <form class="text-input" @submit=${this.#sendTextMessage}>
-            <button
-              type="button"
-              class=${this.manualNoteMode ? 'note-mode-toggle active' : 'note-mode-toggle'}
-              @click=${this.#toggleNoteMode}
-            >
-              ${this.manualNoteMode ? '📝 Note Mode: ON' : '📝 Note Mode'}
-            </button>
+            <div style="display:flex;gap:0.5em;">
+              <button
+                type="button"
+                class=${this.manualNoteMode ? 'note-mode-toggle active' : 'note-mode-toggle'}
+                style="flex:1;"
+                @click=${this.#toggleNoteMode}
+              >${this.manualNoteMode ? 'Notes: ON' : 'Notes'}</button>
+              <button
+                type="button"
+                class="${this.voiceMuted ? 'note-mode-toggle active' : 'note-mode-toggle'}"
+                style="flex:1;"
+                @click=${this.#toggleVoiceMuted}
+              >${this.voiceMuted ? '🔇 Muted' : 'Mute'}</button>
+            </div>
             <textarea
               name="textInput"
               rows="3"
