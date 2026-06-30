@@ -87,6 +87,8 @@ button:disabled {
   display: flex;
   align-items: center;
   gap: 0.6em;
+  color: var(--accent-cyan-glow);
+  text-shadow: 0 0 8px rgba(0, 229, 255, 0.6);
 }
 
 .topbar .badges {
