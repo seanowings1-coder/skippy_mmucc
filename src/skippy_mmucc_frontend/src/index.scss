@@ -637,6 +637,13 @@ button:disabled {
   color: var(--accent-cyan-glow);
 }
 
+.login-logo {
+  width: min(220px, 55vw);
+  height: auto;
+  opacity: 0.9;
+  margin-top: 1em;
+}
+
 // --- Mobile-only / desktop-only visibility helpers ---------------------------
 // These classes rely on the media query below; put them above the breakpoint
 // so specificity doesn't fight the override.

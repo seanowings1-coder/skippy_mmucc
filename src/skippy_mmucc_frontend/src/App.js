@@ -3241,6 +3241,7 @@ class App {
               : 'Login with Internet Identity'}
           </button>
           ${this.authError ? html`<p class="status">${this.authError}</p>` : ''}
+          <img src="/bad-marine-logo.png" alt="Bad Marine LLC" class="login-logo" />
         </main>
       `;
     }
