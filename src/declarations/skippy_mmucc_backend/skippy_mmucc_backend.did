@@ -1,0 +1,148 @@
+type DocumentSection = record {
+    id : nat64;
+    manual_name : text;
+    section : text;
+    title : text;
+    content : text;
+    embedding : opt vec float32;
+    category : opt text;
+};
+
+type NewChunk = record {
+    section : text;
+    title : text;
+    content : text;
+    embedding : vec float32;
+};
+
+type ScoredSection = record {
+    score : float32;
+    section : DocumentSection;
+};
+
+type Message = record {
+    role : text;
+    content : text;
+    timestamp : nat64;
+};
+
+type PersonaProfile = record {
+    name : opt text;
+    voice_id : opt text;
+};
+
+type SessionInfo = record {
+    "principal" : principal;
+    name : opt text;
+    voice_id : opt text;
+};
+
+type WorkspaceStatus = variant { Active; Archived };
+
+type Workspace = record {
+    id : nat64;
+    owner : principal;
+    name : text;
+    status : WorkspaceStatus;
+    created_at : nat64;
+    scratchpad : opt text;
+    associated_manuals : opt vec text;
+};
+
+type CourierMessage = record {
+    id : nat64;
+    recipient : principal;
+    sender : principal;
+    content : text;
+    created_at : nat64;
+};
+
+type EmergencyEvent = record {
+    id : nat64;
+    owner : principal;
+    secure_token : text;
+    started_at : nat64;
+};
+
+type EmergencyAudioChunk = record {
+    id : nat64;
+    emergency_id : nat64;
+    data : blob;
+    created_at : nat64;
+};
+
+type EvolutionProfile = record {
+    snark_level : float32;
+    vendor_skepticism : float32;
+    technical_precision : float32;
+    proactive_interruption : float32;
+};
+
+type EvolutionDeltas = record {
+    snark_level_delta : float32;
+    vendor_skepticism_delta : float32;
+    technical_precision_delta : float32;
+    proactive_interruption_delta : float32;
+};
+
+type EvolutionLogEntry = record {
+    id : nat64;
+    owner : principal;
+    timestamp : nat64;
+    summary : text;
+};
+
+service : (principal, principal, principal) -> {
+    "greet": (text) -> (text) query;
+
+    "add_manual_section": (text, text, text, text) -> (nat64);
+    "get_manual_section": (nat64) -> (opt DocumentSection) query;
+    "list_manual_names": () -> (vec text) query;
+    "manual_category_map": () -> (vec record { text; text }) query;
+    "list_sections_by_manual": (text) -> (vec DocumentSection) query;
+    "delete_manual_section": (nat64) -> (bool);
+    "add_manual_chunks": (text, opt text, vec NewChunk) -> (vec nat64);
+    "search_similar_chunks": (vec float32, nat32) -> (vec ScoredSection) query;
+    "search_manuals_by_keyword": (vec text) -> (vec DocumentSection) query;
+    "delete_manual": (text) -> (nat64);
+
+    "login": () -> (variant { Ok : text; Err : text });
+    "validate_session": (text) -> (opt SessionInfo) query;
+
+    "create_workspace": (text) -> (nat64);
+    "list_my_workspaces": () -> (vec Workspace) query;
+    "archive_workspace": (nat64) -> ();
+    "restore_workspace": (nat64) -> ();
+    "delete_workspace": (nat64) -> ();
+    "update_scratchpad": (nat64, text) -> ();
+    "update_associated_manuals": (nat64, vec text) -> ();
+
+    "append_turn": (nat64, text, text) -> ();
+    "get_history": (nat64) -> (vec Message) query;
+    "purge_history": (nat64) -> ();
+
+    "set_persona_profile": (text, text) -> ();
+    "get_my_persona_profile": () -> (opt PersonaProfile) query;
+
+    "get_my_evolution_profile": () -> (EvolutionProfile) query;
+    "record_evolution_event": (EvolutionDeltas, text) -> (nat64);
+    "list_my_evolution_log": (nat32) -> (vec EvolutionLogEntry) query;
+
+    "queue_courier_message": (text) -> (nat64);
+    "pop_pending_courier_messages": () -> (vec CourierMessage);
+
+    "start_emergency": (text) -> (nat64);
+    "append_emergency_audio_chunk": (nat64, blob) -> (nat64);
+    "list_emergency_audio_chunks": (nat64) -> (vec EmergencyAudioChunk) query;
+    "list_my_emergencies": () -> (vec EmergencyEvent) query;
+
+    "get_cycle_balance": () -> (nat64) query;
+
+    "verify_unlock": () -> (bool) query;
+
+    // Pillar 21 (Master Fuel Pump) — backend auto-tops-up frontend cycles.
+    // trigger_fuel_pump: run one pump cycle immediately (for testing / on-demand top-up).
+    // get_pump_config: returns (frontend_canister_id, pump_threshold, pump_amount, min_backend_reserve) in cycles.
+    "trigger_fuel_pump": () -> (text);
+    "get_pump_config": () -> (principal, nat64, nat64, nat64) query;
+}

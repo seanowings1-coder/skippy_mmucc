@@ -27,7 +27,8 @@ process.on('uncaughtException', (err) => {
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 dotenv.config({ path: path.resolve(__dirname, '../../.env') });
 
-const PORT = process.env.SKIPPY_PROXY_PORT || 8787;
+// Railway injects PORT; local dev uses SKIPPY_PROXY_PORT or falls back to 8787.
+const PORT = process.env.PORT || process.env.SKIPPY_PROXY_PORT || 8787;
 const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
 const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY;
 const ELEVENLABS_VOICE_ID = process.env.ELEVENLABS_VOICE_ID;

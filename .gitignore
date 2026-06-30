@@ -10,8 +10,10 @@
 # dfx temporary files
 .dfx/
 
-# generated files
+# generated files — keep src/declarations/ committed so Railway (no dfx) can import the IDL
 **/declarations/
+!src/declarations/
+!src/declarations/**
 
 # rust
 target/
