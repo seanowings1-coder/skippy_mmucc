@@ -2,6 +2,14 @@
 # Deploys all canisters to the local replica, passing the two whitelisted
 # Internet Identity Principals (read from the gitignored .env, never from a
 # tracked file) as the backend's #[init] argument. See CLAUDE.md Phase 5.1.
+#
+# Pillar 21 (Master Fuel Pump): the backend needs the frontend canister ID
+# so it can monitor and auto-top-up the frontend's cycle balance. We deploy
+# backend twice in the initial pass: once with a placeholder so the canister
+# exists and the frontend can reference it, then again with the real frontend
+# ID once the frontend is deployed. Both deploys just run post_upgrade (fast,
+# no recompile). Finally, we grant the backend controller status over the
+# frontend so canister_status calls succeed.
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
@@ -15,12 +23,32 @@ if [[ -z "${COMMANDER_PRINCIPAL:-}" || -z "${PARTNER_PRINCIPAL:-}" ]]; then
 fi
 
 dfx deploy internet_identity
-# --upgrade-unchanged is required: dfx skips re-running install_code (and
-# therefore #[post_upgrade], which is what actually re-applies these args)
-# whenever the wasm module hash is unchanged from what's already deployed —
-# e.g. every time only .env's Principal values change but the Rust source
-# doesn't. Without this flag, editing COMMANDER_PRINCIPAL/PARTNER_PRINCIPAL
-# and redeploying silently does nothing, and the canister keeps rejecting
-# the "newly whitelisted" Principal.
-dfx deploy skippy_mmucc_backend --argument "(principal \"${COMMANDER_PRINCIPAL}\", principal \"${PARTNER_PRINCIPAL}\")" --upgrade-unchanged
+
+# First backend deploy — use anonymous principal as frontend placeholder so
+# the canister exists before the frontend (which depends on it for bindings).
+# 2vxsx-fae is the IC anonymous principal in text encoding.
+dfx deploy skippy_mmucc_backend \
+  --argument "(principal \"${COMMANDER_PRINCIPAL}\", principal \"${PARTNER_PRINCIPAL}\", principal \"2vxsx-fae\")" \
+  --upgrade-unchanged
+
 dfx deploy skippy_mmucc_frontend
+
+# Second backend deploy — now that the frontend is deployed, pass its real
+# canister ID so the pump timer knows what to monitor.
+FRONTEND_ID=$(dfx canister id skippy_mmucc_frontend)
+dfx deploy skippy_mmucc_backend \
+  --argument "(principal \"${COMMANDER_PRINCIPAL}\", principal \"${PARTNER_PRINCIPAL}\", principal \"${FRONTEND_ID}\")" \
+  --upgrade-unchanged
+
+# Grant the backend controller status over the frontend.
+# canister_status on the IC management canister requires the caller to be a
+# controller of the target — without this, the pump's balance check will be
+# rejected. --add-controller is idempotent (safe to re-run on upgrades).
+BACKEND_ID=$(dfx canister id skippy_mmucc_backend)
+dfx canister update-settings skippy_mmucc_frontend --add-controller "${BACKEND_ID}"
+
+echo ""
+echo "Deploy complete."
+echo "  Backend  (master tank):  ${BACKEND_ID}"
+echo "  Frontend (pumped):       ${FRONTEND_ID}"
+echo "  Backend is a controller of frontend — fuel pump active."

@@ -25,6 +25,9 @@ const EMERGENCY_EVENTS_MEMORY_ID: MemoryId = MemoryId::new(8);
 const EMERGENCY_AUDIO_MEMORY_ID: MemoryId = MemoryId::new(9);
 const EVOLUTION_PROFILES_MEMORY_ID: MemoryId = MemoryId::new(10);
 const EVOLUTION_LOG_MEMORY_ID: MemoryId = MemoryId::new(11);
+// Master Fuel Pump (Pillar 21) — backend holds cycles and auto-tops-up frontend.
+// MemoryId 12 is reserved for this; never renumber or reuse any slot.
+const FRONTEND_CANISTER_ID_MEMORY_ID: MemoryId = MemoryId::new(12);
 
 // Pillar 19 (Self-Evolution & Metacognitive Matrix) — hard caps on every
 // personality weight, confirmed 2026-06-22: growth should be natural and
@@ -48,6 +51,14 @@ const MAX_HISTORY_SIZE: u32 = 200_000;
 // so they live in heap memory rather than stable memory — losing them on a
 // canister upgrade just costs a re-login, not data.
 const SESSION_TTL_NANOS: u64 = 30 * 60 * 1_000_000_000;
+
+// Master Fuel Pump thresholds (Pillar 21).
+// PUMP_THRESHOLD: if frontend drops below this, top it up.
+// PUMP_AMOUNT: how many cycles to transfer per pump event.
+// MIN_BACKEND_RESERVE: never pump if doing so would leave the backend below this.
+const PUMP_THRESHOLD: u128 = 2_000_000_000_000;     // 2T cycles
+const PUMP_AMOUNT: u128 = 1_000_000_000_000;         // 1T cycles
+const MIN_BACKEND_RESERVE: u128 = 3_000_000_000_000; // 3T cycles
 
 /// A single indexed section/clause from a reference manual. `manual_name` (e.g.
 /// "MMUCC_V6", "ANSI_D16") identifies which manual it belongs to, so new manuals
@@ -540,12 +551,23 @@ thread_local! {
         RefCell::new(StableBTreeMap::init(
             MEMORY_MANAGER.with(|m| m.borrow().get(EVOLUTION_LOG_MEMORY_ID)),
         ));
+
+    // Master Fuel Pump (Pillar 21) — the frontend canister ID to monitor.
+    // Stored in stable memory so it survives upgrades.
+    // Default: anonymous principal = "not yet configured" (pump will no-op).
+    static FRONTEND_CANISTER_ID: RefCell<StableCell<Principal, Memory>> =
+        RefCell::new(StableCell::init(
+            MEMORY_MANAGER.with(|m| m.borrow().get(FRONTEND_CANISTER_ID_MEMORY_ID)),
+            Principal::anonymous(),
+        ));
 }
 
 #[init]
-fn init(commander: Principal, partner: Principal) {
+fn init(commander: Principal, partner: Principal, frontend: Principal) {
     COMMANDER_PRINCIPAL.with(|c| c.borrow_mut().set(commander));
     PARTNER_PRINCIPAL.with(|c| c.borrow_mut().set(partner));
+    FRONTEND_CANISTER_ID.with(|c| c.borrow_mut().set(frontend));
+    setup_pump_timer();
 }
 
 // ic-cdk only invokes #[init] on a fresh install, never on `dfx deploy`
@@ -553,9 +575,10 @@ fn init(commander: Principal, partner: Principal) {
 // deploy would silently keep whichever whitelist was set at first install,
 // ignoring the --argument passed on subsequent deploys. Re-applying the same
 // args here keeps `npm run deploy:local` idempotent either way.
+// Timers do NOT survive upgrades — setup_pump_timer() must be called here too.
 #[post_upgrade]
-fn post_upgrade(commander: Principal, partner: Principal) {
-    init(commander, partner);
+fn post_upgrade(commander: Principal, partner: Principal, frontend: Principal) {
+    init(commander, partner, frontend);
 }
 
 /// Traps if the caller isn't one of the two whitelisted Principals; otherwise
@@ -573,6 +596,95 @@ fn assert_whitelisted() -> Principal {
 
 fn to_hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{:02x}", b)).collect()
+}
+
+// candid::Nat wraps a BigUint. Convert to u128 via decimal string — safe
+// across all candid/num-bigint version combinations and doesn't require
+// num-traits in scope. Performance is irrelevant for a daily timer.
+fn nat_to_u128(n: candid::Nat) -> u128 {
+    n.to_string().parse::<u128>().unwrap_or(u128::MAX)
+}
+
+/// Master Fuel Pump (Pillar 21) — runs daily to top up the frontend asset
+/// canister. Requires the backend to be a controller of the frontend so that
+/// `canister_status` can read the frontend's cycle balance.
+async fn pump_frontend_cycles() {
+    use ic_cdk::management_canister::{CanisterIdRecord, canister_status, deposit_cycles};
+
+    let frontend_id = FRONTEND_CANISTER_ID.with(|c| *c.borrow().get());
+    if frontend_id == Principal::anonymous() {
+        // Not yet configured (first deploy before frontend ID was set). Skip silently.
+        return;
+    }
+
+    // Read the frontend's current cycle balance.
+    // ic-cdk 0.19: canister_status takes &CanisterIdRecord and returns CanisterStatusResult directly.
+    let frontend_cycles = match canister_status(&CanisterIdRecord { canister_id: frontend_id }).await {
+        Ok(status) => nat_to_u128(status.cycles),
+        Err(e) => {
+            ic_cdk::println!("[MasterFuelPump] canister_status error: {:?}", e);
+            return;
+        }
+    };
+
+    if frontend_cycles >= PUMP_THRESHOLD {
+        return; // frontend is healthy — nothing to do
+    }
+
+    // Ensure the backend keeps enough reserve to stay alive after the transfer.
+    let backend_cycles = ic_cdk::api::canister_cycle_balance();
+    if (backend_cycles as u128) < PUMP_AMOUNT + MIN_BACKEND_RESERVE {
+        ic_cdk::println!(
+            "[MasterFuelPump] insufficient reserve (have {}T, need {}T + {}T reserve) — skipping",
+            backend_cycles / 1_000_000_000_000,
+            PUMP_AMOUNT / 1_000_000_000_000,
+            MIN_BACKEND_RESERVE / 1_000_000_000_000,
+        );
+        return;
+    }
+
+    // ic-cdk 0.19: deposit_cycles takes &CanisterIdRecord and attaches the given cycles to the call.
+    match deposit_cycles(&CanisterIdRecord { canister_id: frontend_id }, PUMP_AMOUNT).await {
+        Ok(()) => ic_cdk::println!(
+            "[MasterFuelPump] pumped {}T cycles to frontend (was {}T, threshold {}T)",
+            PUMP_AMOUNT / 1_000_000_000_000,
+            frontend_cycles / 1_000_000_000_000,
+            PUMP_THRESHOLD / 1_000_000_000_000,
+        ),
+        Err(e) => ic_cdk::println!("[MasterFuelPump] deposit_cycles error: {:?}", e),
+    }
+}
+
+/// Registers the daily pump timer. Called at #[init] and #[post_upgrade]
+/// because ic_cdk_timers timers do not survive canister upgrades.
+/// ic-cdk-timers 1.0.0: set_timer_interval requires the closure to return a Future.
+fn setup_pump_timer() {
+    use std::time::Duration;
+    ic_cdk_timers::set_timer_interval(Duration::from_secs(86_400), || async {
+        pump_frontend_cycles().await;
+    });
+}
+
+/// Manually trigger one pump cycle immediately. Whitelisted only — useful
+/// for testing before waiting 24 hours for the first scheduled run.
+#[update]
+async fn trigger_fuel_pump() -> String {
+    assert_whitelisted();
+    pump_frontend_cycles().await;
+    "Fuel pump cycle complete.".to_string()
+}
+
+/// Return the current pump configuration so the Fuel Gauge can display it.
+#[query]
+fn get_pump_config() -> (Principal, u64, u64, u64) {
+    assert_whitelisted();
+    let frontend_id = FRONTEND_CANISTER_ID.with(|c| *c.borrow().get());
+    (
+        frontend_id,
+        PUMP_THRESHOLD as u64,
+        PUMP_AMOUNT as u64,
+        MIN_BACKEND_RESERVE as u64,
+    )
 }
 
 fn take_next_id() -> u64 {
