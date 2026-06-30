@@ -2986,6 +2986,18 @@ class App {
     this.#render();
   };
 
+  #downloadManual = async () => {
+    const res = await fetch('/SKIPPY_USER_MANUAL.md').catch(() => null);
+    const text = res && res.ok ? await res.text() : null;
+    if (!text) { alert('Manual not found — contact your admin.'); return; }
+    const blob = new Blob([text], { type: 'text/markdown' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = 'Skippy_User_Manual.md';
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
   // Generic by design (matches delete_manual_section on the backend) — works
   // for any manual section, not just notes, so the same button will cover
   // Phase 5.6's Knowledge Manager later.
@@ -3475,8 +3487,9 @@ class App {
 
         <details class="workspace-security">
           <summary>Workspace security</summary>
-          <div style="text-align:center;margin-top:0.5em;">
-            <button @click=${this.#toggleLexicon} aria-label="Command Lexicon">Commands</button>
+          <div style="display:flex;gap:0.5em;margin-top:0.5em;">
+            <button style="flex:1;" @click=${this.#toggleLexicon} aria-label="Command Lexicon">Commands</button>
+            <button style="flex:1;" @click=${this.#downloadManual} aria-label="Download User Manual">Manual ↓</button>
           </div>
           ${this.guestMode
             ? html`
