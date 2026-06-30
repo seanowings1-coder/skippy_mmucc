@@ -3288,7 +3288,7 @@ class App {
               @click=${() => { this.showLeftDrawer = !this.showLeftDrawer; this.showRightDrawer = false; this.#render(); }}
               title="Workspace &amp; Config"
             >☰</button>
-            <span class="${this.state === 'thinking' ? 'skippy-thinking' : ''}" style="letter-spacing:0.03em;">Skippy</span>
+            <span class="${this.statusMessage === 'Skippy is thinking...' ? 'skippy-thinking' : ''}" style="letter-spacing:0.03em;">Skippy</span>
             <span class="desktop-only">${this.guestMode
               ? html`<button class="badge active" @click=${this.#unlockGuestMode} title="Click to unlock">🔒 Guest Mode Active</button>`
               : html`<button @click=${() => this.#enableGuestMode()}>Enable Guest Mode</button>`}</span>
