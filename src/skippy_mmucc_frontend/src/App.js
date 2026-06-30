@@ -710,6 +710,8 @@ class App {
   // trigger phrase, kept in sync by convention: any time a new trigger is
   // added to the codebase, add an entry to COMMAND_LEXICON_ENTRIES too.
   lexiconOpen = false;
+  manualOpen = false;
+  manualContent = null;
   // Pillar 12 (Guardian Emergency Protocol). emergencyConfirmOpen gates the
   // 3-tap deliberate-activation modal; emergencyActive/ghostMode/commsOpen
   // track the live state once triggered. token/id/ws/recorder/stream are
@@ -2986,14 +2988,31 @@ class App {
     this.#render();
   };
 
+  #toggleManual = async () => {
+    if (!this.manualOpen && !this.manualContent) {
+      const res = await fetch('/SKIPPY_USER_MANUAL.md').catch(() => null);
+      this.manualContent = res && res.ok ? await res.text() : '(Manual not found)';
+    }
+    this.manualOpen = !this.manualOpen;
+    this.#render();
+  };
+
   #downloadManual = async () => {
-    const res = await fetch('/SKIPPY_USER_MANUAL.md').catch(() => null);
-    const text = res && res.ok ? await res.text() : null;
-    if (!text) { alert('Manual not found — contact your admin.'); return; }
-    const blob = new Blob([text], { type: 'text/markdown' });
+    if (!this.manualContent) { alert('Open the manual first.'); return; }
+    const doc = new Document({
+      sections: [{
+        children: [
+          new Paragraph({ heading: HeadingLevel.HEADING_1, children: [new TextRun('Skippy User Manual')] }),
+          new Paragraph({ children: [new TextRun(`Generated: ${new Date().toLocaleDateString()}`)] }),
+          new Paragraph({ children: [] }),
+          ...markdownToDocxParagraphs(this.manualContent),
+        ],
+      }],
+    });
+    const blob = await Packer.toBlob(doc);
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
-    a.href = url; a.download = 'Skippy_User_Manual.md';
+    a.href = url; a.download = 'Skippy_User_Manual.docx';
     a.click();
     URL.revokeObjectURL(url);
   };
@@ -3268,7 +3287,10 @@ class App {
                   style="background: var(--bg-dark-armor); color: var(--text-brushed-aluminum); max-width: 640px; max-height: 80vh; overflow-y: auto; padding: 16px 24px; border-radius: 8px; border: 1px solid var(--border-strong);"
                   @click=${(e) => e.stopPropagation()}
                 >
-                  <h2>Skippy Command Lexicon</h2>
+                  <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:0.5em;">
+                    <h2 style="margin:0;">Skippy Command Lexicon</h2>
+                    <button @click=${this.#toggleLexicon}>✕ Close</button>
+                  </div>
                   <p class="status">
                     This lexicon details all active voice and text trigger phrases, categorized by
                     functional module.
@@ -3286,7 +3308,34 @@ class App {
                       )}
                     `,
                   )}
-                  <button @click=${this.#toggleLexicon}>Close</button>
+                  <button @click=${this.#toggleLexicon}>✕ Close</button>
+                </div>
+              </div>
+            `
+          : ''}
+
+        ${this.manualOpen
+          ? html`
+              <div
+                style="position:fixed;inset:0;background:rgba(0,0,0,0.5);display:flex;align-items:center;justify-content:center;z-index:1000;"
+                @click=${this.#toggleManual}
+              >
+                <div
+                  style="background:var(--bg-dark-armor);color:var(--text-brushed-aluminum);max-width:680px;width:95%;max-height:85vh;overflow-y:auto;padding:16px 24px;border-radius:8px;border:1px solid var(--border-strong);"
+                  @click=${(e) => e.stopPropagation()}
+                >
+                  <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:0.8em;position:sticky;top:0;background:var(--bg-dark-armor);padding-bottom:0.5em;border-bottom:1px solid var(--border-subtle);">
+                    <h2 style="margin:0;">Skippy User Manual</h2>
+                    <div style="display:flex;gap:0.5em;">
+                      <button @click=${this.#downloadManual}>↓ Download</button>
+                      <button @click=${this.#toggleManual}>✕ Close</button>
+                    </div>
+                  </div>
+                  <pre style="white-space:pre-wrap;font-family:inherit;font-size:0.85em;line-height:1.6;margin:0;">${this.manualContent}</pre>
+                  <div style="display:flex;justify-content:flex-end;gap:0.5em;margin-top:1em;padding-top:0.5em;border-top:1px solid var(--border-subtle);">
+                    <button @click=${this.#downloadManual}>↓ Download</button>
+                    <button @click=${this.#toggleManual}>✕ Close</button>
+                  </div>
                 </div>
               </div>
             `
@@ -3489,7 +3538,7 @@ class App {
           <summary>Workspace security</summary>
           <div style="display:flex;gap:0.5em;margin-top:0.5em;">
             <button style="flex:1;" @click=${this.#toggleLexicon} aria-label="Command Lexicon">Commands</button>
-            <button style="flex:1;" @click=${this.#downloadManual} aria-label="Download User Manual">Manual ↓</button>
+            <button style="flex:1;" @click=${this.#toggleManual} aria-label="User Manual">Manual</button>
           </div>
           ${this.guestMode
             ? html`
