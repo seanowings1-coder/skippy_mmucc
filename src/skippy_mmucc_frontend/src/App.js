@@ -2158,16 +2158,15 @@ class App {
 
     const isPublicDemo = CIVILIAN_BRIEFING_PHRASES.some((phrase) => lowerText.includes(phrase));
 
-    const courierContent = extractCourierContent(lowerText, text);
+    const courierContent = !this.guestMode ? extractCourierContent(lowerText, text) : null;
     if (courierContent !== null) {
       await this.#queueCourierMessage(text, courierContent, mySeq);
       return;
     }
 
-    // Pillar 12 — only meaningful while an emergency is actually active,
-    // same "only matters in context" gating as the web-search affirmation
-    // phrases above.
-    if (this.emergencyActive) {
+    // Pillar 12 — only meaningful while an emergency is actually active.
+    // Guest mode cannot stand down an emergency — that action requires the owner.
+    if (this.emergencyActive && !this.guestMode) {
       if (STAND_DOWN_PHRASES.some((phrase) => lowerText.includes(phrase))) {
         this.#standDownEmergency(text);
         return;
@@ -3907,6 +3906,7 @@ class App {
           <button
             class="dock-sr ${this.operationalMode === 'tactical' ? 'active' : ''}"
             @click=${() => {
+              if (this.guestMode) return;
               this.operationalMode = this.operationalMode === 'tactical' ? 'default' : 'tactical';
               this.statusMessage = '';
               this.#render();

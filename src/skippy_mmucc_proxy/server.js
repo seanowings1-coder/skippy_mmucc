@@ -146,6 +146,16 @@ const EMERGENCY_CONTACT_NUMBERS = (process.env.EMERGENCY_CONTACT_NUMBERS || '')
 // defaults OFF regardless of whether a number happens to be configured.
 const EMERGENCY_911_ENABLED = process.env.EMERGENCY_911_ENABLED === 'true';
 const EMERGENCY_911_NUMBER = process.env.EMERGENCY_911_NUMBER;
+// Used to build absolute URLs in SMS messages (emergency dispatch). Set this
+// in .env to the proxy's public base URL (e.g. https://proxy.example.com)
+// so emergency SMS links point to the real server instead of a spoofed Host header.
+const PROXY_BASE_URL = (process.env.PROXY_BASE_URL || '').replace(/\/$/, '');
+// CORS origin allowlist — comma-separated list of origins that may call the proxy.
+// In local dev the frontend runs at :3000 (Vite) and :4943 (canister).
+// In production, set PROXY_ALLOWED_ORIGINS to the canister's mainnet URL.
+const PROXY_ALLOWED_ORIGINS = (
+  process.env.PROXY_ALLOWED_ORIGINS || 'http://localhost:3000,http://localhost:4943'
+).split(',').map((o) => o.trim()).filter(Boolean);
 
 // In-memory only, per Pillar 1's existing reasoning for why streamed audio
 // belongs in the Web2 proxy, not the canister (2MB message cap, no real
@@ -187,8 +197,12 @@ function getBackendActor() {
 // makes — name/voiceId fall back here when the caller hasn't set a profile
 // yet (see set_persona_profile in lib.rs), so dual-voice routing degrades
 // gracefully to today's single shared voice until someone customizes it.
+// Session token must come from the X-Skippy-Session header only. The query-param
+// fallback was removed: session credentials in URLs land in server logs, browser
+// history, and Referer headers. The /speak route uses speakRequireSession below,
+// which still accepts the query param because <audio src="..."> cannot send headers.
 async function requireSession(req, res, next) {
-  const token = req.headers['x-skippy-session'] || req.query.session;
+  const token = req.headers['x-skippy-session'];
   if (!token) {
     return res.status(401).json({ error: 'Missing session token.' });
   }
@@ -207,7 +221,33 @@ async function requireSession(req, res, next) {
     };
     next();
   } catch (err) {
-    res.status(502).json({ error: `Failed to validate session: ${err.message}` });
+    res.status(502).json({ error: 'Failed to validate session.' });
+  }
+}
+
+// Variant of requireSession for GET /speak: <audio src="..."> cannot send
+// custom headers, so the session token arrives as a URL query parameter.
+// Use only for this one route — everywhere else requires the header.
+async function speakRequireSession(req, res, next) {
+  const token = req.headers['x-skippy-session'] || req.query.session;
+  if (!token) {
+    return res.status(401).json({ error: 'Missing session token.' });
+  }
+  try {
+    const actor = await getBackendActor();
+    const sessionInfoOpt = await actor.validate_session(token);
+    if (!sessionInfoOpt || sessionInfoOpt.length === 0) {
+      return res.status(401).json({ error: 'Invalid or expired session.' });
+    }
+    const sessionInfo = sessionInfoOpt[0];
+    req.skippySession = {
+      principal: sessionInfo.principal,
+      name: sessionInfo.name?.[0],
+      voiceId: sessionInfo.voice_id?.[0] || ELEVENLABS_VOICE_ID,
+    };
+    next();
+  } catch (err) {
+    res.status(502).json({ error: 'Failed to validate session.' });
   }
 }
 
@@ -507,7 +547,11 @@ async function fetchUrlContent(parsedUrl) {
   const timeout = setTimeout(() => controller.abort(), URL_FETCH_TIMEOUT_MS);
   let response;
   try {
-    response = await fetch(parsedUrl, { signal: controller.signal, redirect: 'follow' });
+    response = await fetch(parsedUrl, { signal: controller.signal, redirect: 'manual' });
+    // Redirects are rejected: a 302 to an internal IP would bypass assertSafeUrl's DNS check.
+    if (response.status >= 300 && response.status < 400) {
+      throw new Error('Redirects are not allowed for URL ingestion.');
+    }
   } finally {
     clearTimeout(timeout);
   }
@@ -695,7 +739,13 @@ function mergeKaraokeMarkers(rawText) {
 }
 
 const app = express();
-app.use(cors());
+app.use(cors({
+  origin: (origin, cb) => {
+    // Allow same-origin requests (origin is undefined for same-origin or non-browser callers).
+    if (!origin || PROXY_ALLOWED_ORIGINS.includes(origin)) return cb(null, true);
+    cb(new Error(`CORS: origin ${origin} not allowed`));
+  },
+}));
 app.use(express.json());
 
 // Pillar 13 ("Civilian Briefing" Protocol) — a fixed, verbatim canned
@@ -1634,10 +1684,13 @@ app.post('/karaoke', requireSession, async (req, res) => {
   }
 });
 
-app.get('/speak', requireSession, async (req, res) => {
+app.get('/speak', speakRequireSession, async (req, res) => {
   const text = req.query.text;
   if (!text) {
     return res.status(400).json({ error: 'Missing "text" query parameter.' });
+  }
+  if (text.length > 4000) {
+    return res.status(400).json({ error: 'Text too long for TTS (max 4000 characters).' });
   }
 
   // Dual-Voice routing — App.js requests the singing voice only for
@@ -1956,7 +2009,11 @@ app.post('/emergency-dispatch', requireSession, async (req, res) => {
     finalizeTimer: null,
   });
 
-  const liveOpsUrl = `${req.protocol}://${req.get('host')}/live-ops/${token}`;
+  // Use PROXY_BASE_URL from env so the SMS link points to the real server.
+  // Falling back to req.get('host') would let an attacker spoof the Host header
+  // and redirect emergency contacts to an attacker-controlled server.
+  const base = PROXY_BASE_URL || `${req.protocol}://localhost:${PORT}`;
+  const liveOpsUrl = `${base}/live-ops/${token}`;
   const mapsUrl = hasLocation ? `https://maps.google.com/?q=${lat},${lon}` : null;
   const locationPart = hasLocation ? ` Map: ${mapsUrl}` : ' (location unavailable)';
 
@@ -2127,6 +2184,13 @@ wss.on('connection', (ws, request) => {
   }
 
   if (role === 'device') {
+    // Reject a second device connection if the real device is already connected.
+    // Any token holder (including SMS recipients) could otherwise hijack the
+    // device role and receive all buffered audio finalize payloads.
+    if (entry.device && entry.device.readyState === entry.device.OPEN) {
+      ws.close(1008, 'Device slot already occupied.');
+      return;
+    }
     entry.device = ws;
     // Periodic finalize: bundles whatever's been buffered since the last
     // tick and hands it back to the *device* (not the canister directly —
@@ -2151,6 +2215,11 @@ wss.on('connection', (ws, request) => {
       }
     });
     ws.on('close', () => {
+      // Clear the finalize timer so it doesn't keep ticking with no device
+      // attached. Setting finalizeTimer to null allows it to be restarted if
+      // the device reconnects before stand-down.
+      clearInterval(entry.finalizeTimer);
+      entry.finalizeTimer = null;
       entry.device = null;
     });
   } else {
