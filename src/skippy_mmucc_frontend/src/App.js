@@ -3288,7 +3288,7 @@ class App {
               @click=${() => { this.showLeftDrawer = !this.showLeftDrawer; this.showRightDrawer = false; this.#render(); }}
               title="Workspace &amp; Config"
             >☰</button>
-            Skippy Command Deck
+            Skippy
             <span class="desktop-only">${this.guestMode
               ? html`<button class="badge active" @click=${this.#unlockGuestMode} title="Click to unlock">🔒 Guest Mode Active</button>`
               : html`<button @click=${() => this.#enableGuestMode()}>Enable Guest Mode</button>`}</span>
