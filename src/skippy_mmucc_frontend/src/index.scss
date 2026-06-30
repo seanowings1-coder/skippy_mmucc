@@ -79,6 +79,21 @@ button:disabled {
   padding: 0.6em 1em;
   background: var(--bg-dark-armor);
   border-bottom: 1px solid var(--border-subtle);
+  position: relative;
+}
+
+.topbar-brand {
+  position: absolute;
+  left: 50%;
+  transform: translateX(-50%);
+  pointer-events: none;
+  img {
+    height: 30px;
+    width: 30px;
+    object-fit: contain;
+    display: block;
+    opacity: 0.88;
+  }
 }
 
 .topbar h1 {

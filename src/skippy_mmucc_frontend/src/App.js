@@ -3361,6 +3361,9 @@ class App {
               ? html`<button class="badge active" style="font-size:0.8em;padding:0.2em 0.5em;" @click=${this.#unlockGuestMode}>🔒 Guest</button>`
               : html`<button style="font-size:0.8em;padding:0.2em 0.5em;" @click=${() => this.#enableGuestMode()}>Guest</button>`}</span>
           </h1>
+          <span class="topbar-brand mobile-only">
+            <img src="/bad-marine-logo.png" alt="Bad Marine LLC" />
+          </span>
           <div class="badges">
             <button
               class="badge desktop-only ${this.voiceMode === 'premium' ? 'active' : ''}"
