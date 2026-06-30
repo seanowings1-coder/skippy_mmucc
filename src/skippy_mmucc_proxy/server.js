@@ -1686,8 +1686,8 @@ app.post('/karaoke', requireSession, async (req, res) => {
 
 app.get('/speak', speakRequireSession, async (req, res) => {
   const text = req.query.text;
-  if (!text) {
-    return res.status(400).json({ error: 'Missing "text" query parameter.' });
+  if (!text || typeof text !== 'string') {
+    return res.status(400).json({ error: 'Missing or invalid "text" query parameter.' });
   }
   if (text.length > 4000) {
     return res.status(400).json({ error: 'Text too long for TTS (max 4000 characters).' });
@@ -2153,6 +2153,18 @@ app.use((err, req, res, next) => {
 
 const server = app.listen(PORT, '0.0.0.0', () => {
   console.log(`Skippy proxy listening on http://0.0.0.0:${PORT}`);
+  if (!process.env.PROXY_BASE_URL) {
+    console.error(
+      '[WARN] PROXY_BASE_URL is not set. Emergency SMS live-ops links will point to localhost ' +
+      'and be unreachable by contacts. Set PROXY_BASE_URL to the public proxy URL before production use.'
+    );
+  }
+  if (!process.env.PROXY_ALLOWED_ORIGINS) {
+    console.warn(
+      '[WARN] PROXY_ALLOWED_ORIGINS is not set — defaulting to localhost origins only. ' +
+      'Set PROXY_ALLOWED_ORIGINS to the mainnet frontend URL before production use.'
+    );
+  }
 });
 
 // Pillar 12's live relay — a dumb two-way pipe per active emergency, keyed

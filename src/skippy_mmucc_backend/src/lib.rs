@@ -4,7 +4,7 @@ use ic_stable_structures::memory_manager::{MemoryId, MemoryManager, VirtualMemor
 use ic_stable_structures::storable::Bound;
 use ic_stable_structures::{DefaultMemoryImpl, StableBTreeMap, StableCell, Storable};
 use std::borrow::Cow;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 
 type Memory = VirtualMemory<DefaultMemoryImpl>;
@@ -57,7 +57,7 @@ const SESSION_TTL_NANOS: u64 = 30 * 60 * 1_000_000_000;
 // PUMP_AMOUNT: how many cycles to transfer per pump event.
 // MIN_BACKEND_RESERVE: never pump if doing so would leave the backend below this.
 const PUMP_THRESHOLD: u128 = 2_000_000_000_000;     // 2T cycles
-const PUMP_AMOUNT: u128 = 1_000_000_000_000;         // 1T cycles
+const PUMP_AMOUNT: u128 = 2_000_000_000_000;         // 2T cycles — fills to threshold in one pump
 const MIN_BACKEND_RESERVE: u128 = 3_000_000_000_000; // 3T cycles
 
 /// A single indexed section/clause from a reference manual. `manual_name` (e.g.
@@ -560,6 +560,12 @@ thread_local! {
             MEMORY_MANAGER.with(|m| m.borrow().get(FRONTEND_CANISTER_ID_MEMORY_ID)),
             Principal::anonymous(),
         ));
+
+    // TOCTOU guard: the canister suspends at every .await, allowing a concurrent
+    // message (timer fire + manual trigger_fuel_pump) to re-enter pump_frontend_cycles
+    // simultaneously. This flag serialises pump invocations; the second caller exits
+    // immediately rather than racing through the reserve check.
+    static PUMP_IN_PROGRESS: Cell<bool> = Cell::new(false);
 }
 
 #[init]
@@ -609,11 +615,22 @@ fn nat_to_u128(n: candid::Nat) -> u128 {
 /// canister. Requires the backend to be a controller of the frontend so that
 /// `canister_status` can read the frontend's cycle balance.
 async fn pump_frontend_cycles() {
+    // Serialise concurrent invocations (timer fire + manual trigger_fuel_pump can both
+    // be in-flight simultaneously because the canister suspends at .await).
+    let already_running = PUMP_IN_PROGRESS.with(|f| {
+        if f.get() { true } else { f.set(true); false }
+    });
+    if already_running {
+        ic_cdk::println!("[MasterFuelPump] pump already in flight — skipping concurrent invocation");
+        return;
+    }
+
     use ic_cdk::management_canister::{CanisterIdRecord, canister_status, deposit_cycles};
 
     let frontend_id = FRONTEND_CANISTER_ID.with(|c| *c.borrow().get());
     if frontend_id == Principal::anonymous() {
         // Not yet configured (first deploy before frontend ID was set). Skip silently.
+        PUMP_IN_PROGRESS.with(|f| f.set(false));
         return;
     }
 
@@ -623,11 +640,13 @@ async fn pump_frontend_cycles() {
         Ok(status) => nat_to_u128(status.cycles),
         Err(e) => {
             ic_cdk::println!("[MasterFuelPump] canister_status error: {:?}", e);
+            PUMP_IN_PROGRESS.with(|f| f.set(false));
             return;
         }
     };
 
     if frontend_cycles >= PUMP_THRESHOLD {
+        PUMP_IN_PROGRESS.with(|f| f.set(false));
         return; // frontend is healthy — nothing to do
     }
 
@@ -640,6 +659,7 @@ async fn pump_frontend_cycles() {
             PUMP_AMOUNT / 1_000_000_000_000,
             MIN_BACKEND_RESERVE / 1_000_000_000_000,
         );
+        PUMP_IN_PROGRESS.with(|f| f.set(false));
         return;
     }
 
@@ -653,6 +673,7 @@ async fn pump_frontend_cycles() {
         ),
         Err(e) => ic_cdk::println!("[MasterFuelPump] deposit_cycles error: {:?}", e),
     }
+    PUMP_IN_PROGRESS.with(|f| f.set(false));
 }
 
 /// Registers the daily pump timer. Called at #[init] and #[post_upgrade]
@@ -676,15 +697,10 @@ async fn trigger_fuel_pump() -> String {
 
 /// Return the current pump configuration so the Fuel Gauge can display it.
 #[query]
-fn get_pump_config() -> (Principal, u64, u64, u64) {
+fn get_pump_config() -> (Principal, u128, u128, u128) {
     assert_whitelisted();
     let frontend_id = FRONTEND_CANISTER_ID.with(|c| *c.borrow().get());
-    (
-        frontend_id,
-        PUMP_THRESHOLD as u64,
-        PUMP_AMOUNT as u64,
-        MIN_BACKEND_RESERVE as u64,
-    )
+    (frontend_id, PUMP_THRESHOLD, PUMP_AMOUNT, MIN_BACKEND_RESERVE)
 }
 
 fn take_next_id() -> u64 {
