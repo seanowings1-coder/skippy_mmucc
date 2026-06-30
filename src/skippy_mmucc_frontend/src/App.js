@@ -826,6 +826,7 @@ class App {
   tierIndex = -1;
   showLeftDrawer = false;
   showRightDrawer = false;
+  showFuelModal = false;
   lastSpeakEndTime = 0; // timestamp when TTS last finished — used to discard
                         // recognition results that arrived during the cooldown window
 
@@ -3288,9 +3289,9 @@ class App {
               title="Workspace &amp; Config"
             >☰</button>
             Skippy Command Deck
-            ${this.guestMode
+            <span class="desktop-only">${this.guestMode
               ? html`<button class="badge active" @click=${this.#unlockGuestMode} title="Click to unlock">🔒 Guest Mode Active</button>`
-              : html`<button @click=${() => this.#enableGuestMode()}>Enable Guest Mode</button>`}
+              : html`<button @click=${() => this.#enableGuestMode()}>Enable Guest Mode</button>`}</span>
           </h1>
           <div class="badges">
             <button
@@ -3323,39 +3324,45 @@ class App {
               @click=${() => { if (this.brainTiers) { this.showBrainGrid = true; this.#render(); } }}
             ></span>
             ${(() => {
-              // Fuel warning dot — lights amber when any resource is below threshold.
-              // Thresholds: cycles < 5T, OpenRouter < 20% remaining, ElevenLabs < 20%
-              // remaining, Twilio < $5.00. Only shown once fuelData has loaded (null = still
-              // fetching, don't false-alarm on startup).
               if (this.guestMode || !this.fuelData) return '';
               const CYCLE_WARN = 5e12;
-              let low = false;
               let reasons = [];
               if (this.cycleBalance != null && Number(this.cycleBalance) < CYCLE_WARN) {
-                low = true; reasons.push(`Cycles: ${(Number(this.cycleBalance) / 1e12).toFixed(2)}T`);
+                reasons.push(`⚡ Cycles: ${(Number(this.cycleBalance) / 1e12).toFixed(2)}T remaining (warn < 5T)`);
               }
               const or = this.fuelData.openrouter;
               if (or && !or.error) {
                 const remaining = or.totalCredits - or.totalUsage;
                 if (remaining < or.totalCredits * 0.2) {
-                  low = true; reasons.push(`OpenRouter: $${remaining.toFixed(2)} left`);
+                  reasons.push(`🤖 OpenRouter: $${remaining.toFixed(2)} left of $${or.totalCredits.toFixed(2)}`);
                 }
               }
               const el = this.fuelData.elevenlabs;
-              if (el && !el.error) {
-                if (el.characterCount >= el.characterLimit * 0.8) {
-                  low = true; reasons.push(`ElevenLabs: ${el.characterCount}/${el.characterLimit} chars`);
-                }
+              if (el && !el.error && el.characterCount >= el.characterLimit * 0.8) {
+                reasons.push(`🔊 ElevenLabs: ${el.characterCount.toLocaleString()} / ${el.characterLimit.toLocaleString()} chars used`);
               }
               const tw = this.fuelData.twilio;
               if (tw && !tw.error && parseFloat(tw.balance) < 5) {
-                low = true; reasons.push(`Twilio: ${tw.currency} ${tw.balance}`);
+                reasons.push(`📡 Twilio: ${tw.currency} ${tw.balance} remaining`);
               }
-              if (!low) return '';
-              return html`<span
-                title="⚠ Fuel low — ${reasons.join(' | ')}"
-                style="display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--guest-amber);border:1px solid #b45309;box-shadow:0 0 6px rgba(217,119,6,0.7);cursor:default;align-self:center;"
-              ></span>`;
+              if (!reasons.length) return '';
+              return html`
+                <span
+                  @click=${() => { this.showFuelModal = true; this.#render(); }}
+                  style="display:inline-block;width:10px;height:10px;border-radius:50%;background:var(--guest-amber);border:1px solid #b45309;box-shadow:0 0 7px rgba(217,119,6,0.8);cursor:pointer;align-self:center;flex-shrink:0;"
+                ></span>
+                ${this.showFuelModal ? html`
+                  <div style="position:fixed;inset:0;background:rgba(0,0,0,0.7);z-index:1000;display:flex;align-items:center;justify-content:center;"
+                       @click=${() => { this.showFuelModal = false; this.#render(); }}>
+                    <div style="background:#1a1a1a;border:1px solid var(--guest-amber);border-radius:8px;padding:1.2em 1.4em;max-width:340px;width:90%;box-shadow:0 0 20px rgba(217,119,6,0.4);"
+                         @click=${(e) => e.stopPropagation()}>
+                      <div style="font-weight:bold;color:var(--guest-amber);margin-bottom:0.7em;">⚠ Fuel Low Alert</div>
+                      ${reasons.map(r => html`<div style="margin-bottom:0.4em;font-size:0.9em;">${r}</div>`)}
+                      <button style="margin-top:0.8em;width:100%;" @click=${() => { this.showFuelModal = false; this.#render(); }}>Dismiss</button>
+                    </div>
+                  </div>
+                ` : ''}
+              `;
             })()}
             <button
               class="badge mobile-only"
@@ -3368,9 +3375,14 @@ class App {
 
         <div class="columns">
         <aside class="col-left ${this.showLeftDrawer ? 'mobile-drawer-open' : ''}">
-          <div class="mobile-only" style="align-items:center;justify-content:space-between;margin-bottom:0.6em;padding-bottom:0.6em;border-bottom:1px solid var(--border-subtle);">
-            <strong style="letter-spacing:0.05em;">WORKSPACE &amp; CONFIG</strong>
-            <button @click=${() => { this.showLeftDrawer = false; this.#render(); }}>✕ Close</button>
+          <div class="mobile-only" style="flex-direction:column;gap:0.5em;margin-bottom:0.6em;padding-bottom:0.6em;border-bottom:1px solid var(--border-subtle);">
+            <div style="display:flex;align-items:center;justify-content:space-between;">
+              <strong style="letter-spacing:0.05em;">WORKSPACE &amp; CONFIG</strong>
+              <button @click=${() => { this.showLeftDrawer = false; this.#render(); }}>✕ Close</button>
+            </div>
+            ${this.guestMode
+              ? html`<button class="badge active" style="width:100%;" @click=${this.#unlockGuestMode}>🔒 Guest Mode Active — tap to unlock</button>`
+              : html`<button style="width:100%;" @click=${() => { this.#enableGuestMode(); this.showLeftDrawer = false; }}>Enable Guest Mode</button>`}
           </div>
         <section class="workspace-switcher">
           <select @change=${this.#handleWorkspaceChange} .value=${this.activeWorkspaceId?.toString() ?? ''}>
