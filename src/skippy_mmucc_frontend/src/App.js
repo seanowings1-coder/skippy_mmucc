@@ -3285,7 +3285,7 @@ class App {
             <button
               class="mobile-only"
               style="background:none;border:none;font-size:1.3em;padding:0.15em 0.35em;cursor:pointer;color:var(--text-brushed-aluminum);"
-              @click=${() => { this.showLeftDrawer = !this.showLeftDrawer; this.showRightDrawer = false; this.#render(); }}
+              @click=${() => { this.showLeftDrawer = !this.showLeftDrawer; this.showRightDrawer = false; this.#render(); if (!this.showLeftDrawer) document.activeElement?.blur(); }}
               title="Workspace &amp; Config"
             >☰</button>
             <span
@@ -3375,7 +3375,7 @@ class App {
             <button
               class="badge mobile-only"
               style="font-size:1.1em;padding:0.2em 0.5em;"
-              @click=${() => { this.showRightDrawer = !this.showRightDrawer; this.showLeftDrawer = false; this.#render(); }}
+              @click=${() => { this.showRightDrawer = !this.showRightDrawer; this.showLeftDrawer = false; this.#render(); if (!this.showRightDrawer) document.activeElement?.blur(); }}
               title="Brain &amp; Security"
             >⚙</button>
           </div>
@@ -3386,7 +3386,7 @@ class App {
           <div class="mobile-only" style="flex-direction:column;gap:0.5em;margin-bottom:0.6em;padding-bottom:0.6em;border-bottom:1px solid var(--border-subtle);">
             <div style="display:flex;align-items:center;justify-content:space-between;">
               <strong style="letter-spacing:0.05em;">WORKSPACE &amp; CONFIG</strong>
-              <button @click=${() => { this.showLeftDrawer = false; this.#render(); }}>✕ Close</button>
+              <button @click=${() => { this.showLeftDrawer = false; this.#render(); document.activeElement?.blur(); }}>✕ Close</button>
             </div>
             ${this.guestMode
               ? html`<button class="badge active" style="width:100%;" @click=${this.#unlockGuestMode}>🔒 Guest Mode Active — tap to unlock</button>`
@@ -3857,7 +3857,7 @@ class App {
           <div class="mobile-only" style="flex-direction:column;gap:0.5em;margin-bottom:0.8em;padding-bottom:0.7em;border-bottom:1px solid var(--border-subtle);">
             <div style="display:flex;align-items:center;justify-content:space-between;">
               <strong style="letter-spacing:0.05em;">BRAIN &amp; SECURITY</strong>
-              <button @click=${() => { this.showRightDrawer = false; this.#render(); }}>✕ Close</button>
+              <button @click=${() => { this.showRightDrawer = false; this.#render(); document.activeElement?.blur(); }}>✕ Close</button>
             </div>
             <div style="display:flex;gap:0.5em;flex-wrap:wrap;">
               <button
