@@ -3322,6 +3322,41 @@ class App {
               })()}"
               @click=${() => { if (this.brainTiers) { this.showBrainGrid = true; this.#render(); } }}
             ></span>
+            ${(() => {
+              // Fuel warning dot — lights amber when any resource is below threshold.
+              // Thresholds: cycles < 5T, OpenRouter < 20% remaining, ElevenLabs < 20%
+              // remaining, Twilio < $5.00. Only shown once fuelData has loaded (null = still
+              // fetching, don't false-alarm on startup).
+              if (this.guestMode || !this.fuelData) return '';
+              const CYCLE_WARN = 5e12;
+              let low = false;
+              let reasons = [];
+              if (this.cycleBalance != null && Number(this.cycleBalance) < CYCLE_WARN) {
+                low = true; reasons.push(`Cycles: ${(Number(this.cycleBalance) / 1e12).toFixed(2)}T`);
+              }
+              const or = this.fuelData.openrouter;
+              if (or && !or.error) {
+                const remaining = or.totalCredits - or.totalUsage;
+                if (remaining < or.totalCredits * 0.2) {
+                  low = true; reasons.push(`OpenRouter: $${remaining.toFixed(2)} left`);
+                }
+              }
+              const el = this.fuelData.elevenlabs;
+              if (el && !el.error) {
+                if (el.characterCount >= el.characterLimit * 0.8) {
+                  low = true; reasons.push(`ElevenLabs: ${el.characterCount}/${el.characterLimit} chars`);
+                }
+              }
+              const tw = this.fuelData.twilio;
+              if (tw && !tw.error && parseFloat(tw.balance) < 5) {
+                low = true; reasons.push(`Twilio: ${tw.currency} ${tw.balance}`);
+              }
+              if (!low) return '';
+              return html`<span
+                title="⚠ Fuel low — ${reasons.join(' | ')}"
+                style="display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--guest-amber);border:1px solid #b45309;box-shadow:0 0 6px rgba(217,119,6,0.7);cursor:default;align-self:center;"
+              ></span>`;
+            })()}
             <button
               class="badge mobile-only"
               style="font-size:1.1em;padding:0.2em 0.5em;"
