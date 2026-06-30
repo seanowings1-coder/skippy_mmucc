@@ -91,6 +91,15 @@ button:disabled {
   text-shadow: 0 0 8px rgba(0, 229, 255, 0.6);
 }
 
+@keyframes skippy-think {
+  0%, 100% { text-shadow: 0 0 8px rgba(0, 229, 255, 0.6); opacity: 1; }
+  50%       { text-shadow: 0 0 18px rgba(0, 229, 255, 1), 0 0 32px rgba(0, 229, 255, 0.5); opacity: 0.85; }
+}
+
+.skippy-thinking {
+  animation: skippy-think 1.1s ease-in-out infinite;
+}
+
 .topbar .badges {
   display: flex;
   align-items: center;

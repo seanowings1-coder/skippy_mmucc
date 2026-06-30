@@ -3288,10 +3288,13 @@ class App {
               @click=${() => { this.showLeftDrawer = !this.showLeftDrawer; this.showRightDrawer = false; this.#render(); }}
               title="Workspace &amp; Config"
             >☰</button>
-            Skippy
+            <span class="${this.state === 'thinking' ? 'skippy-thinking' : ''}" style="letter-spacing:0.03em;">Skippy</span>
             <span class="desktop-only">${this.guestMode
               ? html`<button class="badge active" @click=${this.#unlockGuestMode} title="Click to unlock">🔒 Guest Mode Active</button>`
               : html`<button @click=${() => this.#enableGuestMode()}>Enable Guest Mode</button>`}</span>
+            <span class="mobile-only">${this.guestMode
+              ? html`<button class="badge active" style="font-size:0.8em;padding:0.2em 0.5em;" @click=${this.#unlockGuestMode}>🔒 Guest</button>`
+              : html`<button style="font-size:0.8em;padding:0.2em 0.5em;" @click=${() => this.#enableGuestMode()}>Guest</button>`}</span>
           </h1>
           <div class="badges">
             <button
