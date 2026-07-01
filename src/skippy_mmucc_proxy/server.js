@@ -168,7 +168,7 @@ const activeEmergencies = new Map();
 const FINALIZE_INTERVAL_MS = 10_000;
 
 const DFX_NETWORK = process.env.DFX_NETWORK || 'local';
-const IC_HOST = process.env.IC_HOST || 'http://127.0.0.1:4943';
+const IC_HOST = process.env.IC_HOST || 'https://icp-api.io';
 const BACKEND_CANISTER_ID = process.env.CANISTER_ID_SKIPPY_MMUCC_BACKEND;
 
 // Lazily built — this proxy validates a session token on every request (see
@@ -222,6 +222,7 @@ async function requireSession(req, res, next) {
     };
     next();
   } catch (err) {
+    console.error('[requireSession] validate_session threw:', err?.message ?? err);
     res.status(502).json({ error: 'Failed to validate session.' });
   }
 }
@@ -248,6 +249,7 @@ async function speakRequireSession(req, res, next) {
     };
     next();
   } catch (err) {
+    console.error('[speakRequireSession] validate_session threw:', err?.message ?? err);
     res.status(502).json({ error: 'Failed to validate session.' });
   }
 }
