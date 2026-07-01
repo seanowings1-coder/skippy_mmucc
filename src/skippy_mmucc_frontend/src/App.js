@@ -534,11 +534,19 @@ const MANUAL_OPTIONS = [NOTES_MANUAL];
 const SpeechRecognitionImpl =
   window.SpeechRecognition || window.webkitSpeechRecognition;
 
-// Routed through Vite's dev server (see vite.config.js's "/skippy-api" proxy
-// rule) as a same-origin relative path, rather than a cross-origin :8787 URL —
-// avoids Mixed Content blocks when the page is loaded over HTTPS (e.g. via a
-// localtunnel/ngrok tunnel) but the proxy itself is plain HTTP.
-const PROXY_URL = '/skippy-api';
+// In local dev: Vite proxies /skippy-api → localhost:8787 (see vite.config.js).
+// In production (ICP asset canister): VITE_PROXY_URL is baked in at build time
+// to the Railway URL so the canister-hosted frontend can reach the live proxy.
+const PROXY_URL = import.meta.env.VITE_PROXY_URL || '/skippy-api';
+
+// Build a WebSocket URL from PROXY_URL regardless of relative or absolute form.
+function proxyWsUrl(path) {
+  if (PROXY_URL.startsWith('http')) {
+    return PROXY_URL.replace(/^http/, 'ws') + path;
+  }
+  const scheme = location.protocol === 'https:' ? 'wss' : 'ws';
+  return `${scheme}://${location.host}${PROXY_URL}${path}`;
+}
 
 // Shortest valid silent WAV — used purely to "unlock" the persistent audio
 // element with a real user gesture (see #unlockAudioPlayback).
@@ -2655,9 +2663,8 @@ class App {
       return;
     }
 
-    const wsScheme = location.protocol === 'https:' ? 'wss' : 'ws';
     const ws = new WebSocket(
-      `${wsScheme}://${location.host}${PROXY_URL}/emergency-ws?token=${this.emergencyToken}&role=device`,
+      proxyWsUrl(`/emergency-ws?token=${this.emergencyToken}&role=device`),
     );
     this.emergencyWs = ws;
 
