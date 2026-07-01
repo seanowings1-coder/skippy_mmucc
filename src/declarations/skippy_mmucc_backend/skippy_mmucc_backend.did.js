@@ -119,7 +119,7 @@ export const idlFactory = ({ IDL }) => {
       ),
     'get_pump_config' : IDL.Func(
         [],
-        [IDL.Principal, IDL.Nat64, IDL.Nat64, IDL.Nat64],
+        [IDL.Principal, IDL.Nat, IDL.Nat, IDL.Nat],
         ['query'],
       ),
     'greet' : IDL.Func([IDL.Text], [IDL.Text], ['query']),

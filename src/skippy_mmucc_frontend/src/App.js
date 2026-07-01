@@ -2456,7 +2456,7 @@ class App {
       this.#speak(data.reply);
     } catch (err) {
       if (err.name === 'AbortError' || mySeq !== this.requestSeq) return;
-      this.statusMessage = `Couldn't reach Skippy's brain (is the proxy running on :8787?): ${err.message}`;
+      this.statusMessage = `Couldn't reach Skippy's brain (proxy unreachable — ${PROXY_URL}): ${err.message}`;
       this.#render();
     }
   };
