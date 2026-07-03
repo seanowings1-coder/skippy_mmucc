@@ -548,6 +548,39 @@ function proxyWsUrl(path) {
   return `${scheme}://${location.host}${PROXY_URL}${path}`;
 }
 
+// Renders a Skippy reply with fenced code blocks as copyable <pre> elements.
+// Regular text gets markdown stripped (bold/italic/inline-code); code blocks
+// get a language label and a Copy button that flips to "Copied!" for 2s.
+function renderSkippyMessage(content) {
+  const parts = content.split(/(```[\s\S]*?```)/g);
+  return parts.map((part) => {
+    const codeMatch = part.match(/^```(\w*)\n?([\s\S]*?)\n?```$/);
+    if (codeMatch) {
+      const lang = codeMatch[1] || '';
+      const code = codeMatch[2].trim();
+      return html`<div class="code-block">
+        <div class="code-block-header">
+          ${lang ? html`<span class="code-lang">${lang}</span>` : ''}
+          <button class="copy-code-btn" @click=${(e) => {
+            navigator.clipboard.writeText(code).then(() => {
+              e.target.textContent = 'Copied!';
+              setTimeout(() => { e.target.textContent = 'Copy'; }, 2000);
+            }).catch(() => {});
+          }}>Copy</button>
+        </div>
+        <pre><code>${code}</code></pre>
+      </div>`;
+    }
+    const stripped = part
+      .replace(/\*\*(.*?)\*\*/g, '$1')
+      .replace(/\*(.*?)\*/g, '$1')
+      .replace(/`([^`]+)`/g, '$1')
+      .replace(/\s{2,}/g, ' ')
+      .trim();
+    return stripped ? html`<span>${stripped}</span>` : '';
+  });
+}
+
 // Shortest valid silent WAV — used purely to "unlock" the persistent audio
 // element with a real user gesture (see #unlockAudioPlayback).
 const SILENT_AUDIO_DATA_URI =
@@ -561,6 +594,7 @@ const SINGING_VOICE_GAIN = 1.8;
 
 function stripMarkdown(text) {
   return text
+    .replace(/```[\s\S]*?```/g, '')
     .replace(/\*\*(.*?)\*\*/g, '$1')
     // Single-asterisk spans are virtually always roleplay stage directions/
     // tone descriptions (e.g. "*speaks in a dry, sarcastic tone*"), not
@@ -846,6 +880,7 @@ class App {
     }
     // One persistent element, reused for every reply — see #unlockAudioPlayback.
     this.premiumAudioEl = new Audio();
+    this.premiumAudioEl.crossOrigin = 'anonymous';
     // Web Audio gain graph for Dual-Voice routing (Pillar 18) — see
     // #ensureAudioGraph. audioContext/gainNode stay null until the first
     // real gesture-anchored #unlockAudioPlayback call sets them up.
@@ -1262,6 +1297,10 @@ class App {
     this.brainFamily = 'dolphin';
     this.profileVoiceId = '';
     this.authState = 'logged-out';
+    this.showLeftDrawer = false;
+    this.showRightDrawer = false;
+    this.superBrainLocked = false;
+    localStorage.removeItem('skippy_super_brain_locked');
     this.#render();
   };
 
@@ -1646,7 +1685,13 @@ class App {
       console.log('[Skippy] speech recognition ended');
       this.recognitionActive = false;
       if (this.state !== 'idle' && !this.stopRequested) {
-        this.#startRecognition();
+        if (this.isSpeaking) {
+          // TTS has audio focus — restarting now causes a double-dong on Android
+          // and immediately picks up speaker audio. Set a flag; onended restarts us.
+          this._restartRecognitionAfterTTS = true;
+        } else {
+          this.#startRecognition();
+        }
       }
     };
 
@@ -2784,6 +2829,7 @@ class App {
     window.speechSynthesis?.cancel();
     this.#detachCurrentAudio();
     this.isSpeaking = false;
+    this._restartRecognitionAfterTTS = false;
   };
 
   #speak = (text) => {
@@ -2882,6 +2928,11 @@ class App {
         this.isSpeaking = false;
         this.lastSpeakEndTime = Date.now();
         this.#render();
+        // If recognition died while TTS had audio focus, restart it now.
+        if (this._restartRecognitionAfterTTS && this.state !== 'idle' && !this.stopRequested && !this.recognitionActive) {
+          this._restartRecognitionAfterTTS = false;
+          setTimeout(() => this.#startRecognition(), 300);
+        }
       }
     };
 
@@ -2912,9 +2963,17 @@ class App {
       audio.oncanplaythrough = null;
       clearTimeout(loadTimeout);
       if (settled) return;
-      audio.play().catch((err) => {
+      // Android suspends the AudioContext when the SpeechRecognizer grabs
+      // audio focus (on restart/dong). Resume it before every play so TTS
+      // isn't silenced by a suspended context mid-response.
+      const doPlay = () => audio.play().catch((err) => {
         fallBackToEconomy(`autoplay rejected: ${err.name} ${err.message}`);
       });
+      if (this.audioContext && this.audioContext.state === 'suspended') {
+        this.audioContext.resume().then(doPlay).catch(doPlay);
+      } else {
+        doPlay();
+      }
     };
 
     // Guard against the stream never buffering enough to fire
@@ -3411,7 +3470,7 @@ class App {
               }
               const or = this.fuelData.openrouter;
               if (or && !or.error) {
-                const remaining = or.totalCredits - or.totalUsage;
+                const remaining = Math.max(0, or.totalCredits - or.totalUsage);
                 if (remaining < or.totalCredits * 0.2) {
                   reasons.push(`🤖 OpenRouter: $${remaining.toFixed(2)} left of $${or.totalCredits.toFixed(2)}`);
                 }
@@ -3521,7 +3580,7 @@ class App {
                   OpenRouter: ${this.fuelData?.openrouter?.error
                     ? `error: ${this.fuelData.openrouter.error}`
                     : this.fuelData?.openrouter
-                      ? `$${(this.fuelData.openrouter.totalCredits - this.fuelData.openrouter.totalUsage).toFixed(2)} remaining`
+                      ? `$${Math.max(0, this.fuelData.openrouter.totalCredits - this.fuelData.openrouter.totalUsage).toFixed(2)} remaining`
                       : '...'}
                   <a href="https://openrouter.ai/credits" target="_blank" rel="noopener">Top Up</a>
                 </p>
@@ -3708,9 +3767,10 @@ class App {
             ? html`<p class="status">No messages yet in this workspace.</p>`
             : this.history.map(
                 (msg) => html`
-                  <p class="transcript-message ${msg.role}">
-                    <strong>${msg.role === 'user' ? 'You' : 'Skippy'}:</strong> ${msg.role === 'assistant' ? msg.content.replace(/\*\*(.*?)\*\*/g, '$1').replace(/\*(.*?)\*/g, '').replace(/\s{2,}/g, ' ').trim() : msg.content}
-                  </p>
+                  <div class="transcript-message ${msg.role}">
+                    <strong>${msg.role === 'user' ? 'You' : 'Skippy'}:</strong>
+                    ${msg.role === 'assistant' ? renderSkippyMessage(msg.content) : html`<span>${msg.content}</span>`}
+                  </div>
                 `,
               )}
         </div>

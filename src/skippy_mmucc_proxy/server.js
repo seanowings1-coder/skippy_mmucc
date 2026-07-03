@@ -105,7 +105,7 @@ const BRAIN_GENERATION_PARAMS = {
   // enough for a closing hype monologue. Karaoke has its own separate route
   // with no cap, so songs are unaffected.
   everyday: { temperature: 0.72, repetition_penalty: 1.12, max_tokens: 100 },
-  heavy_hitter: {},
+  heavy_hitter: { max_tokens: 2048 }, // prevent OpenRouter reserving full context (65k) upfront
   tactical: {},
   focus: {},
 };
@@ -181,6 +181,7 @@ function getBackendActor() {
   if (!backendActorPromise) {
     backendActorPromise = (async () => {
       const { idlFactory } = await import(
+        // MONOREPO PATH: ../declarations/ — Skippy-proxy repo needs ./declarations/ (server.js is at root there)
         '../declarations/skippy_mmucc_backend/skippy_mmucc_backend.did.js'
       );
       const agent = await HttpAgent.create({ host: IC_HOST });
@@ -927,7 +928,10 @@ app.post('/respond', requireSession, async (req, res) => {
     `immediately and directly, right now, in this reply. This is a voice assistant: never write ` +
     `roleplay-style stage directions or tone descriptions wrapped in asterisks (e.g. "*speaks ` +
     `dryly*", "*chuckles*") — every word you write gets read aloud verbatim, so only write the ` +
-    `actual spoken line itself, never a description of how it's said.`;
+    `actual spoken line itself, never a description of how it's said. ` +
+    `Exception: when providing code, ALWAYS wrap it in a fenced code block using triple backticks ` +
+    `and the language identifier (e.g. \`\`\`python ... \`\`\`). Code blocks are displayed visually ` +
+    `and not read aloud, so this is the correct format for any code snippet, no matter how short.`;
 
   // Pillar 6 — the frontend already decided what's relevant (ran the
   // similarity search/threshold check itself, see CLAUDE.md), so this just

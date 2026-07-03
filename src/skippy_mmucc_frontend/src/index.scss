@@ -419,6 +419,54 @@ button:disabled {
   padding-left: 0.9em;
 }
 
+.code-block {
+  margin: 0.6em 0;
+  border: 1px solid var(--border-subtle);
+  border-radius: 6px;
+  overflow: hidden;
+  font-size: 0.85em;
+
+  .code-block-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    background: rgba(255,255,255,0.06);
+    padding: 0.3em 0.7em;
+    gap: 0.5em;
+
+    .code-lang {
+      font-size: 0.8em;
+      opacity: 0.6;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+
+    .copy-code-btn {
+      margin-left: auto;
+      padding: 0.2em 0.6em;
+      font-size: 0.8em;
+      cursor: pointer;
+      background: rgba(255,255,255,0.1);
+      border: 1px solid var(--border-subtle);
+      border-radius: 4px;
+      color: inherit;
+      &:hover { background: rgba(255,255,255,0.2); }
+    }
+  }
+
+  pre {
+    margin: 0;
+    padding: 0.8em 1em;
+    overflow-x: auto;
+    background: rgba(0,0,0,0.3);
+
+    code {
+      font-family: 'Courier New', Courier, monospace;
+      white-space: pre;
+    }
+  }
+}
+
 // --- Input deck (sticky bottom of center column) ---------------------------
 
 .input-deck {

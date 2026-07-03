@@ -2,6 +2,17 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Repository Layout
+
+This is a **monorepo** — but Railway deploys the proxy from a **separate** GitHub repo:
+
+| Repo | GitHub | Purpose |
+|---|---|---|
+| `skippy_mmucc` | `seanowings1-coder/skippy_mmucc` | ICP canisters (backend + frontend), local dev |
+| `Skippy-proxy` | `seanowings1-coder/Skippy-proxy` | Node.js proxy — Railway autodeploys from this repo |
+
+**Pushing `skippy_mmucc` does NOT update Railway.** Proxy changes (`src/skippy_mmucc_proxy/server.js`) must also be committed and pushed to the `Skippy-proxy` repo for Railway to pick them up.
+
 ## Commands
 
 ```bash
@@ -197,3 +208,26 @@ Planned/aspirational system design for features not yet fully implemented.
 
 ### 5. Courier Queue (Pillar 7)
 - Two-user system: `queue_courier_message` routes to the other whitelisted Principal automatically; `pop_pending_courier_messages` delivers and purges in one atomic call.
+
+## Planned Migrations (in progress as of 2026-07-02)
+
+### Brain → DeepInfra
+Replacing OpenRouter with DeepInfra due to 503 reliability issues.
+
+| Mode | Model |
+|---|---|
+| Snappy (everyday banter) | `Sao10K/L3.1-70B-Euryale-v2.2` or `deepseek-ai/DeepSeek-V4-Flash` |
+| Super Brain (coding/math) | `deepseek-ai/DeepSeek-V4-Pro` |
+
+- DeepInfra uses the same OpenAI-compatible `/v1/chat/completions` endpoint format.
+- New env vars needed: `DEEPINFRA_API_KEY`, `DEEPINFRA_MODEL_SNAPPY`, `DEEPINFRA_MODEL_SUPERBRAIN`.
+- Old `OPENROUTER_*` env vars stay in `.env` until migration is confirmed live.
+
+### TTS → Fish Audio
+Replacing ElevenLabs with Fish Audio (S2 Pro engine) to reduce cost.
+
+- Fish Audio supports bracketed emotion tags at sentence start: `[smug]`, `[sigh]`, `[excited]`, etc.
+- System prompt must instruct Skippy to **begin sentences with a bracketed emotion tag** so Fish Audio can act them out physically.
+- New env vars needed: `FISH_AUDIO_API_KEY`, `FISH_AUDIO_VOICE_ID`.
+- `/speak` route in `server.js` switches from ElevenLabs `xi-api-key` header to Fish Audio's auth scheme.
+- Old `ELEVENLABS_*` env vars stay in `.env` until migration is confirmed live.
