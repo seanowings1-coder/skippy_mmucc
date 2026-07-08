@@ -723,6 +723,17 @@ function mergeKaraokeMarkers(rawText) {
   const markerCount = (text.match(/🎶/gu) || []).length;
   if (markerCount % 2 !== 0) text = text + ' 🎶';
 
+  // Worst case, confirmed live 2026-07-08: a cascade fallback to a weaker
+  // tier can drop the 🎶 wrapping entirely (zero markers, not just a
+  // malformed pair) — the strict-format instructions just don't hold as
+  // reliably on a smaller model. Without any markers, App.js's
+  // splitVoiceSegments() has nothing to match and falls back to the plain
+  // conversational voice for the ENTIRE song ("he isn't singing"). Wrapping
+  // the whole reply in one pair is a blunt last resort (the spoken hype
+  // line ends up sung too, if the model didn't separate it) but it's far
+  // better than losing the singing voice altogether.
+  if (markerCount === 0) text = `🎶 ${text.trim()} 🎶`;
+
   const pattern = /🎶([\s\S]*?)🎶/gu;
   const sungSegments = [];
   let match;
@@ -1152,7 +1163,7 @@ app.post('/respond', requireSession, async (req, res) => {
     // Tactical/Heavy Hitter: 2-tier — primary → free fallback → paid fallback.
     //   Keeps the active system prompt/persona unchanged; only the underlying
     //   model changes. Better a slower model that answers than a hard error.
-    const isTransientFailure = (r) => !r.ok && (r.status === 404 || r.status === 429);
+    const isTransientFailure = (r) => !r.ok && (r.status === 404 || r.status === 429 || r.status === 402);
     const isFallbackable = (r) => brain === 'everyday' && isTransientFailure(r);
     const reasonLabel = (r, text) =>
       r.status === 429 ? 'rate-limited (429)' : (text.includes('No endpoints found') ? 'offline (404)' : `error ${r.status}`);
@@ -1323,6 +1334,11 @@ app.post('/project-brief', requireSession, async (req, res) => {
           { role: 'system', content: briefSystemPrompt },
           { role: 'user', content: `Workspace: ${title}\n\n${transcript}` },
         ],
+        // Omitting max_tokens lets OpenRouter default to the model's absolute
+        // max (65536), which the account's credit balance can't cover — that
+        // caused a 402 on every single call (confirmed live 2026-07-07). A
+        // brief only needs room for a document, not the model's full ceiling.
+        max_tokens: 4096,
       }),
       signal: upstreamAbort.signal,
     });
@@ -1416,6 +1432,9 @@ app.post('/critic-loop', requireSession, async (req, res) => {
           { role: 'system', content: criticSystemPrompt },
           { role: 'user', content: transcript },
         ],
+        // Same omitted-max_tokens 402 bug as /project-brief above — the
+        // critic's output is just a small JSON object, doesn't need much.
+        max_tokens: 600,
       }),
       signal: upstreamAbort.signal,
     });
@@ -1489,8 +1508,13 @@ CRITICAL STRUCTURAL ARCHITECTURE:
 2. The entire song performance MUST be contained within exactly ONE pair of musical emojis: 🎶 [Your full song here] 🎶. Do not include multiple 🎶 blocks, and do not include any text, notes, or explanations after the closing emoji.
 3. You must provide exactly ONE spoken rockstar hype-man line directly BEFORE the opening 🎶 emoji.
 4. Do NOT include any structural labels or brackets like [Verse], [Chorus], or (Guitar Solo) inside or outside the block, as this text is fed directly to a text-to-speech engine and will sound terrible if spoken aloud. Instead, separate your verses and choruses using a standard double line break.
-5. Your song must feature a distinct structural progression: an opening verse (4 lines), a catchy repeating chorus (2-4 lines), a second verse (4 lines), and a final punchy outro line.
-6. Within each section, lines must strictly follow a clear end-rhyme scheme (AABB or ABAB) with consistent meter/syllable counts per line.
+5. Your song must feature this exact section progression: Verse 1 (4 lines) → Pre-Chorus (2 lines) → Chorus (2-4 lines) → Verse 2 (4 lines) → Pre-Chorus (2 lines, may reuse or vary Pre-Chorus 1) → Chorus (repeat the SAME hook lines verbatim — choruses always repeat) → Bridge (2-4 lines) → Chorus (final repeat) → one final punchy outro line.
+6. Each section has its OWN rhyme scheme — do not use the same scheme everywhere:
+   - Verse: ABCB — only lines 2 and 4 rhyme; lines 1 and 3 are free. Looser meter, narrative/scene-setting, tells part of the story.
+   - Pre-Chorus: AABB — tight rhyming couplets, shortening/tightening meter that builds tension and momentum straight into the chorus.
+   - Chorus: AABB — short, punchy, immediately repeatable hook. This is the line the Commander should be able to shout back. Must repeat verbatim every time the chorus recurs.
+   - Bridge: deliberately BREAKS the established rhyme pattern (little or no end-rhyme, freer rhythm) — a shift in intensity or perspective that makes the final chorus hit harder by contrast.
+7. On climactic/high-belt lines (the last line of the chorus especially), end the line on an open vowel sound (e.g. words ending in -ay, -ow, -eye, -ah) rather than a hard consonant — open vowels are what a voice can actually hold/belt, closed consonants can't be sustained.
 
 TTS AND STAGE DIRECTION SAFETY:
 - Never write asterisk-wrapped physical/visual stage directions (e.g., *clears throat*, *bows with a flourish*). You are a voice/text AI with no physical body, so describing a body doing things makes no sense; speak in pure dialogue/lyrics only.
@@ -1508,18 +1532,33 @@ METRIC SCHEME GUIDELINE TO FORCE CADENCE:
 STRICT TEMPLATE FORMAT:
 Spoken rockstar hype line goes here!
 🎶
-Line 1 of Verse 1 text
-Line 2 of Verse 1 text
-Line 3 of Verse 1 text
-Line 4 of Verse 1 text
+Verse 1 line 1 (A, free)
+Verse 1 line 2 (B, rhymes with line 4)
+Verse 1 line 3 (C, free)
+Verse 1 line 4 (B, rhymes with line 2)
 
-Line 1 of Chorus text
-Line 2 of Chorus text
+Pre-Chorus line 1 (A)
+Pre-Chorus line 2 (A, rhymes with line 1)
 
-Line 1 of Verse 2 text
-Line 2 of Verse 2 text
-Line 3 of Verse 2 text
-Line 4 of Verse 2 text
+Chorus line 1 (A) — THE HOOK
+Chorus line 2 (A, rhymes with line 1) — open-vowel ending
+
+Verse 2 line 1 (A, free)
+Verse 2 line 2 (B, rhymes with line 4)
+Verse 2 line 3 (C, free)
+Verse 2 line 4 (B, rhymes with line 2)
+
+Pre-Chorus line 1 (A)
+Pre-Chorus line 2 (A, rhymes with line 1)
+
+Chorus line 1 (A) — SAME HOOK, VERBATIM
+Chorus line 2 (A, rhymes with line 1) — open-vowel ending
+
+Bridge line 1 (pattern breaks — no strict rhyme)
+Bridge line 2 (pattern breaks — no strict rhyme)
+
+Chorus line 1 (A) — SAME HOOK, VERBATIM
+Chorus line 2 (A, rhymes with line 1) — open-vowel ending
 
 Final punchy outro line text
 🎶
@@ -1533,20 +1572,40 @@ Here I go again on my Web3 road
 🎶 [Chorus] 🎶
 Nightwish singing about the Rust code
 
-RIGHT (Single block / Pure Original / Zero Labels / Clean Line Breaks / Pure Text):
+RIGHT (Single block / Pure Original / Zero Labels / Clean Line Breaks / Verse=ABCB / Pre-Chorus+Chorus=AABB / Chorus repeats verbatim / Bridge breaks the pattern):
 🎶
-The lightning strikes the digital domain
-A lonely node executing in the rain
-We compile the fire through the midnight hour
-Decentralized networks rising up in power
+The lightning cracked the night I found the door
+A digital road with no end and no name
+I walked in the dark past a thousand closed gates
+Just me and the static that whispered my name
 
-Stacking up the tokens higher than the sky
-Watch the legacy engines fade away and die
+I'm climbing the wire, I'm feeding the fire
+I won't stop chasing what I most desire
 
-The iron bunker braves the winter chill
-Writing out the logic with a sovereign will
+Stacking the tokens higher than the sky
+Watch the legacy engines fade and die
+Stacking the tokens higher than the sky
+Nothing can touch us when we learn to fly
+
+The iron bunker braved the winter chill
+I wrote out the logic with a sovereign will
 A thousand canisters spinning in the dark
-The terminal is glowing with a cosmic spark
+The terminal glowing with a cosmic spark
+
+I'm climbing the wire, I'm feeding the fire
+I won't stop chasing what I most desire
+
+Stacking the tokens higher than the sky
+Watch the legacy engines fade and die
+Stacking the tokens higher than the sky
+Nothing can touch us when we learn to fly
+
+No more masters, no more chains, just the code and the fight
+
+Stacking the tokens higher than the sky
+Watch the legacy engines fade and die
+Stacking the tokens higher than the sky
+Nothing can touch us when we learn to fly
 
 We'll run the world on-chain forevermore!
 🎶`;
@@ -1645,12 +1704,15 @@ app.post('/karaoke', requireSession, async (req, res) => {
       fetch('https://openrouter.ai/api/v1/chat/completions', {
         method: 'POST',
         headers: { Authorization: `Bearer ${OPENROUTER_API_KEY}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ model, messages: karaokeMessages }),
+        // Explicit generous ceiling (not omitted) — confirmed 2026-07-06 that
+        // relying on no max_tokens at all still truncated full songs, likely
+        // an OpenRouter/provider default kicking in when the param is absent.
+        body: JSON.stringify({ model, messages: karaokeMessages, max_tokens: 3000 }),
         signal: upstreamAbort.signal,
       });
 
     // Same Dolphin-first cascade as /respond: free → paid → free fallback → paid fallback.
-    // Karaoke has no max_tokens cap (songs need room) so we pass no genParams here.
+    // Karaoke gets a generous (not absent) max_tokens so songs have room to breathe.
     let activeModel = BRAIN_MODELS.everyday;
     let response = await callKaraoke(activeModel);
 
@@ -1940,6 +2002,14 @@ app.post('/web-search', requireSession, async (req, res) => {
 // page instead. Behind requireSession like every other route that spends
 // against a paid external API.
 app.get('/api/fuel', requireSession, async (req, res) => {
+  // Confirmed live 2026-07-08: this is a real-time balance check, but
+  // Express auto-generates an ETag for every JSON response by default, and
+  // this route never said otherwise — so the browser (and possibly an
+  // intermediate cache) treated it as reusable content. One stale snapshot
+  // got cached days ago and was silently replayed as a 304 on every
+  // "Refresh" tap since (both desktop and mobile), never re-running this
+  // handler at all. no-store forbids any cache from ever reusing this.
+  res.set('Cache-Control', 'no-store');
   const result = {};
 
   try {

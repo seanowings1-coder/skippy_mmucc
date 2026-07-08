@@ -2449,17 +2449,29 @@ class App {
         }),
         signal,
       });
-      const data = await response.json();
       if (mySeq !== this.requestSeq) return; // superseded by a newer utterance
-      // Clear the stale voice score so the next turn starts fresh — prevents
-      // a Commander reading from this turn bleeding into Lisa's next turn.
-      this.lastSpeakerScore = null;
 
+      // Check ok BEFORE parsing — a non-200 response (proxy crash page, CDN/
+      // gateway error, stale service-worker fallback) isn't guaranteed to be
+      // JSON, and calling response.json() first would throw a raw parse error
+      // here instead of surfacing whatever the real problem was.
       if (!response.ok) {
-        this.statusMessage = data.error || 'Skippy had nothing to say.';
+        let errorText = 'Skippy had nothing to say.';
+        try {
+          const data = await response.json();
+          errorText = data.error || errorText;
+        } catch {
+          errorText = (await response.text().catch(() => '')) || errorText;
+        }
+        this.statusMessage = errorText;
         this.#render();
         return;
       }
+
+      const data = await response.json();
+      // Clear the stale voice score so the next turn starts fresh — prevents
+      // a Commander reading from this turn bleeding into Lisa's next turn.
+      this.lastSpeakerScore = null;
 
       // This reply was Skippy mocking + asking permission (Dumbass Loop),
       // not an actual answer — remember the original question so a "yes"
@@ -3006,6 +3018,14 @@ class App {
         this.isSpeaking = false;
         this.lastSpeakEndTime = Date.now();
         this.#render();
+        // If recognition died while TTS had audio focus, restart it now.
+        // Mirrors the Premium audio path below — without this, Economy-voiced
+        // replies (used for Ghost Mode/system notifications) can leave
+        // recognition permanently off if it happened to end mid-utterance.
+        if (this._restartRecognitionAfterTTS && this.state !== 'idle' && !this.stopRequested && !this.recognitionActive) {
+          this._restartRecognitionAfterTTS = false;
+          setTimeout(() => this.#startRecognition(), 300);
+        }
       };
       window.speechSynthesis.speak(utterance);
     }, 0);
