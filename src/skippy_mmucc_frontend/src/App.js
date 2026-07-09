@@ -725,6 +725,18 @@ class App {
   // (yes or no) on the very next utterance, same pending-state shape as
   // pendingWebSearchQuery above.
   pendingKaraokeOffer = false;
+  // Re-entrancy guard for #performKaraoke — confirmed live 2026-07-08: the
+  // already-known karaoke self-echo bug (Skippy's own offer audio getting
+  // picked back up by the mic as a fresh "yes") could always double-fire a
+  // second performance, but it used to be harmless-ish since the old
+  // TTS-only path finished in seconds. Now that a real performance takes
+  // 60-90+ seconds (lyrics generation + ACE-Step), that same double-fire
+  // produces multiple concurrent /karaoke calls racing each other, each
+  // independently calling #recordTurn/#render/#speak — garbled overlapping
+  // transcript entries and audio, exactly what showed up live. This flag
+  // makes a second trigger while one is already running a silent no-op
+  // instead of starting a competing performance.
+  karaokeInFlight = false;
   // Pillar 10 — private per-Principal project partitions for history.
   // activeWorkspaceId is a bigint (candid nat64), matching every other
   // server-issued id already flowing through this file unconverted.
@@ -1170,6 +1182,11 @@ class App {
   // OpenRouter call (unlike the deterministic offer ack) since the whole
   // point is a different song each time.
   #performKaraoke = async (text) => {
+    if (this.karaokeInFlight) {
+      console.warn('[Skippy] karaoke already in progress — ignoring duplicate trigger');
+      return;
+    }
+    this.karaokeInFlight = true;
     this.statusMessage = 'Skippy is warming up...';
     this.#render();
     try {
@@ -1217,6 +1234,12 @@ class App {
       console.error('[Skippy] karaoke failed:', err);
       this.statusMessage = `Couldn't get the song going: ${err.message}`;
       this.#render();
+    } finally {
+      // Cleared once generation is done (not once playback finishes) — a
+      // second trigger while a song is already playing is a much smaller,
+      // more tolerable edge case than the one this guard exists to prevent
+      // (multiple concurrent /karaoke generations racing each other).
+      this.karaokeInFlight = false;
     }
   };
 
