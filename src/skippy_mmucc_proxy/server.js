@@ -1872,6 +1872,20 @@ app.post('/karaoke', requireSession, async (req, res) => {
       const lyricsMatch = reply.match(/🎶([\s\S]*?)🎶/u);
       const lyricsOnly = lyricsMatch ? lyricsMatch[1].trim() : null;
       if (lyricsOnly) {
+        // Confirmed live 2026-07-08: the earlier fixed duration:60 cut off a
+        // real 22-line song mid-performance — 60s just isn't always enough
+        // for the full karaoke structure. Estimate instead from the actual
+        // lyric length: ~2.2 words/sec is a reasonable sung pace for
+        // energetic hair-metal/power-metal delivery, plus a 20% buffer for
+        // pacing/pauses between lines. Clamped to the API's real minimum
+        // (30, confirmed via a direct 422 below that) and a cost/time
+        // ceiling (110s, ~$0.11) so an unusually long generation can't run
+        // away. A short 4-line test song lands at the 30s floor; the
+        // 22-line song that got cut off would land around ~95s — comfortably
+        // more than the 60s that truncated it.
+        const wordCount = lyricsOnly.split(/\s+/).filter(Boolean).length;
+        const estimatedDuration = Math.round((wordCount / 2.2) * 1.2);
+        const duration = Math.min(110, Math.max(30, estimatedDuration));
         try {
           const acestepResponse = await fetch(
             'https://api.deepinfra.com/v1/inference/ACE-Step/acestep-v15-xl-sft',
@@ -1888,18 +1902,7 @@ app.post('/karaoke', requireSession, async (req, res) => {
                   'driving distorted electric guitars, cinematic orchestration, 130 BPM',
                 lyrics: lyricsOnly,
                 response_format: 'mp3',
-                // Confirmed live 2026-07-08: duration IS a real, accepted param
-                // (just undocumented on DeepInfra's own API reference page) —
-                // minimum enforced value is 30 (a direct 422 below that). Left
-                // uncapped, ACE-Step generated ~119s regardless of how short
-                // the lyrics were, taking ~58s to generate and leaving a long
-                // instrumental tail after the sung lyrics ended. 60s is a
-                // reasoned middle ground: short enough to roughly halve both
-                // the wait and the tail, long enough that a full ~24-27 line
-                // song (the karaoke structure's max) has room to actually be
-                // sung rather than getting rushed/cut off. Tune this constant
-                // directly if it needs adjusting after more live listening.
-                duration: 60,
+                duration,
               }),
               signal: upstreamAbort.signal,
             },
@@ -1910,7 +1913,8 @@ app.post('/karaoke', requireSession, async (req, res) => {
               audio = acestepData.audio;
               console.log(
                 `[Skippy/karaoke] ACE-Step generated ${acestepData.duration_seconds}s of audio ` +
-                  `in ${acestepData.inference_status?.runtime_ms}ms, cost $${acestepData.inference_status?.cost}`,
+                  `(requested ${duration}s for ${wordCount} words) in ` +
+                  `${acestepData.inference_status?.runtime_ms}ms, cost $${acestepData.inference_status?.cost}`,
               );
             } else {
               console.warn('[Skippy/karaoke] ACE-Step succeeded but returned no audio field');

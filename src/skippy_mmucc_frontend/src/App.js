@@ -1187,6 +1187,23 @@ class App {
       return;
     }
     this.karaokeInFlight = true;
+    // User's fix, confirmed live 2026-07-08 as the real root-cause fix for
+    // the self-echo bug (the karaokeInFlight guard above only cleans up
+    // AFTER a double-trigger already happened — this prevents it from
+    // happening at all): stop listening entirely for the whole performance,
+    // not just generation. There's no legitimate reason to be listening for
+    // a new command while Skippy is singing — nothing else can be said to
+    // him mid-song, and the mic picking up his own hype line / song audio is
+    // exactly what caused "Skippy go" and "alright" to both fire separate,
+    // colliding performances earlier tonight. Only resume if we were
+    // actually listening to begin with (voice-triggered karaoke always
+    // implies this, but stay defensive) — and only WE resume it, so an
+    // explicit manual stop mid-song by the user isn't fought.
+    const wasListening = this.state === 'listening';
+    if (wasListening) this.#stopListening();
+    const resumeListening = () => {
+      if (wasListening) this.#startListening();
+    };
     this.statusMessage = 'Skippy is warming up...';
     this.#render();
     try {
@@ -1222,18 +1239,19 @@ class App {
           this.#playPremiumSegments(
             [{ text: data.hypeLine, voice: 'conversational' }],
             0,
-            () => this.#playKaraokeAudio(data.audio),
+            () => this.#playKaraokeAudio(data.audio, resumeListening),
           );
         } else {
-          this.#playKaraokeAudio(data.audio);
+          this.#playKaraokeAudio(data.audio, resumeListening);
         }
       } else {
-        this.#speak(data.reply);
+        this.#speak(data.reply, resumeListening);
       }
     } catch (err) {
       console.error('[Skippy] karaoke failed:', err);
       this.statusMessage = `Couldn't get the song going: ${err.message}`;
       this.#render();
+      resumeListening();
     } finally {
       // Cleared once generation is done (not once playback finishes) — a
       // second trigger while a song is already playing is a much smaller,
@@ -1249,7 +1267,7 @@ class App {
   // segment-splitting/fallback-to-Economy logic doesn't apply to a single,
   // already-complete audio file, and keeping this separate avoids risking
   // the #speechGen orphaned-timeout fix made earlier the same session.
-  #playKaraokeAudio = (dataUri) => {
+  #playKaraokeAudio = (dataUri, onComplete = null) => {
     this.#stopSpeaking();
     const myGen = this.#speechGen;
     const audio = this.premiumAudioEl;
@@ -1271,16 +1289,19 @@ class App {
         this._restartRecognitionAfterTTS = false;
         setTimeout(() => this.#startRecognition(), 300);
       }
+      if (onComplete) onComplete();
     };
     audio.onerror = () => {
       if (myGen !== this.#speechGen) return;
       console.warn('[Skippy] ACE-Step audio playback failed');
       this.isSpeaking = false;
       this.#render();
+      if (onComplete) onComplete();
     };
 
     const doPlay = () => audio.play().catch((err) => {
       console.warn('[Skippy] ACE-Step audio autoplay rejected:', err.name, err.message);
+      if (onComplete) onComplete();
     });
     if (this.audioContext && this.audioContext.state === 'suspended') {
       this.audioContext.resume().then(doPlay).catch(doPlay);
@@ -2981,19 +3002,28 @@ class App {
     this._restartRecognitionAfterTTS = false;
   };
 
-  #speak = (text) => {
-    if (this.voiceMuted) return;
+  // onComplete is optional and only used by callers that need to know when
+  // speaking has genuinely finished (e.g. #performKaraoke resuming
+  // recognition afterward) — every existing call site simply omits it.
+  #speak = (text, onComplete = null) => {
+    if (this.voiceMuted) {
+      if (onComplete) onComplete();
+      return;
+    }
     // Ghost Mode's whole premise is zero sound — Skippy's own replies to
     // unrelated questions asked mid-emergency must stay silent too, not
     // just the dedicated open-comms/go-dark acknowledgments.
-    if (this.ghostMode && !this.commsOpen) return;
+    if (this.ghostMode && !this.commsOpen) {
+      if (onComplete) onComplete();
+      return;
+    }
     this.#stopSpeaking();
 
     if (this.voiceMode === 'economy') {
       // No real singing synthesis exists client-side — Dual-Voice routing
       // is Premium/ElevenLabs-only. Strip the lyric markers and speak the
       // verse as plain text through the same Economy voice.
-      this.#speakEconomy(stripMarkdown(text).replace(/🎶/g, ''));
+      this.#speakEconomy(stripMarkdown(text).replace(/🎶/g, ''), onComplete);
       return;
     }
 
@@ -3014,6 +3044,7 @@ class App {
     this.#playPremiumSegments(
       segments.length > 0 ? segments : [{ text: stripMarkdown(text), voice: 'conversational' }],
       0,
+      onComplete,
     );
   };
 
@@ -3146,8 +3177,11 @@ class App {
     }, 8000);
   };
 
-  #speakEconomy = (text) => {
-    if (!window.speechSynthesis) return;
+  #speakEconomy = (text, onComplete = null) => {
+    if (!window.speechSynthesis) {
+      if (onComplete) onComplete();
+      return;
+    }
     // Make sure no Premium audio is left lingering/about to resume underneath this.
     this.#detachCurrentAudio();
     window.speechSynthesis.cancel();
@@ -3177,6 +3211,7 @@ class App {
           this._restartRecognitionAfterTTS = false;
           setTimeout(() => this.#startRecognition(), 300);
         }
+        if (onComplete) onComplete();
       };
       window.speechSynthesis.speak(utterance);
     }, 0);
