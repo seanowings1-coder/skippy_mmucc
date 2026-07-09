@@ -820,6 +820,10 @@ class App {
   // engine), just renders text. For meetings/quiet rooms.
   voiceMuted = false;
   premiumAudioEl = null;
+  // Most recent ACE-Step-generated song (a data: URI), kept around so the
+  // "Save Song" control has something to point at — cleared/replaced by
+  // every subsequent karaoke attempt, not persisted across reloads.
+  lastKaraokeAudio = null;
   audioUnlocked = false;
   // Monotonic counter + abort handle so a new utterance can immediately
   // interrupt whatever Skippy is currently saying or still waiting on,
@@ -1177,6 +1181,9 @@ class App {
       if (!response.ok) throw new Error(data.error || 'Karaoke request failed.');
       this.statusMessage = '';
       this.#recordTurn(text, data.reply);
+      // Cleared unconditionally so a stale link from a previous song can't
+      // linger if this attempt had no audio (ACE-Step unavailable/failed).
+      this.lastKaraokeAudio = data.audio || null;
       this.#render();
       // Experimental (2026-07-08): real AI-generated music from ACE-Step, if
       // the proxy managed to generate it — additive on top of the existing
@@ -1186,7 +1193,23 @@ class App {
       // generation time) already fell through server-side, so `audio` is
       // simply absent here and this behaves exactly as it did before tonight.
       if (data.audio) {
-        this.#playKaraokeAudio(data.audio);
+        // Confirmed live 2026-07-08: jumping straight to the raw ACE-Step
+        // audio silently skipped the spoken hype line entirely (it's plain
+        // text in `data.reply`, never sent to ACE-Step, which only ever
+        // sings the lyrics). Speak it first through the normal TTS path,
+        // then chain into the real song once that finishes — same shape as
+        // the existing multi-segment TTS flow, just handing off to a
+        // different audio source for the second "segment."
+        if (data.hypeLine) {
+          this.#stopSpeaking();
+          this.#playPremiumSegments(
+            [{ text: data.hypeLine, voice: 'conversational' }],
+            0,
+            () => this.#playKaraokeAudio(data.audio),
+          );
+        } else {
+          this.#playKaraokeAudio(data.audio);
+        }
       } else {
         this.#speak(data.reply);
       }
@@ -1241,6 +1264,22 @@ class App {
     } else {
       doPlay();
     }
+  };
+
+  // "Any way the song can be saved... and exported?" — the audio only ever
+  // lived in memory for one playback (fetched fresh from ACE-Step each time,
+  // never stored anywhere). This is a plain browser file download of the
+  // already-in-hand data: URI, not new backend storage — the simplest thing
+  // that actually answers the question, with no canister/stable-memory
+  // design needed for what's currently a one-off experimental feature.
+  #downloadKaraokeAudio = () => {
+    if (!this.lastKaraokeAudio) return;
+    const a = document.createElement('a');
+    a.href = this.lastKaraokeAudio;
+    a.download = `skippy-karaoke-${Date.now()}.mp3`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
   };
 
   // The cached session identity in `this.identity`/`this.backendActor` is
@@ -2961,7 +3000,7 @@ class App {
   // Same sequential-<audio>-per-chunk precedent already used by the Guardian
   // live-ops listener page. A reply with no 🎶 markers is just one segment,
   // so this degenerates to the previous single-call behavior unchanged.
-  #playPremiumSegments = (segments, index) => {
+  #playPremiumSegments = (segments, index, onComplete = null) => {
     if (index >= segments.length) return;
     const { text: segText, voice } = segments[index];
 
@@ -3019,7 +3058,7 @@ class App {
 
     audio.onended = () => {
       if (index + 1 < segments.length) {
-        this.#playPremiumSegments(segments, index + 1);
+        this.#playPremiumSegments(segments, index + 1, onComplete);
       } else {
         this.isSpeaking = false;
         this.lastSpeakEndTime = Date.now();
@@ -3029,6 +3068,11 @@ class App {
           this._restartRecognitionAfterTTS = false;
           setTimeout(() => this.#startRecognition(), 300);
         }
+        // Karaoke-audio chaining (see #performKaraoke) — lets a spoken hype
+        // line finish naturally before the real generated song starts,
+        // without folding ACE-Step's data: URI playback into this function's
+        // TTS-segment logic.
+        if (onComplete) onComplete();
       }
     };
 
@@ -3565,6 +3609,13 @@ class App {
               })()}"
               @click=${() => { if (this.brainTiers) { this.showBrainGrid = true; this.#render(); } }}
             ></span>
+            ${this.lastKaraokeAudio
+              ? html`
+                  <button class="badge" title="Save the last karaoke song as an MP3" @click=${() => this.#downloadKaraokeAudio()}>
+                    💾 Save Song
+                  </button>
+                `
+              : ''}
             ${(() => {
               if (this.guestMode || !this.fuelData) return '';
               const CYCLE_WARN = 5e12;

@@ -1859,6 +1859,11 @@ app.post('/karaoke', requireSession, async (req, res) => {
     // timeout) just falls through to the existing TTS-based singing path
     // below unchanged — never blocks the reply itself.
     let audio = null;
+    // Spoken hype line only (text before the first 🎶) — App.js speaks this
+    // via normal TTS before starting the ACE-Step audio, since the raw
+    // generated track never includes it (confirmed live 2026-07-08: without
+    // this, the hype line silently never got spoken at all).
+    const hypeLine = reply.split('🎶')[0].trim();
     if (DEEPINFRA_API_KEY) {
       // Extract pure lyrics from between the 🎶 markers — ACE-Step wants only
       // the words to sing, not the spoken hype line or the emoji markers
@@ -1883,6 +1888,18 @@ app.post('/karaoke', requireSession, async (req, res) => {
                   'driving distorted electric guitars, cinematic orchestration, 130 BPM',
                 lyrics: lyricsOnly,
                 response_format: 'mp3',
+                // Confirmed live 2026-07-08: duration IS a real, accepted param
+                // (just undocumented on DeepInfra's own API reference page) —
+                // minimum enforced value is 30 (a direct 422 below that). Left
+                // uncapped, ACE-Step generated ~119s regardless of how short
+                // the lyrics were, taking ~58s to generate and leaving a long
+                // instrumental tail after the sung lyrics ended. 60s is a
+                // reasoned middle ground: short enough to roughly halve both
+                // the wait and the tail, long enough that a full ~24-27 line
+                // song (the karaoke structure's max) has room to actually be
+                // sung rather than getting rushed/cut off. Tune this constant
+                // directly if it needs adjusting after more live listening.
+                duration: 60,
               }),
               signal: upstreamAbort.signal,
             },
@@ -1909,7 +1926,7 @@ app.post('/karaoke', requireSession, async (req, res) => {
       }
     }
 
-    res.json({ reply, audio });
+    res.json({ reply, audio, hypeLine });
   } catch (err) {
     if (err.name === 'AbortError') return;
     res.status(502).json({ error: `Failed to reach OpenRouter: ${err.message}` });
