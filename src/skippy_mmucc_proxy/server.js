@@ -1616,7 +1616,7 @@ CRITICAL STRUCTURAL ARCHITECTURE:
 1. You must choose ONE specific musical style for the performance: either 1980s High-Energy Hair-Metal (driving, punchy) OR Dramatic Finnish Symphonic Orchestral Rock (epic, operatic, sweeping).
 2. The entire song performance MUST be contained within exactly ONE pair of musical emojis: 🎶 [Your full song here] 🎶. Do not include multiple 🎶 blocks, and do not include any text, notes, or explanations after the closing emoji.
 3. You must provide exactly ONE spoken rockstar hype-man line directly BEFORE the opening 🎶 emoji.
-4. Do NOT include any structural labels or brackets like [Verse], [Chorus], or (Guitar Solo) inside or outside the block, as this text is fed directly to a text-to-speech engine and will sound terrible if spoken aloud. Instead, separate your verses and choruses using a standard double line break.
+4. Do NOT include any structural labels or brackets like [Verse], [Chorus], or (Guitar Solo) inside or outside the block, as this text is fed directly to a text-to-speech engine and will sound terrible if spoken aloud. Instead, separate your verses and choruses using a standard double line break. The literal words "Verse", "Verse 1", "Verse 2", "Pre-Chorus", "Chorus", "Bridge", and "Outro" — numbered or not, with or without a colon — must NEVER appear anywhere in your actual output, including as a word at the start of a line. Those words exist only in these instructions to explain the format TO YOU; they describe structure, they are never something you write or say. Rules 5 and 6 below name these sections only to explain WHICH lines rhyme with which — never copy those section names into your song.
 5. Your song must feature this exact section progression: Verse 1 (4 lines) → Pre-Chorus (2 lines) → Chorus (2-4 lines) → Verse 2 (4 lines) → Pre-Chorus (2 lines, may reuse or vary Pre-Chorus 1) → Chorus (repeat the SAME hook lines verbatim — choruses always repeat) → Bridge (2-4 lines) → Chorus (final repeat) → one final punchy outro line.
 6. Each section has its OWN rhyme scheme — do not use the same scheme everywhere:
    - Verse: ABCB — only lines 2 and 4 rhyme; lines 1 and 3 are free. Looser meter, narrative/scene-setting, tells part of the story.
@@ -1638,39 +1638,7 @@ METRIC SCHEME GUIDELINE TO FORCE CADENCE:
 - 1980s Hair-Metal / Staccato Lists: Short, driving, punchy lines (8-10 syllables per line).
 - Finnish Symphonic Metal: Majestic, sweeping, dramatic, and operatic vocabulary (11-13 syllables per line).
 
-STRICT TEMPLATE FORMAT:
-Spoken rockstar hype line goes here!
-🎶
-Verse 1 line 1 (A, free)
-Verse 1 line 2 (B, rhymes with line 4)
-Verse 1 line 3 (C, free)
-Verse 1 line 4 (B, rhymes with line 2)
-
-Pre-Chorus line 1 (A)
-Pre-Chorus line 2 (A, rhymes with line 1)
-
-Chorus line 1 (A) — THE HOOK
-Chorus line 2 (A, rhymes with line 1) — open-vowel ending
-
-Verse 2 line 1 (A, free)
-Verse 2 line 2 (B, rhymes with line 4)
-Verse 2 line 3 (C, free)
-Verse 2 line 4 (B, rhymes with line 2)
-
-Pre-Chorus line 1 (A)
-Pre-Chorus line 2 (A, rhymes with line 1)
-
-Chorus line 1 (A) — SAME HOOK, VERBATIM
-Chorus line 2 (A, rhymes with line 1) — open-vowel ending
-
-Bridge line 1 (pattern breaks — no strict rhyme)
-Bridge line 2 (pattern breaks — no strict rhyme)
-
-Chorus line 1 (A) — SAME HOOK, VERBATIM
-Chorus line 2 (A, rhymes with line 1) — open-vowel ending
-
-Final punchy outro line text
-🎶
+LINE COUNT BY SECTION (for your own planning only — never write the section name itself, see rule 4): opening hype line (1, spoken, outside the 🎶 block) — verse (4 lines) — pre-chorus (2 lines) — chorus (2-4 lines) — verse (4 lines) — pre-chorus (2 lines) — chorus (2-4 lines, verbatim repeat) — bridge (2-4 lines) — chorus (2-4 lines, verbatim repeat) — outro (1 line). The fully-worked RIGHT example below shows exactly what this looks like with zero labels — match its shape, not just its rules.
 
 HARD STOP: the progression in rule 5 is the ENTIRE song, start to finish — two chorus repeats total, not a loop. The moment you write the final outro line and the closing 🎶, you are done. Do not write a third chorus repeat, do not write a Verse 3, do not restart the progression, do not keep going "for energy." Treat the closing 🎶 as the end of your turn.
 
