@@ -1831,7 +1831,7 @@ class App {
       console.log('[Skippy] speech recognition ended');
       this.recognitionActive = false;
       if (this.state !== 'idle' && !this.stopRequested) {
-        if (this.isSpeaking) {
+        if (this.isSpeaking && App.#IS_ANDROID) {
           // TTS has audio focus — restarting now causes a double-dong on Android
           // and immediately picks up speaker audio. Set a flag; onended restarts us.
           this._restartRecognitionAfterTTS = true;
@@ -1865,6 +1865,15 @@ class App {
   // How long after TTS ends to ignore mic input — catches recognition results
   // that were queued during playback but arrive just after isSpeaking flips false.
   static #SPEAK_COOLDOWN_MS = 1200; // ms to ignore mic after TTS ends
+
+  // The double-dong/audio-focus glitch that af78bfe's restart deferral (below,
+  // in onend) fixes is Android-specific — deferring unconditionally on every
+  // platform meant that if recognition happened to naturally end mid-reply
+  // (Chrome does this periodically even with continuous: true), the mic went
+  // dead until TTS finished, killing barge-in for the rest of that reply on
+  // desktop too. Scoped the deferral to Android only so desktop keeps
+  // restarting immediately, restoring barge-in there.
+  static #IS_ANDROID = /Android/i.test(navigator.userAgent);
 
   #handleFinalChunk = (chunk) => {
     // Discard anything the mic picked up while Skippy is speaking — prevents

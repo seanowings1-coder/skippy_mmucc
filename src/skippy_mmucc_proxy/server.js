@@ -1877,15 +1877,19 @@ app.post('/karaoke', requireSession, async (req, res) => {
         // for the full karaoke structure. Estimate instead from the actual
         // lyric length: ~2.2 words/sec is a reasonable sung pace for
         // energetic hair-metal/power-metal delivery, plus a 20% buffer for
-        // pacing/pauses between lines. Clamped to the API's real minimum
-        // (30, confirmed via a direct 422 below that) and a cost/time
-        // ceiling (110s, ~$0.11) so an unusually long generation can't run
-        // away. A short 4-line test song lands at the 30s floor; the
-        // 22-line song that got cut off would land around ~95s — comfortably
-        // more than the 60s that truncated it.
+        // pacing/pauses between lines. Floored at the API's real minimum
+        // (30, confirmed via a direct 422 below that).
+        // Confirmed live 2026-07-09: a 110s ceiling here (added same session
+        // as a cost/time guard) truncated a real ~40-line/280-word song —
+        // its ~153s estimate got clamped down to 110s, cutting the last
+        // third of the lyrics. Per the user's explicit priority (correctness
+        // over speed, restated after this exact failure), the ceiling is
+        // removed entirely — a long song now just takes as long as it needs.
+        // Runaway growth is still bounded upstream by the lyrics call's own
+        // max_tokens: 600 cap (~450 words worst case, ≈245s).
         const wordCount = lyricsOnly.split(/\s+/).filter(Boolean).length;
         const estimatedDuration = Math.round((wordCount / 2.2) * 1.2);
-        const duration = Math.min(110, Math.max(30, estimatedDuration));
+        const duration = Math.max(30, estimatedDuration);
         try {
           const acestepResponse = await fetch(
             'https://api.deepinfra.com/v1/inference/ACE-Step/acestep-v15-xl-sft',
