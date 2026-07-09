@@ -1218,14 +1218,31 @@ app.post('/respond', requireSession, async (req, res) => {
         const diData = await diResponse.json();
         const diReply = diData.choices?.[0]?.message?.content;
         if (diReply) {
+          console.log(`[Skippy] DeepInfra ${tier.label} answered (${brain})`);
+          // Confirmed live 2026-07-08: leaving brainTiers null here meant the
+          // tier dot's tap-to-open grid (App.js, "if (this.brainTiers)") did
+          // nothing while on DeepInfra — its only other signal is a hover
+          // `title` tooltip, useless on the Android PWA which is the primary
+          // interface. Populate a real grid (DeepInfra tiers first, the old
+          // OpenRouter cascade shown as unused standby tiers below them) so
+          // tapping the dot always shows something meaningful, regardless of
+          // provider.
+          const diIdx = deepInfraTiers.findIndex((t) => t.model === tier.model);
+          const openRouterTail = brain === 'everyday' ? EVERYDAY_CASCADE : [];
           return res.json({
             reply: stripLeakedFormatting(diReply),
             brain,
             model: tier.model,
             paidTier: false,
             brainDowngrade: false,
-            brainTiers: null,
-            tierIndex: -1,
+            brainTiers: [
+              ...deepInfraTiers.map((t, i) => ({
+                label: `${t.label} (DeepInfra)`,
+                status: i < diIdx ? 'unavailable' : i === diIdx ? 'active' : 'standby',
+              })),
+              ...openRouterTail.map((t) => ({ label: t.label, status: 'standby' })),
+            ],
+            tierIndex: diIdx,
           });
         }
         console.warn(`[Skippy] DeepInfra ${tier.label} returned no reply — trying next tier`);
@@ -1801,16 +1818,27 @@ app.post('/karaoke', requireSession, async (req, res) => {
         // Explicit ceiling (not omitted) — confirmed 2026-07-06 that relying on
         // no max_tokens at all still truncated full songs, likely an
         // OpenRouter/provider default kicking in when the param is absent.
-        // Confirmed live 2026-07-08: a weak cascade-fallback model degenerated
-        // into repeating the same chorus/hook block verbatim dozens of times
-        // instead of stopping after the template's two chorus repeats — with
-        // no repetition_penalty set, it happily filled the whole 3000-token
-        // budget with the loop. repetition_penalty matches the value used
-        // everywhere else in this file (BRAIN_GENERATION_PARAMS.everyday);
-        // max_tokens is cut to 900 (the ~26-line template needs a few hundred
-        // tokens at most) so even a model that still loops hits a much
-        // smaller ceiling before it can spiral.
-        body: JSON.stringify({ model, messages: karaokeMessages, max_tokens: 900, repetition_penalty: 1.15 }),
+        // Confirmed live 2026-07-08 (two separate failure modes, same night):
+        // (1) a weak cascade-fallback model degenerated into repeating the
+        // same chorus/hook block verbatim dozens of times — fixed with
+        // repetition_penalty. (2) A DIFFERENT weak fallback later went the
+        // opposite direction: no temperature was ever set (so it ran on
+        // whatever the model's own default is, often 1.0+), and combined
+        // with a still-generous token ceiling and poor instruction-following,
+        // it drifted into a long, incoherent, structure-ignoring ramble about
+        // AI singularity/sentience that even leaked a stray code fragment
+        // ('=d=len("HISTORY")') into the lyrics — the HARD STOP instruction
+        // never engaged because it just kept generating novel content
+        // instead of looping. temperature reins in that drift; max_tokens
+        // cut further (900 -> 600, still comfortably more than the ~27-line
+        // template needs) bounds worst-case length harder regardless.
+        body: JSON.stringify({
+          model,
+          messages: karaokeMessages,
+          max_tokens: 600,
+          temperature: 0.85,
+          repetition_penalty: 1.15,
+        }),
         signal: upstreamAbort.signal,
       });
 
