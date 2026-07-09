@@ -30,6 +30,22 @@ dotenv.config({ path: path.resolve(__dirname, '../../.env') });
 // Railway injects PORT; local dev uses SKIPPY_PROXY_PORT or falls back to 8787.
 const PORT = process.env.PORT || process.env.SKIPPY_PROXY_PORT || 8787;
 const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
+// Planned Migration (CLAUDE.md): Brain -> DeepInfra, replacing OpenRouter as
+// the primary brain farm (OpenRouter kept wired as a last-resort fallback
+// only — see the DeepInfra pre-check in /respond). Same OpenAI-compatible
+// /v1/chat/completions shape as OpenRouter, just a different base URL and
+// key — confirmed against DeepInfra's own docs 2026-07-08, not guessed.
+// Model picks confirmed to actually exist on DeepInfra the same day (both
+// listed live on deepinfra.com) after CLAUDE.md's picks were flagged as an
+// unresolved/never-actually-chosen conflict in a past planning session —
+// Euryale was picked here as the closer match to the current uncensored
+// persona models (Dolphin/Lunaris); swap via env var if it doesn't hold the
+// voice as well in practice.
+const DEEPINFRA_API_KEY = process.env.DEEPINFRA_API_KEY;
+const DEEPINFRA_MODEL_SNAPPY = process.env.DEEPINFRA_MODEL_SNAPPY || 'Sao10K/L3.1-70B-Euryale-v2.2';
+const DEEPINFRA_MODEL_SNAPPY_FALLBACK =
+  process.env.DEEPINFRA_MODEL_SNAPPY_FALLBACK || 'deepseek-ai/DeepSeek-V4-Flash';
+const DEEPINFRA_MODEL_SUPERBRAIN = process.env.DEEPINFRA_MODEL_SUPERBRAIN || 'deepseek-ai/DeepSeek-V4-Pro';
 const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY;
 const ELEVENLABS_VOICE_ID = process.env.ELEVENLABS_VOICE_ID;
 const ELEVENLABS_MODEL_ID = process.env.ELEVENLABS_MODEL_ID || 'eleven_turbo_v2_5';
@@ -1154,6 +1170,75 @@ app.post('/respond', requireSession, async (req, res) => {
       signal: upstreamAbort.signal,
     });
 
+  // ---- DeepInfra pre-check (Planned Migration: Brain -> DeepInfra, CLAUDE.md) ----
+  // Foundation step, 2026-07-08: try the new primary brain farm FIRST for the
+  // two tiers named in the migration plan (everyday/"Snappy", heavy_hitter/
+  // "Super Brain"). Deliberately self-contained and bolted on IN FRONT of the
+  // existing, thoroughly-tuned OpenRouter cascade below rather than woven
+  // into it — on any failure (including DEEPINFRA_API_KEY simply not being
+  // set yet) this falls straight through to that cascade, completely
+  // untouched, so nothing about today's working behavior changes until the
+  // key is actually added to .env/Railway. Tactical/focus deliberately stay
+  // on OpenRouter for now — they were never part of the DeepInfra plan (they
+  // run Claude for precise instruction-following, not an uncensored persona
+  // model, a different concern from Snappy/Super Brain entirely).
+  // TODO (next pass, not this foundation step): DeepInfra tiers don't yet
+  // populate the brainTiers grid modal, and a full DeepInfra->OpenRouter
+  // fallthrough doesn't set brainDowngrade=true on the everyday tier — both
+  // are honest gaps to close once this is confirmed live, not blockers to
+  // shipping the foundation.
+  let deepInfraExhausted = false;
+  if (DEEPINFRA_API_KEY && (brain === 'everyday' || brain === 'heavy_hitter')) {
+    const deepInfraTiers =
+      brain === 'everyday'
+        ? [
+            { label: 'Euryale 70B', model: DEEPINFRA_MODEL_SNAPPY },
+            { label: 'DeepSeek V4 Flash', model: DEEPINFRA_MODEL_SNAPPY_FALLBACK },
+          ]
+        : [{ label: 'DeepSeek V4 Pro', model: DEEPINFRA_MODEL_SUPERBRAIN }];
+
+    for (const tier of deepInfraTiers) {
+      let diResponse;
+      try {
+        diResponse = await fetch('https://api.deepinfra.com/v1/openai/chat/completions', {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${DEEPINFRA_API_KEY}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({ model: tier.model, ...BRAIN_GENERATION_PARAMS[brain], messages }),
+          signal: upstreamAbort.signal,
+        });
+      } catch (err) {
+        if (err.name === 'AbortError') return;
+        console.warn(`[Skippy] DeepInfra ${tier.label} network error — trying next tier: ${err.message}`);
+        continue;
+      }
+      if (diResponse.ok) {
+        const diData = await diResponse.json();
+        const diReply = diData.choices?.[0]?.message?.content;
+        if (diReply) {
+          return res.json({
+            reply: stripLeakedFormatting(diReply),
+            brain,
+            model: tier.model,
+            paidTier: false,
+            brainDowngrade: false,
+            brainTiers: null,
+            tierIndex: -1,
+          });
+        }
+        console.warn(`[Skippy] DeepInfra ${tier.label} returned no reply — trying next tier`);
+        continue;
+      }
+      const diErrText = await diResponse.text().catch(() => '');
+      console.warn(`[Skippy] DeepInfra ${tier.label} failed (${diResponse.status}) — trying next tier: ${diErrText}`);
+    }
+    deepInfraExhausted = true;
+    console.warn(`[Skippy] All DeepInfra tiers exhausted for ${brain} — falling back to OpenRouter`);
+  }
+  // ---- end DeepInfra pre-check — everything below is the original, unmodified OpenRouter path ----
+
   try {
     let activeModel = BRAIN_MODELS[brain];
     let response = await callOpenRouter(activeModel, BRAIN_GENERATION_PARAMS[brain]);
@@ -1222,7 +1307,10 @@ app.post('/respond', requireSession, async (req, res) => {
     }
 
     // Everyday 7-tier cascade — iterate until a tier succeeds or all are exhausted.
-    let brainDowngrade = false;
+    // deepInfraExhausted (see the pre-check above) already means we left the
+    // new primary brain farm before we ever got here — that alone earns the
+    // downgrade quip regardless of which OpenRouter tier ends up answering.
+    let brainDowngrade = deepInfraExhausted;
     if (brain === 'everyday') {
       for (let i = 1; i < EVERYDAY_CASCADE.length && isTransientFailure(response); i++) {
         const errText = await response.text();
@@ -1251,8 +1339,12 @@ app.post('/respond', requireSession, async (req, res) => {
 
     // paidTier lights the amber dot when burning OpenRouter credits.
     // brainDowngrade tells the frontend to play the in-character brain-switch quip.
+    // deepInfraExhausted means we already tried and failed the new primary
+    // brain farm above before ever reaching this OpenRouter code — that's
+    // exactly the "left the good brain" event the quip exists to announce,
+    // same as the old free->paid transition it originally covered.
     const activeTier = brain === 'everyday' ? EVERYDAY_CASCADE.find((t) => t.model === activeModel) : null;
-    const paidTier = !!(activeTier?.paid);
+    const paidTier = !!(activeTier?.paid) || deepInfraExhausted;
 
     // brainTiers: ordered cascade status for the clickable brain-grid modal.
     const activeIdx = brain === 'everyday' ? EVERYDAY_CASCADE.findIndex((t) => t.model === activeModel) : -1;
@@ -1563,6 +1655,8 @@ Chorus line 2 (A, rhymes with line 1) — open-vowel ending
 Final punchy outro line text
 🎶
 
+HARD STOP: the progression in rule 5 is the ENTIRE song, start to finish — two chorus repeats total, not a loop. The moment you write the final outro line and the closing 🎶, you are done. Do not write a third chorus repeat, do not write a Verse 3, do not restart the progression, do not keep going "for energy." Treat the closing 🎶 as the end of your turn.
+
 WRONG VS. RIGHT EXAMPLES:
 
 WRONG (Multi-fragment / Plagiarism Leak / Text Labels / Stage Directions):
@@ -1704,10 +1798,19 @@ app.post('/karaoke', requireSession, async (req, res) => {
       fetch('https://openrouter.ai/api/v1/chat/completions', {
         method: 'POST',
         headers: { Authorization: `Bearer ${OPENROUTER_API_KEY}`, 'Content-Type': 'application/json' },
-        // Explicit generous ceiling (not omitted) — confirmed 2026-07-06 that
-        // relying on no max_tokens at all still truncated full songs, likely
-        // an OpenRouter/provider default kicking in when the param is absent.
-        body: JSON.stringify({ model, messages: karaokeMessages, max_tokens: 3000 }),
+        // Explicit ceiling (not omitted) — confirmed 2026-07-06 that relying on
+        // no max_tokens at all still truncated full songs, likely an
+        // OpenRouter/provider default kicking in when the param is absent.
+        // Confirmed live 2026-07-08: a weak cascade-fallback model degenerated
+        // into repeating the same chorus/hook block verbatim dozens of times
+        // instead of stopping after the template's two chorus repeats — with
+        // no repetition_penalty set, it happily filled the whole 3000-token
+        // budget with the loop. repetition_penalty matches the value used
+        // everywhere else in this file (BRAIN_GENERATION_PARAMS.everyday);
+        // max_tokens is cut to 900 (the ~26-line template needs a few hundred
+        // tokens at most) so even a model that still loops hits a much
+        // smaller ceiling before it can spiral.
+        body: JSON.stringify({ model, messages: karaokeMessages, max_tokens: 900, repetition_penalty: 1.15 }),
         signal: upstreamAbort.signal,
       });
 

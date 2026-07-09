@@ -178,6 +178,10 @@ OPENROUTER_MODEL_PAID=         # optional override for paid primary
 OPENROUTER_MODEL_FALLBACK_PAID= # optional override for paid fallback
 OPENROUTER_MODEL_HEAVY_HITTER= # defaults to anthropic/claude-sonnet-4.6
 OPENROUTER_MODEL_TACTICAL=     # defaults to a fast/cheap model
+DEEPINFRA_API_KEY=             # optional — foundation for the DeepInfra migration below; inert until set
+DEEPINFRA_MODEL_SNAPPY=        # defaults to Sao10K/L3.1-70B-Euryale-v2.2
+DEEPINFRA_MODEL_SNAPPY_FALLBACK= # defaults to deepseek-ai/DeepSeek-V4-Flash
+DEEPINFRA_MODEL_SUPERBRAIN=    # defaults to deepseek-ai/DeepSeek-V4-Pro
 ```
 
 ## Project Blueprint
@@ -214,14 +218,20 @@ Planned/aspirational system design for features not yet fully implemented.
 ### Brain → DeepInfra
 Replacing OpenRouter with DeepInfra due to 503 reliability issues.
 
-| Mode | Model |
-|---|---|
-| Snappy (everyday banter) | `Sao10K/L3.1-70B-Euryale-v2.2` or `deepseek-ai/DeepSeek-V4-Flash` |
-| Super Brain (coding/math) | `deepseek-ai/DeepSeek-V4-Pro` |
+**Foundation shipped 2026-07-08** (`/respond` only so far): a self-contained DeepInfra pre-check runs in front of the existing OpenRouter cascade for the `everyday` and `heavy_hitter` brains only. Inert until `DEEPINFRA_API_KEY` is set — with no key, behavior is unchanged from before this migration started. Once set, DeepInfra becomes primary; OpenRouter is kept wired as the last-resort fallback (deliberate choice — a single provider's outage shouldn't take out the whole brain).
 
-- DeepInfra uses the same OpenAI-compatible `/v1/chat/completions` endpoint format.
-- New env vars needed: `DEEPINFRA_API_KEY`, `DEEPINFRA_MODEL_SNAPPY`, `DEEPINFRA_MODEL_SUPERBRAIN`.
-- Old `OPENROUTER_*` env vars stay in `.env` until migration is confirmed live.
+| Mode | Model | DeepInfra tier order |
+|---|---|---|
+| Snappy (everyday banter) | `Sao10K/L3.1-70B-Euryale-v2.2` (primary), `deepseek-ai/DeepSeek-V4-Flash` (in-provider fallback) | Both tried before OpenRouter |
+| Super Brain (coding/math) | `deepseek-ai/DeepSeek-V4-Pro` | Tried before OpenRouter |
+
+Both model picks confirmed to actually exist on DeepInfra (checked live 2026-07-08 — this had been flagged as an unresolved/never-actually-chosen conflict between this doc and a separate "V9 roadmap" doc in an earlier planning session, not a settled decision as previously assumed).
+
+- DeepInfra uses the same OpenAI-compatible endpoint shape as OpenRouter, just a different base URL: `https://api.deepinfra.com/v1/openai/chat/completions`.
+- Env vars: `DEEPINFRA_API_KEY`, `DEEPINFRA_MODEL_SNAPPY`, `DEEPINFRA_MODEL_SNAPPY_FALLBACK`, `DEEPINFRA_MODEL_SUPERBRAIN` — see "Required .env variables" above.
+- Old `OPENROUTER_*` env vars stay in `.env` — OpenRouter is the permanent fallback tier now, not just a migration-transition holdover.
+- **Not yet done** (next pass): `tactical`/`focus` brains stay on OpenRouter only (never part of this plan — they run Claude for instruction-following precision, a different concern from persona/reasoning quality); `/karaoke`, `/karaoke-offer`, `/project-brief`, `/critic-loop`, and the `/embed` embeddings call are still OpenRouter-only; the brain-tier grid modal (`brainTiers` in `/respond`'s response) doesn't yet reflect DeepInfra tiers, it goes `null` while on DeepInfra.
+- **Not yet tested live** — no `DEEPINFRA_API_KEY` has been added/verified against a real account yet. Generation params (`repetition_penalty` etc., currently reused as-is from `BRAIN_GENERATION_PARAMS`) are assumed OpenAI-compatible-extension-compatible with DeepInfra but unconfirmed until a real call succeeds.
 
 ### TTS → Fish Audio
 Replacing ElevenLabs with Fish Audio (S2 Pro engine) to reduce cost.

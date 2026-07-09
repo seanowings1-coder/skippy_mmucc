@@ -835,6 +835,12 @@ class App {
   // simple wake word is more reliable than fully solving acoustic echo.
   isSpeaking = false;
   #economySpeakTimer = null;
+  // Bumped by #stopSpeaking every time a new reply starts (or a barge-in
+  // cuts one off). #playPremiumSegments captures the value at the start of
+  // each segment's playback attempt and every one of its async callbacks
+  // (oncanplaythrough, the 8s loadTimeout) checks it's still current before
+  // acting — see #speechGen usage below for why this exists.
+  #speechGen = 0;
 
   authClient = null;
   identity = null;
@@ -2834,6 +2840,18 @@ class App {
   // state before a new reply starts speaking, and to let a barged-in
   // utterance cut him off mid-sentence (see #askSkippy).
   #stopSpeaking = () => {
+    // Confirmed live 2026-07-08: a Premium segment's 8s loadTimeout is a
+    // setTimeout living in that segment's own closure — #detachCurrentAudio
+    // clears the audio element's handlers, but does nothing to that pending
+    // timer. If a NEW reply's #speak() fires before the old segment ever
+    // settled (e.g. the karaoke offer's audio was still buffering when the
+    // "yes" confirmation started the actual song), the orphaned timeout can
+    // fire minutes later, call fallBackToEconomy for the OLD reply's stale
+    // text, and stomp on whatever is currently playing — heard as two
+    // voices talking over each other, or Premium audio randomly cutting to
+    // Economy mid-performance. Bumping this on every stop invalidates any
+    // in-flight segment's callbacks (see #speechGen checks below).
+    this.#speechGen++;
     if (this.#economySpeakTimer !== null) {
       clearTimeout(this.#economySpeakTimer);
       this.#economySpeakTimer = null;
@@ -2890,6 +2908,10 @@ class App {
     if (index >= segments.length) return;
     const { text: segText, voice } = segments[index];
 
+    // Captured once per segment-playback attempt — see #speechGen's
+    // declaration for why every async callback below re-checks this before
+    // acting instead of trusting `settled` alone.
+    const myGen = this.#speechGen;
     let hasStartedPlaying = false;
     let settled = false;
     // Reuse the same, already-unlocked element rather than constructing a
@@ -2909,6 +2931,11 @@ class App {
       if (settled) return;
       settled = true;
       clearTimeout(loadTimeout);
+      // A newer #speak() (or a barge-in) has already superseded this
+      // segment — its own #stopSpeaking() already silenced everything, so
+      // acting on this now-stale attempt would only stomp on audio that's
+      // legitimately playing for the CURRENT reply. Bail out silently.
+      if (myGen !== this.#speechGen) return;
       console.warn('[Skippy] premium audio unavailable, falling back:', reason);
       // Fully detach (not just stop) so a still-buffering stream can never
       // resume and play on top of the fallback voice we're about to start.
