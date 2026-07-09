@@ -1845,7 +1845,71 @@ app.post('/karaoke', requireSession, async (req, res) => {
     if (!raw) {
       return res.status(502).json({ error: 'OpenRouter returned no song.' });
     }
-    res.json({ reply: mergeKaraokeMarkers(stripLeakedFormatting(raw)) });
+    const reply = mergeKaraokeMarkers(stripLeakedFormatting(raw));
+
+    // Experimental, 2026-07-08: real AI-generated music via DeepInfra's
+    // ACE-Step, on top of (not replacing) the lyrics above — user's explicit
+    // call, made with full knowledge this reverses the earlier "TTS reading
+    // original lyrics, no real singing voice" decision (see CLAUDE.md/memory
+    // on the Skippy canonical persona joke) and drops the ElevenLabs singing
+    // voice clone's consistency in exchange for ACE-Step's real-but-uncontrolled
+    // voice. Framed by the user as a deliberately reversible experiment
+    // ("toss some paint and see"). Additive and best-effort: any failure here
+    // (including the real ~1-minute generation time exceeding some future
+    // timeout) just falls through to the existing TTS-based singing path
+    // below unchanged — never blocks the reply itself.
+    let audio = null;
+    if (DEEPINFRA_API_KEY) {
+      // Extract pure lyrics from between the 🎶 markers — ACE-Step wants only
+      // the words to sing, not the spoken hype line or the emoji markers
+      // themselves (confirmed via the pasted plan's own "don't send emojis,
+      // it might try to sing them as weird artifacts" warning).
+      const lyricsMatch = reply.match(/🎶([\s\S]*?)🎶/u);
+      const lyricsOnly = lyricsMatch ? lyricsMatch[1].trim() : null;
+      if (lyricsOnly) {
+        try {
+          const acestepResponse = await fetch(
+            'https://api.deepinfra.com/v1/inference/ACE-Step/acestep-v15-xl-sft',
+            {
+              method: 'POST',
+              headers: {
+                Authorization: `Bearer ${DEEPINFRA_API_KEY}`,
+                'Content-Type': 'application/json',
+              },
+              body: JSON.stringify({
+                prompt:
+                  'High-energy 80s hair-metal fused with dramatic Finnish symphonic power ' +
+                  'metal, powerful male tenor vocals, gravelly, raspy, operatic and intense, ' +
+                  'driving distorted electric guitars, cinematic orchestration, 130 BPM',
+                lyrics: lyricsOnly,
+                response_format: 'mp3',
+              }),
+              signal: upstreamAbort.signal,
+            },
+          );
+          if (acestepResponse.ok) {
+            const acestepData = await acestepResponse.json();
+            if (acestepData.audio) {
+              audio = acestepData.audio;
+              console.log(
+                `[Skippy/karaoke] ACE-Step generated ${acestepData.duration_seconds}s of audio ` +
+                  `in ${acestepData.inference_status?.runtime_ms}ms, cost $${acestepData.inference_status?.cost}`,
+              );
+            } else {
+              console.warn('[Skippy/karaoke] ACE-Step succeeded but returned no audio field');
+            }
+          } else {
+            const acestepErrText = await acestepResponse.text().catch(() => '');
+            console.warn(`[Skippy/karaoke] ACE-Step failed (${acestepResponse.status}): ${acestepErrText}`);
+          }
+        } catch (acestepErr) {
+          if (acestepErr.name === 'AbortError') return;
+          console.warn(`[Skippy/karaoke] ACE-Step network error: ${acestepErr.message}`);
+        }
+      }
+    }
+
+    res.json({ reply, audio });
   } catch (err) {
     if (err.name === 'AbortError') return;
     res.status(502).json({ error: `Failed to reach OpenRouter: ${err.message}` });

@@ -1178,11 +1178,68 @@ class App {
       this.statusMessage = '';
       this.#recordTurn(text, data.reply);
       this.#render();
-      this.#speak(data.reply);
+      // Experimental (2026-07-08): real AI-generated music from ACE-Step, if
+      // the proxy managed to generate it — additive on top of the existing
+      // TTS-based singing path, never a replacement for it. `data.audio` is
+      // only present when the backend's best-effort ACE-Step call actually
+      // succeeded; any failure there (including its own real ~1-minute
+      // generation time) already fell through server-side, so `audio` is
+      // simply absent here and this behaves exactly as it did before tonight.
+      if (data.audio) {
+        this.#playKaraokeAudio(data.audio);
+      } else {
+        this.#speak(data.reply);
+      }
     } catch (err) {
       console.error('[Skippy] karaoke failed:', err);
       this.statusMessage = `Couldn't get the song going: ${err.message}`;
       this.#render();
+    }
+  };
+
+  // Plays a real generated song (a data: URI from ACE-Step) through the same
+  // premium <audio> element the TTS path uses, but as its own small, separate
+  // path rather than folding into #playPremiumSegments — that function's
+  // segment-splitting/fallback-to-Economy logic doesn't apply to a single,
+  // already-complete audio file, and keeping this separate avoids risking
+  // the #speechGen orphaned-timeout fix made earlier the same session.
+  #playKaraokeAudio = (dataUri) => {
+    this.#stopSpeaking();
+    const myGen = this.#speechGen;
+    const audio = this.premiumAudioEl;
+    if (this.gainNode) this.gainNode.gain.value = SINGING_VOICE_GAIN;
+    audio.src = dataUri;
+    audio.load();
+
+    audio.onplaying = () => {
+      if (myGen !== this.#speechGen) return;
+      this.isSpeaking = true;
+      this.#render();
+    };
+    audio.onended = () => {
+      if (myGen !== this.#speechGen) return;
+      this.isSpeaking = false;
+      this.lastSpeakEndTime = Date.now();
+      this.#render();
+      if (this._restartRecognitionAfterTTS && this.state !== 'idle' && !this.stopRequested && !this.recognitionActive) {
+        this._restartRecognitionAfterTTS = false;
+        setTimeout(() => this.#startRecognition(), 300);
+      }
+    };
+    audio.onerror = () => {
+      if (myGen !== this.#speechGen) return;
+      console.warn('[Skippy] ACE-Step audio playback failed');
+      this.isSpeaking = false;
+      this.#render();
+    };
+
+    const doPlay = () => audio.play().catch((err) => {
+      console.warn('[Skippy] ACE-Step audio autoplay rejected:', err.name, err.message);
+    });
+    if (this.audioContext && this.audioContext.state === 'suspended') {
+      this.audioContext.resume().then(doPlay).catch(doPlay);
+    } else {
+      doPlay();
     }
   };
 
