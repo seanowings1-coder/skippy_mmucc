@@ -812,6 +812,11 @@ class App {
   // Sticky Heavy Hitter override — device-local preference, not security-
   // sensitive, same persistence rationale as rosterProfiles below.
   superBrainLocked = localStorage.getItem('skippy_super_brain_locked') === 'true';
+  // Everyday-peer deselection (2026-07-09) — sticky like superBrainLocked above, same
+  // persistence rationale. Stores the peer's full `brainTiers` label (e.g. "Euryale 70B
+  // (DeepInfra)") so it round-trips directly against server.js's disabledPeers filter with no
+  // translation needed.
+  disabledEverydayPeers = JSON.parse(localStorage.getItem('skippy_disabled_everyday_peers') || '[]');
   // "Tactical Roster" — persona/addressing context only, deliberately with
   // no permission concept of its own (see CLAUDE.md's Pillar 16 note): the
   // only real access boundary in this app is Guest Mode above, which a
@@ -1164,6 +1169,17 @@ class App {
       this.#recordTurn(text, reply);
       this.#speak(reply);
     }
+    this.#render();
+  };
+
+  // Toggles one everyday peer in/out of the fall-forward rotation from the brain-grid modal —
+  // "if a brain technically works but isn't running at its normal speed today, let me skip it."
+  // UI-only, no voice trigger (the grid itself is already tap-to-open, this stays consistent).
+  #toggleEverydayPeer = (label) => {
+    this.disabledEverydayPeers = this.disabledEverydayPeers.includes(label)
+      ? this.disabledEverydayPeers.filter((l) => l !== label)
+      : [...this.disabledEverydayPeers, label];
+    localStorage.setItem('skippy_disabled_everyday_peers', JSON.stringify(this.disabledEverydayPeers));
     this.#render();
   };
 
@@ -2624,6 +2640,11 @@ class App {
           // this into an unconditional sincerity override, regardless of
           // mode/brain/evolution weights.
           emergencyActive: this.emergencyActive,
+          // "If a brain technically works but isn't running at its normal speed today, let me
+          // skip it" — user request 2026-07-09. Everyday-tier only (server.js ignores this for
+          // every other brain); sticky client-side state, sent fresh each turn since /respond
+          // has no session memory of its own.
+          disabledPeers: brain === 'everyday' ? this.disabledEverydayPeers : [],
         }),
         signal,
       });
@@ -4159,20 +4180,34 @@ class App {
                           <th style="text-align:left;padding:4px 8px;opacity:0.6;font-weight:500;">Tier</th>
                           <th style="text-align:left;padding:4px 8px;opacity:0.6;font-weight:500;">AI Brain</th>
                           <th style="text-align:right;padding:4px 8px;opacity:0.6;font-weight:500;">Status</th>
+                          ${this.lastBrain === 'everyday' ? html`<th style="padding:4px 8px;"></th>` : ''}
                         </tr>
                       </thead>
                       <tbody>
                         ${this.brainTiers.map((t, i) => html`
                           <tr style="border-bottom:1px solid rgba(55,65,81,0.4);${t.status === 'active' ? 'background:rgba(59,130,246,0.1);' : ''}">
                             <td style="padding:6px 8px;opacity:0.5;">T${i + 1}</td>
-                            <td style="padding:6px 8px;${t.status === 'unavailable' ? 'opacity:0.4;text-decoration:line-through;' : ''}">${t.label}</td>
+                            <td style="padding:6px 8px;${t.status === 'unavailable' || t.status === 'disabled' ? 'opacity:0.4;text-decoration:line-through;' : ''}">${t.label}</td>
                             <td style="padding:6px 8px;text-align:right;">
                               ${t.status === 'active'
                                 ? html`<span style="color:#3b82f6;font-weight:600;">In Use</span>`
                                 : t.status === 'unavailable'
                                   ? html`<span style="color:#ef4444;opacity:0.7;">Unavailable</span>`
-                                  : html`<span style="opacity:0.35;">Standby</span>`}
+                                  : t.status === 'disabled'
+                                    ? html`<span style="opacity:0.35;">Disabled</span>`
+                                    : html`<span style="opacity:0.35;">Standby</span>`}
                             </td>
+                            ${this.lastBrain === 'everyday'
+                              ? html`
+                                  <td style="padding:6px 8px;text-align:right;">
+                                    <button
+                                      style="font-size:0.85em;padding:2px 8px;"
+                                      title="${t.status === 'disabled' ? 'Re-enable this brain' : 'Skip this brain for now'}"
+                                      @click=${() => this.#toggleEverydayPeer(t.label)}
+                                    >${t.status === 'disabled' ? 'Enable' : 'Skip'}</button>
+                                  </td>
+                                `
+                              : ''}
                           </tr>
                         `)}
                       </tbody>

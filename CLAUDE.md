@@ -220,23 +220,25 @@ Planned/aspirational system design for features not yet fully implemented.
 ## Planned Migrations (in progress as of 2026-07-02)
 
 ### Brain → DeepInfra
-Replacing OpenRouter with DeepInfra due to 503 reliability issues.
+Replacing OpenRouter with DeepInfra due to 503 reliability issues. `DEEPINFRA_API_KEY` is live and verified working (Railway + local); with no key set, everyday/heavy_hitter's peer ladders skip their DeepInfra entrant and fall forward through whichever OpenRouter peers remain — inert-but-safe, not broken.
 
-**Foundation shipped 2026-07-08** (`/respond` only so far): a self-contained DeepInfra pre-check runs in front of the existing OpenRouter cascade for the `everyday` and `heavy_hitter` brains only. Inert until `DEEPINFRA_API_KEY` is set — with no key, behavior is unchanged from before this migration started. Once set, DeepInfra becomes primary; OpenRouter is kept wired as the last-resort fallback (deliberate choice — a single provider's outage shouldn't take out the whole brain).
+**Redesigned 2026-07-09** (superseding the 2026-07-08 "pre-check bolted in front of the OpenRouter cascade" foundation): user's clarified original intent was never a quality-descending cascade (strong free models down to weak paid ones) — every brain tier should have 2-3 genuine PEERS, comparable in personality-fit and raw power, that fall forward sequentially (hit first, no response, hit second...). If an entire tier's peers are exhausted, escalate to the next higher tier and repeat its own fall-forward, rather than degrading further or erroring immediately.
 
-| Mode | Model | DeepInfra tier order |
+| Tier | Peers (fall-forward order) | On total failure |
 |---|---|---|
-| Snappy (everyday banter) | `Sao10K/L3.1-70B-Euryale-v2.2` (primary), `deepseek-ai/DeepSeek-V4-Flash` (in-provider fallback) | Both tried before OpenRouter |
-| Super Brain (coding/math) | `deepseek-ai/DeepSeek-V4-Pro` | Tried before OpenRouter |
-| Steel Rain (tactical/focus) | `deepseek-ai/DeepSeek-V4-Flash` | Raced against OpenRouter's Claude Haiku, not sequenced — see "Steel Rain / tactical race" above |
+| Everyday ("Snappy") | Euryale 70B (DeepInfra) → DeepSeek V4 Flash (DeepInfra) → Dolphin Venice, paid (OpenRouter) | Escalate to Heavy Hitter |
+| Heavy Hitter ("Super Brain") | DeepSeek V4 Pro (DeepInfra) → Claude Sonnet 4.6 (OpenRouter) → Hermes 4 405B (OpenRouter) | Hard error — top of the ladder, no further fallback |
+| Steel Rain (tactical/focus) | DeepSeek V4 Flash (DeepInfra) **raced against** Claude Haiku (OpenRouter), not sequenced — see "Steel Rain / tactical race" above. Deliberately NOT part of the everyday↔heavy_hitter ladder; only entered by the trigger phrase. | Falls through to the old sequential Sonnet→Haiku→free→paid cascade as true last resort |
 
-Both model picks confirmed to actually exist on DeepInfra (checked live 2026-07-08 — this had been flagged as an unresolved/never-actually-chosen conflict between this doc and a separate "V9 roadmap" doc in an earlier planning session, not a settled decision as previously assumed).
+All peers confirmed to actually exist via each provider's live `/models` listing before being hardcoded (2026-07-09) — this project's standing discipline since the Aurora-XL-v3.14 fabrication incident. `paidTier`/`brainDowngrade` were re-purposed again: every peer in both ladders is paid by design (no free-tier peer anywhere in either list — the OpenRouter free tier hit a hard rate wall during this same session's karaoke testing), so `paidTier` now means "didn't come from the very first, fastest-expected peer," and `brainDowngrade` only fires on a genuine cross-tier escalation (within-tier peer fallback is not a downgrade — the peers are meant to be comparably good, not a ladder).
+
+Claude Sonnet stays in the Heavy Hitter rotation *with its guardrails intact, deliberately* — user's explicit call: "you are going to be my 800 pound monster for coding... I don't need to be diving off the bridge." This is the one place in the app where real safety behavior over persona is wanted, unlike Everyday/Steel Rain where "no guardrails, stay in character" is the actual requirement.
+
+Heavy Hitter also gets a dedicated persona dial-down in the system prompt (applies regardless of `mode`): ~90-95% direct task-focused answer, minimal Skippy personality — "when I'm coding I really don't have time for a skippy being an ass." Professional mode ("be nice mode") was tuned the same session to allow a little real attitude/light sarcasm rather than near-zero — the hard line is still no mockery/insults/condescension toward the user, not zero personality.
 
 - DeepInfra uses the same OpenAI-compatible endpoint shape as OpenRouter, just a different base URL: `https://api.deepinfra.com/v1/openai/chat/completions`.
 - Env vars: `DEEPINFRA_API_KEY`, `DEEPINFRA_MODEL_SNAPPY`, `DEEPINFRA_MODEL_SNAPPY_FALLBACK`, `DEEPINFRA_MODEL_SUPERBRAIN`, `DEEPINFRA_MODEL_TACTICAL` — see "Required .env variables" above.
-- Old `OPENROUTER_*` env vars stay in `.env` — OpenRouter is the permanent fallback tier now, not just a migration-transition holdover. For tactical/focus specifically, OpenRouter's Claude Haiku is also an active *race entrant*, not purely a fallback — see "Steel Rain / tactical race" above.
-- **Not yet done** (next pass): `/karaoke`, `/karaoke-offer`, `/project-brief`, `/critic-loop`, and the `/embed` embeddings call are still OpenRouter-only; the brain-tier grid modal (`brainTiers` in `/respond`'s response) doesn't yet reflect DeepInfra tiers for everyday/heavy_hitter's own success path the way tactical/focus's race result now does.
-- **Not yet tested live** — no `DEEPINFRA_API_KEY` has been added/verified against a real account yet. Generation params (`repetition_penalty` etc., currently reused as-is from `BRAIN_GENERATION_PARAMS`) are assumed OpenAI-compatible-extension-compatible with DeepInfra but unconfirmed until a real call succeeds.
+- **Not yet done** (next pass): `/karaoke`, `/karaoke-offer`, `/project-brief`, `/critic-loop`, and the `/embed` embeddings call are still OpenRouter-only, on the old `EVERYDAY_CASCADE` array (kept — still actively used by those routes, not dead code even though `/respond` no longer uses it for everyday).
 
 ### TTS → Fish Audio
 Replacing ElevenLabs with Fish Audio (S2 Pro engine) to reduce cost.
