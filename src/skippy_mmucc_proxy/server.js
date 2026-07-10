@@ -2020,10 +2020,9 @@ app.post('/karaoke', requireSession, async (req, res) => {
         // Confirmed live 2026-07-08: the earlier fixed duration:60 cut off a
         // real 22-line song mid-performance — 60s just isn't always enough
         // for the full karaoke structure. Estimate instead from the actual
-        // lyric length: ~2.2 words/sec is a reasonable sung pace for
-        // energetic hair-metal/power-metal delivery, plus a 20% buffer for
-        // pacing/pauses between lines. Floored at the API's real minimum
-        // (30, confirmed via a direct 422 below that).
+        // lyric length, plus a buffer for pacing/pauses between lines.
+        // Floored at the API's real minimum (30, confirmed via a direct 422
+        // below that).
         // Confirmed live 2026-07-09: a 110s ceiling here (added same session
         // as a cost/time guard) truncated a real ~40-line/280-word song —
         // its ~153s estimate got clamped down to 110s, cutting the last
@@ -2031,10 +2030,27 @@ app.post('/karaoke', requireSession, async (req, res) => {
         // over speed, restated after this exact failure), the ceiling is
         // removed entirely — a long song now just takes as long as it needs.
         // Runaway growth is still bounded upstream by the lyrics call's own
-        // max_tokens: 600 cap (~450 words worst case, ≈245s).
+        // max_tokens: 600 cap (~450 words worst case).
+        // Confirmed live again 2026-07-09 (same night, after the ceiling
+        // removal): a real ~14-line/~100-word song STILL cut off mid-song —
+        // proof the base pace/buffer assumption itself (2.2 words/sec + 20%
+        // buffer) under-estimates real ACE-Step singing time, independent of
+        // the ceiling. ACE-Step targets the requested duration as a hard
+        // budget, not an adaptive one — ambient pauses, breath, and
+        // sustained/held notes on climactic lines (the open-vowel rule in
+        // KARAOKE_SYSTEM_PROMPT) all eat time the raw word count doesn't
+        // capture. Widened the margin substantially (2.0 words/sec, 60%
+        // buffer, up from 2.2/20%) rather than a small nudge, since the old
+        // margin already failed twice at two very different song lengths.
         const wordCount = lyricsOnly.split(/\s+/).filter(Boolean).length;
-        const estimatedDuration = Math.round((wordCount / 2.2) * 1.2);
-        const duration = Math.max(30, estimatedDuration);
+        const estimatedDuration = Math.round((wordCount / 2.0) * 1.6);
+        // User's request 2026-07-09: a flat instrumental "lead-out" tacked on after the singing
+        // estimate — the same idea as a lead-in, just at the other end. ACE-Step fills any
+        // requested duration beyond what the lyrics need with instrumental content rather than
+        // stretching/repeating vocals, so this should read as a natural musical outro (guitar/
+        // orchestral tail) instead of the track just cutting dead the instant the last word ends.
+        const LEAD_OUT_SECONDS = 15;
+        const duration = Math.max(30, estimatedDuration + LEAD_OUT_SECONDS);
         try {
           const acestepResponse = await fetch(
             'https://api.deepinfra.com/v1/inference/ACE-Step/acestep-v15-xl-sft',
