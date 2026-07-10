@@ -3886,7 +3886,7 @@ class App {
                         : this.fuelData.deepinfra.available != null
                           ? `$${this.fuelData.deepinfra.available.toFixed(2)} remaining`
                           : '...'}
-                      <button @click=${this.#openDeepInfraTopup}>Top Up</button>
+                      <a href="#" @click=${(e) => { e.preventDefault(); this.#openDeepInfraTopup(); }}>Top Up</a>
                     </p>`
                   : ''}
                 ${this.fuelData?.twilio && !this.fuelData.twilio.error
