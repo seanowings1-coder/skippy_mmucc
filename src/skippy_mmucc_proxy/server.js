@@ -125,7 +125,16 @@ const BRAIN_GENERATION_PARAMS = {
   // 150 tokens ≈ 100-110 words — enough for 2-3 punchy Skippy lines, not
   // enough for a closing hype monologue. Karaoke has its own separate route
   // with no cap, so songs are unaffected.
-  everyday: { temperature: 0.72, repetition_penalty: 1.12, max_tokens: 100 },
+  // Was silently dropped to 100 in 130ea0d (2026-06-27) with no comment update
+  // and no memory record of why — the mismatch between this comment and the
+  // actual value sat unnoticed until confirmed live 2026-07-09: real replies
+  // (now on Euryale 70B as primary, which runs noticeably wordier than the
+  // old Dolphin/Lunaris models this was tuned for) were getting severed
+  // mid-word at 100 tokens. A/B tested directly against DeepInfra with the
+  // exact contaminated conversation history that produced a real cutoff —
+  // 100 truncated mid-sentence, 150 completed cleanly every time (3/3 runs).
+  // Restored to the value this comment already described.
+  everyday: { temperature: 0.72, repetition_penalty: 1.12, max_tokens: 150 },
   heavy_hitter: { max_tokens: 2048 }, // prevent OpenRouter reserving full context (65k) upfront
   tactical: {},
   focus: {},
