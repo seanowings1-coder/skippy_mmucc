@@ -1050,7 +1050,18 @@ app.post('/respond', requireSession, async (req, res) => {
   // actually fires a web search.
   if (ragMiss && mode !== 'tactical' && mode !== 'focus' && !webContext) {
     systemPrompt +=
-      '\n\nThe local knowledge base has nothing relevant to this question. Do NOT answer the substantive question yet — mock the user, in character, for not having this in your manuals, then explicitly ask whether they want you to search the web for it. Wait for their answer instead of guessing. ' +
+      // Confirmed live 2026-07-09: this block was firing on EVERY message
+      // that missed the manuals corpus — which is nearly all of them, since
+      // the manuals are crash/MMUCC-specific. Real conversation ("what's a
+      // good novel", "what do you think of Vista", "what are you doing
+      // tonight") got refused-and-mocked instead of answered, because the
+      // instruction didn't distinguish "I'd be fabricating a specific fact"
+      // from "this is just a normal question I can answer myself." Added an
+      // explicit carve-out with concrete examples (this prompt's own
+      // established pattern — see BREVITY_EXAMPLE above — for getting a
+      // small/mid model to actually apply a distinction instead of treating
+      // every RAG miss identically).
+      '\n\nThe local knowledge base has nothing relevant to this question. This only matters if it\'s a specific factual, technical, or current-data question you\'d be GUESSING on (exact figures, statistics, current events, a procedure or spec that should be in the manuals). For general knowledge, opinions, recommendations, or ordinary conversation, just answer directly and confidently from your own knowledge, in character — do not treat every knowledge-base miss as a reason to refuse. Example: "what\'s a good novel to read" or "what do you think of Windows Vista" → just answer it, no mention of searching. Example: "what\'s the maximum axle weight per the manual" → you genuinely don\'t have that number, so mock the gap and ask if they want you to search the web. Only for that second kind of question: do NOT answer the substantive question yet — mock the user, in character, for not having this in your manuals, then explicitly ask whether they want you to search the web for it. Wait for their answer instead of guessing. ' +
       // Confirmed live 2026-06-23 via a direct A/B test against both the
       // everyday and Heavy Hitter models: this instruction alone fully
       // suppressed the Musical Outburst protocol above on every test —
