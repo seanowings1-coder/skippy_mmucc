@@ -334,6 +334,18 @@ const ROSTER_TRIGGER_PROMPT_REPLIES = [
 ];
 
 const KARAOKE_TRIGGER_PHRASES = ['karaoke', 'sing a song', 'jam out', 'rock out'];
+// Lets a user pin the song to a real subject ("Skippy sing a song about the
+// rain") instead of always getting whatever the LLM free-associates from
+// shared history — logged 2026-07-09 after the user reported songs jumping
+// between unrelated topics (rain, ICP, fire) with no way to steer them.
+// Checked against both the trigger utterance and the confirmation utterance
+// (a topic given at either step works) — see #performKaraoke.
+function extractKaraokeTopic(text) {
+  const match = text.match(/\babout\s+(.+)$/i);
+  if (!match) return null;
+  const topic = match[1].replace(/[.?!]+$/, '').trim();
+  return topic || null;
+}
 // A pool, not one fixed line — confirmed live 2026-06-24: hearing the exact
 // same offer verbatim every single time read as flat/robotic rather than
 // the "excited kid getting a puppy" energy this is supposed to have. Still
@@ -725,6 +737,10 @@ class App {
   // (yes or no) on the very next utterance, same pending-state shape as
   // pendingWebSearchQuery above.
   pendingKaraokeOffer = false;
+  // Topic captured from the trigger utterance ("...sing about the rain"),
+  // carried across the offer/confirm turns to #performKaraoke — see
+  // extractKaraokeTopic above.
+  pendingKaraokeTopic = null;
   // Re-entrancy guard for #performKaraoke — confirmed live 2026-07-08: the
   // already-known karaoke self-echo bug (Skippy's own offer audio getting
   // picked back up by the mic as a fresh "yes") could always double-fire a
@@ -1181,7 +1197,7 @@ class App {
   // brevity machinery there applies to a one-off performance). A real
   // OpenRouter call (unlike the deterministic offer ack) since the whole
   // point is a different song each time.
-  #performKaraoke = async (text) => {
+  #performKaraoke = async (text, topic = null) => {
     if (this.karaokeInFlight) {
       console.warn('[Skippy] karaoke already in progress — ignoring duplicate trigger');
       return;
@@ -1210,6 +1226,7 @@ class App {
       const response = await fetch(`${PROXY_URL}/karaoke`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'X-Skippy-Session': this.sessionToken },
+        body: JSON.stringify({ topic }),
       });
       const data = await response.json();
       if (!response.ok) throw new Error(data.error || 'Karaoke request failed.');
@@ -2292,6 +2309,7 @@ class App {
       KARAOKE_TRIGGER_PHRASES.some((phrase) => lowerText.includes(phrase))
     ) {
       this.pendingKaraokeOffer = true;
+      this.pendingKaraokeTopic = extractKaraokeTopic(text);
       this.statusMessage = "Skippy is revving up...";
       this.#render();
       let offerReply;
@@ -2335,9 +2353,14 @@ class App {
       const repeatedTrigger = !isDecline && KARAOKE_TRIGGER_PHRASES.some((phrase) => lowerText.includes(phrase));
       this.pendingKaraokeOffer = false; // any response resolves the offer, yes or no
       if ((hasAffirmation && isTrivialRemainder(remainder)) || repeatedTrigger) {
-        await this.#performKaraoke(text);
+        // A topic given on the confirm turn itself ("yes, about the rain")
+        // overrides one given on the original trigger, since it's more recent.
+        const topic = extractKaraokeTopic(text) || this.pendingKaraokeTopic;
+        this.pendingKaraokeTopic = null;
+        await this.#performKaraoke(text, topic);
         return;
       }
+      this.pendingKaraokeTopic = null;
       if (isDecline) {
         karaokeDeclined = true;
       }

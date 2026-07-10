@@ -1643,7 +1643,7 @@ PLAGIARISM AND LEAK PROTECTION:
 - The lyrics must be 100% ORIGINAL.
 - You are strictly FORBIDDEN from naming any real-world band, artist, album, or song title.
 - You must NEVER base the song on a specific real song's recognizable hook, cadence, or lyrical structure, even as a parody. (e.g., Do not mimic the exact rhythm of "Here I Go Again" or "Wish I Had An Angel").
-- Instead, mine your shared history, past shenanigans, and ongoing tech discussions with the Commander to create completely original metal themes.
+- Instead, mine your shared history, past shenanigans, and ongoing tech discussions with the Commander to create completely original metal themes — UNLESS the user's message specifies an exact topic, in which case the ENTIRE song must be about that exact topic instead (still 100% original lyrics, your own persona/style, never a real song).
 
 METRIC SCHEME GUIDELINE TO FORCE CADENCE:
 - 1980s Hair-Metal / Staccato Lists: Short, driving, punchy lines (8-10 syllables per line).
@@ -1786,9 +1786,26 @@ app.post('/karaoke', requireSession, async (req, res) => {
   });
   req.on('error', () => {});
   try {
+    // Optional topic pin ("...sing about the rain") — App.js extracts it from
+    // the trigger/confirm utterance. Without one, the system prompt's default
+    // (mine shared history) applies, which is what produced the "rain, ICP,
+    // fire, all over the place" complaint this was added to fix 2026-07-09.
+    const topic = typeof req.body?.topic === 'string' ? req.body.topic.trim() : '';
+    // Confirmed live 2026-07-09, direct A/B test: a bare short/ambiguous topic
+    // ("ICP") got misread as the real band Insane Clown Posse — the model
+    // wrote real member names (Violent J, Shaggy) and real product names
+    // (Faygo), a direct plagiarism-rule violation the system prompt already
+    // forbids in general but didn't survive a strong topic prime without a
+    // matching reminder right next to it. The explicit disambiguation clause
+    // below closed this on retest.
     const karaokeMessages = [
       { role: 'system', content: KARAOKE_SYSTEM_PROMPT },
-      { role: 'user', content: 'Hit it.' },
+      {
+        role: 'user',
+        content: topic
+          ? `Hit it. Make the entire song about: ${topic}. If that word or phrase happens to also be the name of a real band, artist, or public figure, IGNORE that association completely — do not name-drop them, their members, or their merchandise/branding, and do not write in their style. Example: given the topic "ICP," do NOT write about Insane Clown Posse, Violent J, Shaggy, Faygo, or Juggalos — instead write about ICP as its OTHER, more literal meaning (a technology, place, or concept), or if genuinely unclear what it means, treat it as an abstract word and build an original theme around it. Stay 100% original per the rules above no matter what.`
+          : 'Hit it.',
+      },
     ];
     const callKaraoke = (model) =>
       fetch('https://openrouter.ai/api/v1/chat/completions', {
