@@ -46,6 +46,11 @@ const DEEPINFRA_MODEL_SNAPPY = process.env.DEEPINFRA_MODEL_SNAPPY || 'Sao10K/L3.
 const DEEPINFRA_MODEL_SNAPPY_FALLBACK =
   process.env.DEEPINFRA_MODEL_SNAPPY_FALLBACK || 'deepseek-ai/DeepSeek-V4-Flash';
 const DEEPINFRA_MODEL_SUPERBRAIN = process.env.DEEPINFRA_MODEL_SUPERBRAIN || 'deepseek-ai/DeepSeek-V4-Pro';
+// Steel Rain / tactical race entrant — reuses the same DeepSeek V4 Flash pick
+// already verified live on DeepInfra 2026-07-08 (fast + genuinely capable,
+// not a roleplay/persona model like Snappy's Euryale pick) rather than
+// guessing a new one.
+const DEEPINFRA_MODEL_TACTICAL = process.env.DEEPINFRA_MODEL_TACTICAL || 'deepseek-ai/DeepSeek-V4-Flash';
 const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY;
 const ELEVENLABS_VOICE_ID = process.env.ELEVENLABS_VOICE_ID;
 const ELEVENLABS_MODEL_ID = process.env.ELEVENLABS_MODEL_ID || 'eleven_turbo_v2_5';
@@ -1266,6 +1271,80 @@ app.post('/respond', requireSession, async (req, res) => {
     console.warn(`[Skippy] All DeepInfra tiers exhausted for ${brain} — falling back to OpenRouter`);
   }
   // ---- end DeepInfra pre-check — everything below is the original, unmodified OpenRouter path ----
+
+  // ---- Steel Rain / tactical race — clarified 2026-07-09: the ORIGINAL design intent for ----
+  // Steel Rain was never "one fast model with a sequential fallback chain" (which is all that
+  // existed until now) — it was "fire multiple paid, fast-but-knowledgeable brains at once and
+  // use whichever answers first." Latency is the whole point of this mode (it's also what
+  // unlocks the Emergency Panic button), so racing genuinely serves the mode's purpose, unlike
+  // everyday/heavy_hitter where a sequential pre-check is fine. Both racers are paid by design
+  // (DeepInfra has no free tier at all; Haiku is OpenRouter's paid tactical tier) — costs
+  // roughly double per Steel Rain/focus turn versus a single call, an accepted tradeoff for a
+  // safety-adjacent latency mode, not an oversight.
+  // Bolted on in front of the untouched cascade below, same "don't touch the tuned fallback
+  // logic" philosophy as the everyday/heavy_hitter pre-check above — if EITHER racer alone
+  // would have failed, the full existing sequential cascade (Sonnet -> Haiku -> free Llama ->
+  // paid Llama) still runs as the true last resort. The cascade's own Haiku fallback step may
+  // then redundantly retry a Haiku call that already just failed in the race — accepted as a
+  // minor inefficiency in exchange for not touching that logic, same reasoning already used for
+  // the everyday pre-check.
+  if ((brain === 'tactical' || brain === 'focus') && DEEPINFRA_API_KEY) {
+    const raceAbort = { deepinfra: new AbortController(), openrouter: new AbortController() };
+    req.on('close', () => {
+      process.nextTick(() => {
+        try { raceAbort.deepinfra.abort(); } catch {}
+        try { raceAbort.openrouter.abort(); } catch {}
+      });
+    });
+
+    const deepInfraRacer = fetch('https://api.deepinfra.com/v1/openai/chat/completions', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${DEEPINFRA_API_KEY}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model: DEEPINFRA_MODEL_TACTICAL, ...BRAIN_GENERATION_PARAMS[brain], messages }),
+      signal: raceAbort.deepinfra.signal,
+    }).then(async (r) => {
+      if (!r.ok) throw new Error(`DeepInfra tactical racer failed: ${r.status}`);
+      const d = await r.json();
+      const reply = d.choices?.[0]?.message?.content;
+      if (!reply) throw new Error('DeepInfra tactical racer: empty reply');
+      raceAbort.openrouter.abort(); // won — stop paying for the loser
+      return { source: 'deepinfra', label: 'DeepSeek V4 Flash (DeepInfra)', model: DEEPINFRA_MODEL_TACTICAL, reply };
+    });
+
+    const openRouterRacer = fetch('https://openrouter.ai/api/v1/chat/completions', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${OPENROUTER_API_KEY}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model: OPENROUTER_MODEL_TACTICAL_PAID, ...BRAIN_GENERATION_PARAMS[brain], messages }),
+      signal: raceAbort.openrouter.signal,
+    }).then(async (r) => {
+      if (!r.ok) throw new Error(`OpenRouter Haiku racer failed: ${r.status}`);
+      const d = await r.json();
+      const reply = d.choices?.[0]?.message?.content;
+      if (!reply) throw new Error('OpenRouter Haiku racer: empty reply');
+      raceAbort.deepinfra.abort(); // won — stop paying for the loser
+      return { source: 'openrouter', label: 'Claude Haiku 4.5 (OpenRouter)', model: OPENROUTER_MODEL_TACTICAL_PAID, reply };
+    });
+
+    try {
+      const winner = await Promise.any([deepInfraRacer, openRouterRacer]);
+      console.log(`[Skippy] Steel Rain race won by ${winner.label} (${brain})`);
+      return res.json({
+        reply: stripLeakedFormatting(winner.reply),
+        brain,
+        model: winner.model,
+        paidTier: false,
+        brainDowngrade: false,
+        brainTiers: [
+          { label: 'DeepSeek V4 Flash (DeepInfra)', status: winner.source === 'deepinfra' ? 'active' : 'standby' },
+          { label: 'Claude Haiku 4.5 (OpenRouter)', status: winner.source === 'openrouter' ? 'active' : 'standby' },
+        ],
+        tierIndex: winner.source === 'deepinfra' ? 0 : 1,
+      });
+    } catch (aggErr) {
+      if (upstreamAbort.signal.aborted) return; // client already gone
+      console.warn(`[Skippy] Steel Rain race: both racers failed (${brain}) — falling through to full cascade`);
+    }
+  }
 
   try {
     let activeModel = BRAIN_MODELS[brain];

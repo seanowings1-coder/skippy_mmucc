@@ -130,12 +130,15 @@ When the everyday brain fails (404 = model offline, 429 = rate-limited), the pro
 
 Tiers 2 & 4 set `paidTier: true` in the response so the frontend lights the amber tier-dot. Switching from the primary model family to the fallback family sets `brainDowngrade: true` so App.js plays the in-character quip **once** on transition (not on every subsequent request that's still on the fallback).
 
-Tactical and heavy-hitter brains follow a simpler 2-tier fallback (primary → free fallback → paid fallback).
+Tactical and heavy-hitter brains follow a simpler 2-tier fallback (primary → free fallback → paid fallback) **unless the Steel Rain race below wins first** — that race is bolted on in front, same pattern as the DeepInfra pre-check.
+
+### Steel Rain / tactical race (`tactical` and `focus` only)
+Tactical/focus's original design intent (clarified 2026-07-09, not implemented until then) is latency, not just fallback: fire two paid, fast-but-knowledgeable brains **simultaneously** — `DEEPINFRA_MODEL_TACTICAL` (default `deepseek-ai/DeepSeek-V4-Flash`) and OpenRouter's Claude Haiku (`OPENROUTER_MODEL_TACTICAL_PAID`) — and use whichever answers first, aborting the loser. This is why tactical/focus unlock the Emergency Panic button and default mode doesn't: speed is a safety property here, not a preference. Both racers are paid by design (no free tier in the race) — costs roughly double per Steel Rain/focus turn versus a single call, an accepted tradeoff. If **both** racers fail, falls through unchanged to the existing sequential cascade below (Sonnet → Haiku → free Llama → paid Llama) as the true last resort. Inert (no race, falls straight to the old sequential path) if `DEEPINFRA_API_KEY` isn't set.
 
 ### Operational modes and system prompts
 - `default` — full Skippy persona, 3-sentence hard limit, structured XML system prompt
 - `professional` — sarcasm suppressed, direct/respectful tone
-- `tactical` — zero fluff, direct answer, instant web search on RAG miss (no permission ask)
+- `tactical` — zero fluff, direct answer, instant web search on RAG miss (no permission ask), Steel Rain race (see above)
 - `focus` — identical behavior to tactical, but no advanced function unlocks (Emergency Panic button stays locked)
 
 `EVERYDAY_UNLOCK_PREFIX` is prepended to prompts for fine-tuned models that need jailbreak framing; it is NOT prepended for Claude-based brains (Sonnet/Haiku handle persona without it).
@@ -182,6 +185,7 @@ DEEPINFRA_API_KEY=             # optional — foundation for the DeepInfra migra
 DEEPINFRA_MODEL_SNAPPY=        # defaults to Sao10K/L3.1-70B-Euryale-v2.2
 DEEPINFRA_MODEL_SNAPPY_FALLBACK= # defaults to deepseek-ai/DeepSeek-V4-Flash
 DEEPINFRA_MODEL_SUPERBRAIN=    # defaults to deepseek-ai/DeepSeek-V4-Pro
+DEEPINFRA_MODEL_TACTICAL=      # defaults to deepseek-ai/DeepSeek-V4-Flash — Steel Rain race entrant
 ```
 
 ## Project Blueprint
@@ -224,13 +228,14 @@ Replacing OpenRouter with DeepInfra due to 503 reliability issues.
 |---|---|---|
 | Snappy (everyday banter) | `Sao10K/L3.1-70B-Euryale-v2.2` (primary), `deepseek-ai/DeepSeek-V4-Flash` (in-provider fallback) | Both tried before OpenRouter |
 | Super Brain (coding/math) | `deepseek-ai/DeepSeek-V4-Pro` | Tried before OpenRouter |
+| Steel Rain (tactical/focus) | `deepseek-ai/DeepSeek-V4-Flash` | Raced against OpenRouter's Claude Haiku, not sequenced — see "Steel Rain / tactical race" above |
 
 Both model picks confirmed to actually exist on DeepInfra (checked live 2026-07-08 — this had been flagged as an unresolved/never-actually-chosen conflict between this doc and a separate "V9 roadmap" doc in an earlier planning session, not a settled decision as previously assumed).
 
 - DeepInfra uses the same OpenAI-compatible endpoint shape as OpenRouter, just a different base URL: `https://api.deepinfra.com/v1/openai/chat/completions`.
-- Env vars: `DEEPINFRA_API_KEY`, `DEEPINFRA_MODEL_SNAPPY`, `DEEPINFRA_MODEL_SNAPPY_FALLBACK`, `DEEPINFRA_MODEL_SUPERBRAIN` — see "Required .env variables" above.
-- Old `OPENROUTER_*` env vars stay in `.env` — OpenRouter is the permanent fallback tier now, not just a migration-transition holdover.
-- **Not yet done** (next pass): `tactical`/`focus` brains stay on OpenRouter only (never part of this plan — they run Claude for instruction-following precision, a different concern from persona/reasoning quality); `/karaoke`, `/karaoke-offer`, `/project-brief`, `/critic-loop`, and the `/embed` embeddings call are still OpenRouter-only; the brain-tier grid modal (`brainTiers` in `/respond`'s response) doesn't yet reflect DeepInfra tiers, it goes `null` while on DeepInfra.
+- Env vars: `DEEPINFRA_API_KEY`, `DEEPINFRA_MODEL_SNAPPY`, `DEEPINFRA_MODEL_SNAPPY_FALLBACK`, `DEEPINFRA_MODEL_SUPERBRAIN`, `DEEPINFRA_MODEL_TACTICAL` — see "Required .env variables" above.
+- Old `OPENROUTER_*` env vars stay in `.env` — OpenRouter is the permanent fallback tier now, not just a migration-transition holdover. For tactical/focus specifically, OpenRouter's Claude Haiku is also an active *race entrant*, not purely a fallback — see "Steel Rain / tactical race" above.
+- **Not yet done** (next pass): `/karaoke`, `/karaoke-offer`, `/project-brief`, `/critic-loop`, and the `/embed` embeddings call are still OpenRouter-only; the brain-tier grid modal (`brainTiers` in `/respond`'s response) doesn't yet reflect DeepInfra tiers for everyday/heavy_hitter's own success path the way tactical/focus's race result now does.
 - **Not yet tested live** — no `DEEPINFRA_API_KEY` has been added/verified against a real account yet. Generation params (`repetition_penalty` etc., currently reused as-is from `BRAIN_GENERATION_PARAMS`) are assumed OpenAI-compatible-extension-compatible with DeepInfra but unconfirmed until a real call succeeds.
 
 ### TTS → Fish Audio
