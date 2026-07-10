@@ -1815,7 +1815,9 @@ Stacking the tokens higher than the sky
 Nothing can touch us when we learn to fly
 
 We'll run the world on-chain forevermore!
-🎶`;
+🎶
+
+FINAL REMINDER, THE #1 WAY SONGS RUN TOO LONG: every time you reach a spot where the chorus should recur, you MUST paste the EXACT SAME chorus lines you already wrote — character for character, not new lines that merely feel chorus-like. If you notice yourself composing fresh lyrics for what should be a chorus repeat, stop and go back and copy the original chorus verbatim instead. A song with real verbatim repeats is naturally shorter to sing than one where every section is unique content — this is not just a rhyme-scheme detail, it is how the song stays a reasonable length.`;
 
 app.post('/karaoke-offer', requireSession, async (req, res) => {
   if (!OPENROUTER_API_KEY) return res.status(502).json({ error: 'OPENROUTER_API_KEY is not set.' });
@@ -1955,28 +1957,36 @@ app.post('/karaoke', requireSession, async (req, res) => {
         signal: upstreamAbort.signal,
       });
 
-    // Same Dolphin-first cascade as /respond: free → paid → free fallback → paid fallback.
-    // Karaoke gets a generous (not absent) max_tokens so songs have room to breathe.
+    // Dolphin-first cascade, REORDERED 2026-07-09 from the original /respond-mirroring order
+    // (free -> Lunaris paid -> Llama free -> MythoMax paid). Confirmed live via direct A/B
+    // testing: Lunaris 8B cannot reliably execute the "repeat the chorus verbatim" instruction
+    // no matter how the prompt is worded (a real model-capability gap, not a prompt bug) —
+    // every section comes out as unique new lyrics, which is also why songs run far longer than
+    // intended (no free verbatim reuse). Dolphin and Llama 3.3 70B both repeat correctly with
+    // the identical prompt. Since free-tier rate limits are per-model (Dolphin being limited
+    // doesn't mean Llama is), trying Llama 3.3 70B (free, confirmed capable) before Lunaris
+    // (paid, confirmed incapable) means karaoke lands on a competent model far more often —
+    // Lunaris/MythoMax are pushed to true-last-resort instead of first fallback.
     let activeModel = BRAIN_MODELS.everyday;
     let response = await callKaraoke(activeModel);
 
     if (!response.ok && (response.status === 404 || response.status === 429)) {
       const errText = await response.text();
       if (response.status === 429 || errText.includes('No endpoints found')) {
-        console.warn(`[Skippy/karaoke] ${activeModel} rate-limited — trying paid tier`);
-        activeModel = EVERYDAY_CASCADE[3].model;
+        console.warn(`[Skippy/karaoke] ${activeModel} rate-limited — trying free fallback (Llama)`);
+        activeModel = EVERYDAY_CASCADE[1].model;
         response = await callKaraoke(activeModel);
       } else {
         return res.status(502).json({ error: `OpenRouter error: ${response.status} ${errText}` });
       }
     }
     if (!response.ok && (response.status === 404 || response.status === 429)) {
-      console.warn(`[Skippy/karaoke] paid tier rate-limited — trying free fallback`);
-      activeModel = EVERYDAY_CASCADE[1].model;
+      console.warn(`[Skippy/karaoke] Llama rate-limited — trying Lunaris (paid)`);
+      activeModel = EVERYDAY_CASCADE[3].model;
       response = await callKaraoke(activeModel);
     }
     if (!response.ok && (response.status === 404 || response.status === 429)) {
-      console.warn(`[Skippy/karaoke] free fallback rate-limited — trying paid fallback`);
+      console.warn(`[Skippy/karaoke] Lunaris rate-limited — trying MythoMax (paid)`);
       activeModel = EVERYDAY_CASCADE[4].model;
       response = await callKaraoke(activeModel);
     }

@@ -2330,7 +2330,7 @@ class App {
       this.#render();
       let offerReply;
       try {
-        const offerRes = await fetch('/skippy-api/karaoke-offer', {
+        const offerRes = await fetch(`${PROXY_URL}/karaoke-offer`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', 'X-Skippy-Session': this.sessionToken },
           body: JSON.stringify({ mode, evolutionProfile: this.evolutionProfile }),
