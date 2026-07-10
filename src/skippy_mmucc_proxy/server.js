@@ -2370,6 +2370,34 @@ app.get('/api/fuel', requireSession, async (req, res) => {
     result.elevenlabs = { error: err.message };
   }
 
+  // DeepInfra balance — found 2026-07-09 via direct reverse-engineering of docs.deepinfra.com's
+  // per-endpoint OpenAPI fragments (this isn't in DeepInfra's public inference API docs, but the
+  // same bearer key that authenticates chat completions also authenticates this dashboard-
+  // internal route). `stripe_balance` is Stripe's negative-means-credit convention (a $20
+  // prepayment shows as -20.0); `recent` is usage already incurred but not yet reconciled into
+  // that figure. No official DeepInfra documentation for this exact shape, so `available` is a
+  // best-effort estimate, not a guaranteed-exact number — worth eyeballing against the real
+  // DeepInfra dashboard occasionally to confirm the math still holds.
+  if (DEEPINFRA_API_KEY) {
+    try {
+      const diResponse = await fetch('https://api.deepinfra.com/payment/checklist', {
+        headers: { Authorization: `Bearer ${DEEPINFRA_API_KEY}` },
+      });
+      if (diResponse.ok) {
+        const diData = await diResponse.json();
+        const prepaid = typeof diData.stripe_balance === 'number' ? Math.abs(diData.stripe_balance) : null;
+        const recent = typeof diData.recent === 'number' ? diData.recent : 0;
+        result.deepinfra = {
+          available: prepaid != null ? Math.max(0, prepaid - recent) : null,
+        };
+      } else {
+        result.deepinfra = { error: `DeepInfra ${diResponse.status}` };
+      }
+    } catch (err) {
+      result.deepinfra = { error: err.message };
+    }
+  }
+
   if (TWILIO_ACCOUNT_SID && TWILIO_API_KEY_SID && TWILIO_API_KEY_SECRET) {
     try {
       const twAuth = Buffer.from(`${TWILIO_API_KEY_SID}:${TWILIO_API_KEY_SECRET}`).toString('base64');
@@ -2389,6 +2417,31 @@ app.get('/api/fuel', requireSession, async (req, res) => {
   }
 
   res.json(result);
+});
+
+// DeepInfra top-up — unlike OpenRouter/ElevenLabs/Twilio's Top Up links above (static pages,
+// safe to hardcode as <a href>), DeepInfra's billing portal is a live, single-use Stripe
+// Checkout session — it has to be minted fresh per click, not cached or reused. Separate route
+// (not folded into /api/fuel) so a Fuel Gauge auto-refresh never mints a session nobody asked for.
+app.get('/api/deepinfra-topup', requireSession, async (req, res) => {
+  if (!DEEPINFRA_API_KEY) {
+    return res.status(502).json({ error: 'DEEPINFRA_API_KEY is not set.' });
+  }
+  try {
+    const diResponse = await fetch('https://api.deepinfra.com/payment/billing-portal', {
+      headers: { Authorization: `Bearer ${DEEPINFRA_API_KEY}` },
+    });
+    if (!diResponse.ok) {
+      return res.status(502).json({ error: `DeepInfra ${diResponse.status}` });
+    }
+    const diData = await diResponse.json();
+    if (!diData.url) {
+      return res.status(502).json({ error: 'DeepInfra billing portal returned no URL.' });
+    }
+    res.json({ url: diData.url });
+  } catch (err) {
+    res.status(502).json({ error: err.message });
+  }
 });
 
 // Pillar 12 (Guardian Emergency Protocol) — confirms GPS, generates the

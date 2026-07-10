@@ -2817,6 +2817,27 @@ class App {
     this.#render();
   };
 
+  // DeepInfra's billing portal is a live, single-use Stripe session — unlike the other
+  // providers' Top Up links (static pages, plain <a href>), this has to be minted fresh on
+  // click via the proxy, then opened once it actually resolves.
+  #openDeepInfraTopup = async () => {
+    try {
+      const response = await fetch(`${PROXY_URL}/api/deepinfra-topup`, {
+        headers: { 'X-Skippy-Session': this.sessionToken },
+      });
+      const data = await response.json();
+      if (!response.ok || !data.url) {
+        console.error('[Skippy fuel] DeepInfra top-up failed:', data.error);
+        this.statusMessage = 'Could not open DeepInfra billing portal.';
+        this.#render();
+        return;
+      }
+      window.open(data.url, '_blank', 'noopener');
+    } catch (err) {
+      console.error('[Skippy fuel] DeepInfra top-up failed:', err);
+    }
+  };
+
   // Dedicated silent stop, distinct from barging in with a new utterance:
   // sending a fresh message (even "stop") still gets its own reply, since
   // it's just normal conversation content. This instead only kills whatever
@@ -3858,6 +3879,16 @@ class App {
                       : '...'}
                   <a href="https://elevenlabs.io/app/subscription" target="_blank" rel="noopener">Top Up</a>
                 </p>
+                ${this.fuelData?.deepinfra
+                  ? html`<p>
+                      DeepInfra: ${this.fuelData.deepinfra.error
+                        ? `error: ${this.fuelData.deepinfra.error}`
+                        : this.fuelData.deepinfra.available != null
+                          ? `$${this.fuelData.deepinfra.available.toFixed(2)} remaining`
+                          : '...'}
+                      <button @click=${this.#openDeepInfraTopup}>Top Up</button>
+                    </p>`
+                  : ''}
                 ${this.fuelData?.twilio && !this.fuelData.twilio.error
                   ? html`<p>
                       Twilio: ${this.fuelData.twilio.currency} ${this.fuelData.twilio.balance}

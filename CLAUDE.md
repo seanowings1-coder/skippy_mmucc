@@ -107,7 +107,7 @@ Express.js server. All routes require the `requireSession` middleware (validates
 ### Routes
 | Route | Purpose |
 |---|---|
-| `POST /respond` | Main LLM response — 4-tier everyday brain cascade + tactical/heavy-hitter fallback |
+| `POST /respond` | Main LLM response — peer fall-forward + cross-tier escalation (everyday/heavy_hitter) or Steel Rain race (tactical/focus) |
 | `POST /project-brief` | Generates a project brief from workspace history |
 | `POST /critic-loop` | Archive-time Critic Loop (self-critique → Evolution Matrix deltas) |
 | `POST /karaoke-offer` | In-character excited ask before performing (one-step before `/karaoke`) |
@@ -117,20 +117,17 @@ Express.js server. All routes require the `requireSession` middleware (validates
 | `POST /chunk-and-embed` | File upload (PDF/Word via mammoth/pdf-parse) → chunk → embed → canister |
 | `POST /chunk-and-embed-url` | URL fetch → chunk → embed → canister |
 | `POST /web-search` | Live web search |
-| `GET /api/fuel` | Cycle balance + OpenRouter credit status |
+| `GET /api/fuel` | Cycle balance + OpenRouter/ElevenLabs/DeepInfra/Twilio balance status |
+| `GET /api/deepinfra-topup` | Mints a fresh, single-use DeepInfra Stripe billing portal URL (not cacheable, unlike other providers' static Top Up links) |
 | `POST /emergency-dispatch` | Triggers Guardian Emergency Protocol, mints secure token |
 | `GET /live-ops/:token` | SSE stream for emergency contacts (no auth — token is the credential) |
 
-### Everyday brain 4-tier cascade
-When the everyday brain fails (404 = model offline, 429 = rate-limited), the proxy automatically escalates:
-1. Free primary (`OPENROUTER_MODEL` env var, default: `openai/gpt-4o-mini`)
-2. Paid primary (same model with `:free` stripped)
-3. Free fallback (`OPENROUTER_MODEL_FALLBACK`, default: `sao10k/l3-lunaris-8b`)
-4. Paid fallback (same fallback with `:free` stripped)
+### Everyday / Heavy Hitter brains (`/respond`)
+See "Brain → DeepInfra migration" below for the full peer-fall-forward + cross-tier-escalation design — that section is the source of truth, not duplicated here. In short: 2-3 genuine peer models per tier, tried in order, everyday escalates to Heavy Hitter on total failure, Heavy Hitter hard-errors on its own total failure. Everyday peers can be individually deselected from the brain-grid modal (sticky via `localStorage`).
 
-Tiers 2 & 4 set `paidTier: true` in the response so the frontend lights the amber tier-dot. Switching from the primary model family to the fallback family sets `brainDowngrade: true` so App.js plays the in-character quip **once** on transition (not on every subsequent request that's still on the fallback).
+Tactical/focus brains do NOT use this peer system — they use the Steel Rain race below, falling through to a separate simpler sequential cascade (primary → paid primary → Claude Haiku → free fallback → paid fallback) only if the race itself fails entirely.
 
-Tactical and heavy-hitter brains follow a simpler 2-tier fallback (primary → free fallback → paid fallback) **unless the Steel Rain race below wins first** — that race is bolted on in front, same pattern as the DeepInfra pre-check.
+Note: `/karaoke` and `/karaoke-offer` still use their own, older 7-tier `EVERYDAY_CASCADE` array (3 free OpenRouter models down to 4 paid) independently of `/respond` — that array was deliberately kept, not dead code, when `/respond`'s own use of it was replaced.
 
 ### Steel Rain / tactical race (`tactical` and `focus` only)
 Tactical/focus's original design intent (clarified 2026-07-09, not implemented until then) is latency, not just fallback: fire two paid, fast-but-knowledgeable brains **simultaneously** — `DEEPINFRA_MODEL_TACTICAL` (default `deepseek-ai/DeepSeek-V4-Flash`) and OpenRouter's Claude Haiku (`OPENROUTER_MODEL_TACTICAL_PAID`) — and use whichever answers first, aborting the loser. This is why tactical/focus unlock the Emergency Panic button and default mode doesn't: speed is a safety property here, not a preference. Both racers are paid by design (no free tier in the race) — costs roughly double per Steel Rain/focus turn versus a single call, an accepted tradeoff. If **both** racers fail, falls through unchanged to the existing sequential cascade below (Sonnet → Haiku → free Llama → paid Llama) as the true last resort. Inert (no race, falls straight to the old sequential path) if `DEEPINFRA_API_KEY` isn't set.
