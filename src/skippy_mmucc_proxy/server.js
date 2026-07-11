@@ -825,12 +825,38 @@ app.post('/respond', requireSession, async (req, res) => {
 
   // History comes from the frontend's own canister-backed cache (see
   // CLAUDE.md Phase 5.2) — the proxy never reads/writes it itself. Only
-  // role/content are forwarded to OpenRouter, never arbitrary client fields.
-  const history = Array.isArray(req.body?.history)
-    ? req.body.history
-        .filter((m) => m && typeof m.role === 'string' && typeof m.content === 'string')
-        .map(({ role, content }) => ({ role, content }))
+  // role/content/compressed are forwarded, never arbitrary client fields.
+  const rawHistoryInput = Array.isArray(req.body?.history)
+    ? req.body.history.filter((m) => m && typeof m.role === 'string' && typeof m.content === 'string')
     : [];
+
+  // Async Janitor (2026-07-10): compressed entries must NOT be sent as
+  // normal role:'assistant' turns. Confirmed live — even with an explicit
+  // "don't imitate this format" instruction, leaving compressed shorthand
+  // ("[tone: X] fact; fact") in the assistant role made the model pattern-
+  // match that shape into its own brand-new replies instead of natural
+  // dialogue (every subsequent reply started reading like a log entry).
+  // Fix: pull compressed entries out of the turn sequence entirely and fold
+  // them into one separate system-role context note instead — tested 3/3
+  // clean against the real model this way, vs 0/3 with any assistant-role
+  // approach. Placed right after the main system prompt (not adjacent to
+  // the new user message) to keep it away from the highest-recency,
+  // highest style-influence position.
+  const history = rawHistoryInput
+    .filter((m) => !m.compressed)
+    .map(({ role, content }) => ({ role, content }));
+  const compressedFacts = rawHistoryInput.filter((m) => m.compressed).map((m) => `- ${m.content}`);
+  const compressedContextNote = compressedFacts.length
+    ? {
+        role: 'system',
+        content:
+          '<earlier_context>\nBackground facts from earlier in this conversation, compressed by an ' +
+          'automated internal memory system. These are reference notes only — never quote, copy, or ' +
+          'imitate their shorthand format in your own reply.\n' +
+          compressedFacts.join('\n') +
+          '\n</earlier_context>',
+      }
+    : null;
 
   // mode/brain come from App.js's plain string-match on the transcript
   // (Pillar 3) — default to the safe/cheap combo if missing or unrecognized,
@@ -1183,6 +1209,7 @@ app.post('/respond', requireSession, async (req, res) => {
   // everyday model is offline.
   const messages = [
     { role: 'system', content: systemPrompt },
+    ...(compressedContextNote ? [compressedContextNote] : []),
     ...history,
     // Roster notes injected immediately before the current turn —
     // maximum recency wins over prepending before a long history,
@@ -2230,6 +2257,77 @@ app.post('/embed', requireSession, async (req, res) => {
     const embeddings = await embedTexts(texts);
     res.json({ embeddings });
   } catch (err) {
+    res.status(502).json({ error: err.message });
+  }
+});
+
+// Async Janitor (2026-07-10) — kills the conversation-history verbosity
+// snowball (a rambling reply teaches the model to keep rambling, via its own
+// stored history) by compressing each assistant turn down to a dense
+// one-liner in the background, AFTER the raw reply has already been shown
+// to the user and durably saved via append_turn. This route never gates the
+// user-facing reply — the frontend fires it fire-and-forget once a turn is
+// already on screen and already in canister history. If this fails or
+// DEEPINFRA_API_KEY isn't set, the caller just keeps the raw text — that's
+// already safely saved, so there's nothing to roll back.
+// Format is deliberately NOT a natural sentence ("Skippy said X") — an
+// earlier version used "Skippy gave a [tone] answer: ..." and, once a couple
+// of those landed in conversation history, the MAIN persona model started
+// pattern-matching that third-person-narration shape and generating brand
+// new live replies in the same format instead of actual in-character
+// dialogue (confirmed live 2026-07-10 — every reply started reading like a
+// system log entry). This telegraphic/bracketed shape is deliberately
+// dialogue-shaped-nothing-like, specifically so it can't be mistaken for an
+// example of how Skippy talks.
+const JANITOR_SYSTEM_PROMPT = `You are a silent internal compression utility inside a larger AI system. You are never shown to the end user. You will be given the exact text of a reply an AI character named "Skippy" just gave in conversation. Your only job is to compress it down to ONE single line in EXACTLY this format, nothing else:
+
+[tone: X] fact; fact; fact
+
+Rules:
+- X is one or two words capturing HOW he said it (e.g. sarcastic, blunt, mocking, sincere, excited, reluctant, smug).
+- After the bracket, list the concrete facts from the original as short semicolon-separated fragments — names, numbers, dates, decisions, recommendations, specific technical details, action items. Never drop or vague-ify a specific fact just to save space.
+- Do NOT write this as a sentence, and do NOT use words like "said", "gave", "answered", or "responded" — this must never read like something that could be mistaken for a line of dialogue or narration. Fragments only.
+- Strip everything else: jokes with no factual payload, flourish, repeated phrasing, tangents, filler.
+- Output ONLY that one line. No quotation marks, no markdown, no preamble, no explanation of what you did.
+- If the original reply is already short and dense, return it nearly unchanged, still wrapped in the required format.
+
+Example — input: "Oh Commander, buckle up, this is GREAT — your stable memory caps at 4GB per slot, and MANUAL_SECTIONS is already at 340MB as of July 8th. Also your coffee maker has better uptime than this app."
+Example — correct output: [tone: sarcastic] stable memory caps at 4GB/slot; MANUAL_SECTIONS at 340MB as of July 8th
+Example — WRONG (do not do this): Skippy gave a sarcastic answer: stable memory caps at 4GB per slot...`;
+
+app.post('/compress-turn', requireSession, async (req, res) => {
+  const text = req.body?.text;
+  if (typeof text !== 'string' || !text.trim()) {
+    return res.status(400).json({ error: 'Missing "text" in request body.' });
+  }
+  if (!DEEPINFRA_API_KEY) {
+    return res.status(502).json({ error: 'DEEPINFRA_API_KEY is not set.' });
+  }
+
+  try {
+    const r = await fetch('https://api.deepinfra.com/v1/openai/chat/completions', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${DEEPINFRA_API_KEY}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: DEEPINFRA_MODEL_SNAPPY_FALLBACK,
+        temperature: 0.2,
+        max_tokens: 120,
+        messages: [
+          { role: 'system', content: JANITOR_SYSTEM_PROMPT },
+          { role: 'user', content: text },
+        ],
+      }),
+    });
+    if (!r.ok) {
+      const errText = await r.text().catch(() => '');
+      throw new Error(`DeepInfra ${r.status}: ${errText}`);
+    }
+    const data = await r.json();
+    const compressed = data.choices?.[0]?.message?.content?.trim();
+    if (!compressed) throw new Error('Janitor returned no content.');
+    res.json({ compressed });
+  } catch (err) {
+    console.error('[Skippy] /compress-turn failed — caller keeps the raw text:', err.message);
     res.status(502).json({ error: err.message });
   }
 });

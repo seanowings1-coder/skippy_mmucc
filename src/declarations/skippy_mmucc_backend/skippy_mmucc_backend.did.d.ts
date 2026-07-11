@@ -90,7 +90,7 @@ export interface _SERVICE {
     [bigint, Uint8Array | number[]],
     bigint
   >,
-  'append_turn' : ActorMethod<[bigint, string, string], undefined>,
+  'append_turn' : ActorMethod<[bigint, string, string], bigint>,
   'archive_workspace' : ActorMethod<[bigint], undefined>,
   'create_workspace' : ActorMethod<[string], bigint>,
   'delete_manual' : ActorMethod<[string], bigint>,
@@ -114,6 +114,7 @@ export interface _SERVICE {
   'list_sections_by_manual' : ActorMethod<[string], Array<DocumentSection>>,
   'login' : ActorMethod<[], { 'Ok' : string } | { 'Err' : string }>,
   'manual_category_map' : ActorMethod<[], Array<[string, string]>>,
+  'overwrite_turn_content' : ActorMethod<[bigint, bigint, string], undefined>,
   'pop_pending_courier_messages' : ActorMethod<[], Array<CourierMessage>>,
   'purge_history' : ActorMethod<[bigint], undefined>,
   'queue_courier_message' : ActorMethod<[string], bigint>,

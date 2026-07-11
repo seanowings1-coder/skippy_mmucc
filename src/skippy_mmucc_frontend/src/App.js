@@ -889,8 +889,19 @@ class App {
   backendActor = null;
   // In-memory mirror of the canister's rolling history for this session —
   // fetched once at login, kept in sync locally so /respond doesn't need an
-  // extra canister round trip on every single message.
+  // extra canister round trip on every single message. This is the DISPLAY
+  // copy — raw text, permanent, rendered on screen — never touched by the
+  // Async Janitor. See contextHistory below for the copy that does change.
   history = [];
+  // Async Janitor (2026-07-10): a separate mirror used ONLY as the `history`
+  // payload sent to /respond, so the model has real context to work with.
+  // Starts as a copy of `history` per turn, but once a turn's background
+  // compression pass finishes, THIS copy's entry gets swapped to the dense
+  // one-liner — the display copy above never changes. This is what stops a
+  // rambling reply from teaching the model to keep rambling on later turns
+  // in the same conversation, without ever rewriting what the user is
+  // reading (important in mute/text mode, where the user is reading it live).
+  contextHistory = [];
   // 'default' | 'professional' | 'tactical' — live "current vibe", in-memory
   // only, resets to default on logout/refresh rather than being persisted.
   operationalMode = 'default';
@@ -1465,6 +1476,7 @@ class App {
     this.sessionToken = null;
     this.backendActor = null;
     this.history = [];
+    this.contextHistory = [];
     this.workspaces = [];
     this.activeWorkspaceId = null;
     this.pendingWebSearchQuery = null;
@@ -1555,6 +1567,7 @@ class App {
     }
     await this.backendActor.purge_history(this.activeWorkspaceId);
     this.history = [];
+    this.contextHistory = [];
     this.statusMessage = 'History cleared.';
     this.#render();
   };
@@ -1634,6 +1647,11 @@ class App {
     this.activeWorkspaceId = id;
     this.pendingWebSearchQuery = null;
     this.history = await this.backendActor.get_history(id);
+    // Async Janitor: context copy starts as a mirror of display history (which
+    // may already carry compressed entries from a prior session's background
+    // passes) — the two only diverge going forward, once new turns land and
+    // get compressed in place in this copy alone. See #recordTurn.
+    this.contextHistory = this.history.map((m) => ({ ...m }));
     this.#render();
   };
 
@@ -2111,13 +2129,72 @@ class App {
     if (this.history.length > MAX_LOCAL_HISTORY) {
       this.history.splice(0, this.history.length - MAX_LOCAL_HISTORY);
     }
+
+    // Async Janitor: separate context copy, identical to the display copy
+    // above at push time. contextAssistantEntry is captured by reference so
+    // the background compression pass below can swap its .content in place
+    // without re-searching the array — display `history` above is never
+    // touched by any of this, so what's on screen never changes.
+    const contextAssistantEntry = { role: 'assistant', content: assistantText, timestamp: now };
+    this.contextHistory.push({ role: 'user', content: userText, timestamp: now }, contextAssistantEntry);
+    if (this.contextHistory.length > MAX_LOCAL_HISTORY) {
+      this.contextHistory.splice(0, this.contextHistory.length - MAX_LOCAL_HISTORY);
+    }
+
+    const workspaceId = this.activeWorkspaceId;
     // Fire-and-forget: the canister is the source of truth for the *next*
     // login's history, but this turn's reply already played — a failure
-    // here shouldn't block or re-render the UI around it.
-    this.backendActor.append_turn(this.activeWorkspaceId, userText, assistantText).catch((err) => {
-      console.error('[Skippy] failed to persist conversation turn:', err);
-    });
+    // here shouldn't block or re-render the UI around it. append_turn now
+    // returns the timestamp it recorded, which the Janitor pass needs to
+    // address this exact turn later (see #compressTurnInBackground).
+    this.backendActor
+      .append_turn(workspaceId, userText, assistantText)
+      .then((canisterTimestamp) => {
+        this.#compressTurnInBackground(assistantText, contextAssistantEntry, workspaceId, canisterTimestamp);
+      })
+      .catch((err) => {
+        console.error('[Skippy] failed to persist conversation turn:', err);
+      });
   }
+
+  // Async Janitor (2026-07-10) — kills the conversation-history verbosity
+  // snowball (a rambling reply teaches the model to keep rambling on later
+  // turns, via its own stored history) by compressing each assistant turn
+  // down to a dense one-liner in the background, in contextHistory only.
+  // Fires only after the raw reply is already on screen and already
+  // durably saved — never awaited by any caller, never on the critical
+  // path, never touches the display copy. Any failure here just leaves the
+  // raw text in place in contextHistory, which was already complete and
+  // correct before this ever ran — nothing to roll back.
+  #compressTurnInBackground = async (rawText, contextAssistantEntry, workspaceId, canisterTimestamp) => {
+    if (rawText.length < 200) return; // already dense enough, not worth a call
+    try {
+      const response = await fetch(`${PROXY_URL}/compress-turn`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Skippy-Session': this.sessionToken },
+        body: JSON.stringify({ text: rawText }),
+      });
+      if (!response.ok) return;
+      const { compressed } = await response.json();
+      if (!compressed) return;
+      // Swap by direct reference — cheap, no re-search needed. Harmless even
+      // if this entry has since been trimmed off contextHistory by
+      // MAX_LOCAL_HISTORY; it just mutates an orphaned object at that point.
+      // `compressed: true` tells the proxy to pull this entry out of the
+      // normal turn sequence and fold it into a separate context note
+      // instead of sending it as a fake assistant turn — confirmed live
+      // 2026-07-10 that leaving compressed text in the assistant role (even
+      // with an explicit "don't imitate this" instruction) makes the model
+      // pattern-match the shorthand format into its own live replies.
+      contextAssistantEntry.content = compressed;
+      contextAssistantEntry.compressed = true;
+      if (this.backendActor) {
+        await this.backendActor.overwrite_turn_content(workspaceId, canisterTimestamp, compressed);
+      }
+    } catch (err) {
+      console.error('[Skippy] Janitor compression failed — keeping raw text in context:', err);
+    }
+  };
 
   // A new utterance always wins over whatever Skippy is currently saying or
   // still waiting on — barging in is the whole point of a voice trigger
@@ -2599,7 +2676,19 @@ class App {
         },
         body: JSON.stringify({
           text: effectiveText,
-          history: this.history.map(({ role, content }) => ({ role, content })),
+          // Async Janitor: contextHistory, not history — this is the copy
+          // that gets stale/verbose entries swapped for dense compressed
+          // ones in the background, so the model doesn't imitate its own
+          // rambling turn after turn. The on-screen transcript (this.history)
+          // is a different array and is never sent here. `compressed` tells
+          // the proxy which entries to pull out of the normal turn sequence
+          // and fold into a separate context note (see server.js) rather
+          // than send as a fake assistant turn.
+          history: this.contextHistory.map(({ role, content, compressed }) => ({
+            role,
+            content,
+            compressed: !!compressed,
+          })),
           mode,
           brain,
           ragContext,

@@ -98,7 +98,7 @@ export const idlFactory = ({ IDL }) => {
         [IDL.Nat64],
         [],
       ),
-    'append_turn' : IDL.Func([IDL.Nat64, IDL.Text, IDL.Text], [], []),
+    'append_turn' : IDL.Func([IDL.Nat64, IDL.Text, IDL.Text], [IDL.Nat64], []),
     'archive_workspace' : IDL.Func([IDL.Nat64], [], []),
     'create_workspace' : IDL.Func([IDL.Text], [IDL.Nat64], []),
     'delete_manual' : IDL.Func([IDL.Text], [IDL.Nat64], []),
@@ -150,6 +150,11 @@ export const idlFactory = ({ IDL }) => {
         [],
         [IDL.Vec(IDL.Tuple(IDL.Text, IDL.Text))],
         ['query'],
+      ),
+    'overwrite_turn_content' : IDL.Func(
+        [IDL.Nat64, IDL.Nat64, IDL.Text],
+        [],
+        [],
       ),
     'pop_pending_courier_messages' : IDL.Func(
         [],

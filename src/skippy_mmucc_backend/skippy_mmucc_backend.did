@@ -117,7 +117,8 @@ service : (principal, principal, principal) -> {
     "update_scratchpad": (nat64, text) -> ();
     "update_associated_manuals": (nat64, vec text) -> ();
 
-    "append_turn": (nat64, text, text) -> ();
+    "append_turn": (nat64, text, text) -> (nat64);
+    "overwrite_turn_content": (nat64, nat64, text) -> ();
     "get_history": (nat64) -> (vec Message) query;
     "purge_history": (nat64) -> ();
 

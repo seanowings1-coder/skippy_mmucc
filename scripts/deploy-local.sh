@@ -17,6 +17,17 @@ set -a
 source .env
 set +a
 
+# .env's DFX_NETWORK is for the app's own runtime code (server.js/App.js) to
+# know whether it's talking to mainnet — it's routinely 'ic' since that's
+# .env's normal production value. `set -a` above exports it along with
+# everything else, and dfx's CLI itself respects that same env var as its
+# target network whenever a command doesn't pass --network explicitly. None
+# of the dfx deploy calls below do, so without this override, sourcing .env
+# could silently point this "local-only" script's deploys at mainnet instead
+# — confirmed live 2026-07-10 (a deploy failed on the mainnet-identity
+# plaintext-security check, not because anything was actually wrong locally).
+export DFX_NETWORK=local
+
 if [[ -z "${COMMANDER_PRINCIPAL:-}" || -z "${PARTNER_PRINCIPAL:-}" ]]; then
   echo "COMMANDER_PRINCIPAL and PARTNER_PRINCIPAL must be set in .env" >&2
   exit 1

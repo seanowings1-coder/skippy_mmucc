@@ -1080,8 +1080,12 @@ fn delete_workspace(workspace_id: u64) {
 /// this directly — it has no way to act as a specific end user (see Pillar
 /// 1's implementation note in CLAUDE.md) — the frontend calls it with its
 /// own authenticated identity right after a Skippy reply comes back.
+/// Returns the timestamp this turn was recorded under, so the caller can
+/// later address this exact assistant message (e.g. the Async Janitor's
+/// background compression pass) without racing "the last message" if
+/// another turn lands before compression finishes. See overwrite_turn_content.
 #[update]
-fn append_turn(workspace_id: u64, user_text: String, assistant_text: String) {
+fn append_turn(workspace_id: u64, user_text: String, assistant_text: String) -> u64 {
     let caller = assert_whitelisted();
     assert_workspace_owner(caller, workspace_id);
     let key = HistoryKey { principal: caller, workspace_id };
@@ -1096,6 +1100,34 @@ fn append_turn(workspace_id: u64, user_text: String, assistant_text: String) {
             history.messages.drain(0..excess);
         }
         h.insert(key, history);
+    });
+    now
+}
+
+/// Async Janitor support: swaps a previously-stored assistant message's
+/// content for a compressed version once the background compression pass
+/// finishes, addressed by the exact timestamp append_turn returned (not
+/// "the last message" — a later turn may already have landed by the time
+/// compression completes). Silently no-ops if the turn was already trimmed
+/// off by MAX_HISTORY_MESSAGES or the timestamp doesn't match — this is a
+/// best-effort background touch-up, not a source of truth write.
+#[update]
+fn overwrite_turn_content(workspace_id: u64, timestamp: u64, compressed_text: String) {
+    let caller = assert_whitelisted();
+    assert_workspace_owner(caller, workspace_id);
+    let key = HistoryKey { principal: caller, workspace_id };
+    HISTORY.with(|h| {
+        let mut h = h.borrow_mut();
+        if let Some(mut history) = h.get(&key) {
+            if let Some(msg) = history
+                .messages
+                .iter_mut()
+                .find(|m| m.role == "assistant" && m.timestamp == timestamp)
+            {
+                msg.content = compressed_text;
+                h.insert(key, history);
+            }
+        }
     });
 }
 
