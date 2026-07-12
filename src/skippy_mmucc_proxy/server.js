@@ -1509,7 +1509,7 @@ app.post('/respond', requireSession, async (req, res) => {
 
     if (won) {
       const wonIdx = wonPeers.findIndex((p) => p.model === won.peer.model);
-      const dedupedReply = await dedupeCodeBlock(won.reply, won.peer, wonPeers === HEAVY_HITTER_PEERS ? 'heavy_hitter' : brain);
+      const dedupedReply = await dedupeStuckReply(won.reply, won.peer, wonPeers === HEAVY_HITTER_PEERS ? 'heavy_hitter' : brain);
       return res.json({
         reply: stripLeakedFormatting(dedupedReply),
         brain,
