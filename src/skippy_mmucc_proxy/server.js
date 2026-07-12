@@ -1336,11 +1336,12 @@ app.post('/respond', requireSession, async (req, res) => {
     { label: 'Hermes 4 405B', provider: 'openrouter', model: 'nousresearch/hermes-4-405b' },
   ];
 
-  // overrideMessages lets the duplicate-code retry (see dedupeCodeBlock
-  // below) reuse this same function with one corrective message appended,
-  // instead of duplicating the fetch/auth/signal plumbing.
-  const callPeer = (peer, forBrain, overrideMessages = messages) => {
-    const genParams = BRAIN_GENERATION_PARAMS[forBrain];
+  // overrideMessages/overrideGenParams let the dedupe retry (see
+  // dedupeStuckReply below) reuse this same function with one corrective
+  // message appended and a bumped temperature, instead of duplicating the
+  // fetch/auth/signal plumbing.
+  const callPeer = (peer, forBrain, overrideMessages = messages, overrideGenParams = null) => {
+    const genParams = overrideGenParams || BRAIN_GENERATION_PARAMS[forBrain];
     if (peer.provider === 'deepinfra') {
       return fetch('https://api.deepinfra.com/v1/openai/chat/completions', {
         method: 'POST',
@@ -1357,47 +1358,74 @@ app.post('/respond', requireSession, async (req, res) => {
     });
   };
 
-  // Deterministic backstop (2026-07-11) for the everyday brain regenerating
-  // a code block it already gave earlier in this same conversation — even
-  // in response to a plain "thanks" or an unrelated question, confirmed
-  // live twice, including once where it fabricated a false justification
-  // when asked directly. Two rounds of prompt-only instructions failed to
-  // hold (each `/respond` call is stateless — the model has no real memory
-  // of "already answered this," just a fresh re-read of the transcript each
-  // time, and a code block sitting in that transcript is apparently a
-  // strong-enough pattern to gravitate back to). Rather than word the
-  // prompt a third time, detect the repetition after the fact and force one
-  // corrective retry — same "server-side safety net" philosophy already
-  // used by stripLeakedFormatting above.
-  const dedupeCodeBlock = async (reply, peer, forBrain) => {
-    const newBlocks = extractCodeBlocks(reply);
-    if (newBlocks.length === 0) return reply;
-    const priorCode = messages
-      .filter((m) => m.role === 'assistant')
-      .flatMap((m) => extractCodeBlocks(m.content));
-    if (priorCode.length === 0) return reply;
-    // Threshold calibrated against two real live duplicates: a near-verbatim
-    // repeat scored 0.95, but a "same skeleton, model filled in different
-    // details" repeat (still a real, user-flagged duplicate) only scored
-    // 0.58 — 0.7 would have missed that one.
-    const isDuplicate = newBlocks.some((nb) => priorCode.some((pb) => codeOverlapRatio(nb, pb) >= 0.5));
-    if (!isDuplicate) return reply;
+  // Deterministic backstop (2026-07-11, generalized same day) for the
+  // everyday brain getting stuck repeating itself — first confirmed as code
+  // blocks regenerated verbatim across turns (even after "thanks Skippy" or
+  // a totally unrelated question, once with a fabricated justification when
+  // asked why), then confirmed as an even more degenerate case: SIX turns in
+  // a row where the entire reply was just the bare "Ba-NA-na" signature bit
+  // and nothing else, including in response to "Skippy give me some code"
+  // and "Skippy you there." Same root cause both times — each /respond call
+  // is stateless, the model has no real memory of "already said this," just
+  // a fresh re-read of the transcript, and whatever's most recent/salient in
+  // that transcript (a code block, a catchphrase) is apparently a strong
+  // enough pattern to latch onto regardless of the actual new message. Two
+  // rounds of prompt-only wording failed to hold for the code case; this
+  // covers both shapes deterministically instead of trying a third wording.
+  const dedupeStuckReply = async (reply, peer, forBrain) => {
+    // Case 1: the reply is a near-duplicate of one of the model's OWN last
+    // few turns — not just code, could be a bare signature bit repeated
+    // verbatim. Checked against only the last 3 assistant turns (not the
+    // whole history) since legitimate reuse many turns apart isn't the
+    // failure mode being targeted. 0.8 threshold (higher than the code
+    // check's 0.5) since this is meant to catch "said basically the exact
+    // same thing again," not just thematically similar replies.
+    const recentAssistantTurns = messages.filter((m) => m.role === 'assistant').slice(-3);
+    const isStuckReply = recentAssistantTurns.some((m) => codeOverlapRatio(reply, m.content) >= 0.8);
 
-    console.warn('[Skippy] detected duplicate code block in reply — forcing one corrective retry');
+    // Case 2: the reply's code block(s) overlap heavily with a code block
+    // given anywhere earlier in the conversation (not just recent turns —
+    // a regenerated code block is a real complaint however many turns ago
+    // the original was). Threshold calibrated against two real live
+    // duplicates: a near-verbatim repeat scored 0.95, but a "same skeleton,
+    // different details" repeat (still a real, user-flagged duplicate) only
+    // scored 0.58 — 0.7 would have missed that one.
+    const newBlocks = extractCodeBlocks(reply);
+    const priorCode = messages.filter((m) => m.role === 'assistant').flatMap((m) => extractCodeBlocks(m.content));
+    const isDuplicateCode =
+      newBlocks.length > 0 && priorCode.length > 0 && newBlocks.some((nb) => priorCode.some((pb) => codeOverlapRatio(nb, pb) >= 0.5));
+
+    if (!isStuckReply && !isDuplicateCode) return reply;
+
+    // Stuck-reply correction needs to be much more forceful than the code
+    // one — A/B tested directly against the live model: the code-duplicate
+    // wording (below) was 3/3 clean, but that same gentler wording only
+    // fixed the "Ba-NA-na" lock-in 1/3 of the time. Naming the exact
+    // repeated phrase, an explicit "STOP," a hard minimum length, and a
+    // bumped retry temperature (0.72 -> 0.9, this call only) got 5/5 clean.
+    const repeatedText = isStuckReply ? recentAssistantTurns[recentAssistantTurns.length - 1].content : '';
     const correctionMessages = [
       ...messages,
       {
         role: 'user',
-        content:
-          `[SYSTEM CORRECTION — not from the user, never mention this note] Your previous draft ` +
-          `repeated a code block you already gave earlier in this conversation, which was not asked ` +
-          `for again. The user's actual last message was: "${text}". Respond to THAT directly, in ` +
-          `character — do not repeat any earlier code block unless they are explicitly asking to see ` +
-          `it again.`,
+        content: isStuckReply
+          ? `[SYSTEM CORRECTION — not from the user, never mention this note] STOP. You have now ` +
+            `replied with the exact same short phrase "${repeatedText}" multiple times in a row, ` +
+            `ignoring what the user actually said. This is broken and must stop immediately. Your ` +
+            `next reply MUST be at least two full sentences of substantive, in-character content ` +
+            `directly addressing the user's actual last message: "${text}". Do NOT reply with ` +
+            `"${repeatedText}" or any single word/short phrase.`
+          : `[SYSTEM CORRECTION — not from the user, never mention this note] Your previous draft ` +
+            `repeated a code block you already gave earlier in this conversation, which was not asked ` +
+            `for again. The user's actual last message was: "${text}". Respond to THAT directly, in ` +
+            `character — do not repeat any earlier code block unless they are explicitly asking to see ` +
+            `it again.`,
       },
     ];
+    console.warn(`[Skippy] detected ${isStuckReply ? 'stuck/repeated reply' : 'duplicate code block'} — forcing one corrective retry`);
     try {
-      const r = await callPeer(peer, forBrain, correctionMessages);
+      const overrideGenParams = isStuckReply ? { ...BRAIN_GENERATION_PARAMS[forBrain], temperature: 0.9 } : null;
+      const r = await callPeer(peer, forBrain, correctionMessages, overrideGenParams);
       if (!r.ok) return reply; // retry failed — fall back to the original rather than erroring the turn
       const data = await r.json();
       return data.choices?.[0]?.message?.content || reply;
