@@ -3804,7 +3804,7 @@ class App {
             <button
               class="badge desktop-only ${this.voiceMode === 'premium' ? 'active' : ''}"
               @click=${this.#toggleVoiceMode}
-              ?disabled=${this.voiceMuted}
+              ?disabled=${this.voiceMuted || this.guestMode}
             >
               Voice: ${this.voiceMode === 'premium' ? 'Premium 🎙' : 'Economy 💬'}
             </button>
@@ -4088,6 +4088,9 @@ class App {
               `}
         </details>
 
+        ${this.guestMode
+          ? ''
+          : html`
         <details class="tactical-roster">
           <summary>Tactical Roster</summary>
           <p class="status">
@@ -4142,6 +4145,7 @@ class App {
             )}
           </ul>
         </details>
+        `}
           <div class="mobile-only" style="margin-top:1em;padding-top:0.8em;border-top:1px solid var(--border-subtle);">
             <button style="width:100%;opacity:0.7;" @click=${this.#logout}>Log Out</button>
           </div>
@@ -4397,7 +4401,7 @@ class App {
                 class="badge ${this.voiceMode === 'premium' ? 'active' : ''}"
                 style="flex:1;"
                 @click=${this.#toggleVoiceMode}
-                ?disabled=${this.voiceMuted}
+                ?disabled=${this.voiceMuted || this.guestMode}
               >Voice: ${this.voiceMode === 'premium' ? 'Premium 🎙' : 'Economy 💬'}</button>
               ${this.guestMode ? '' : html`
                 <button
@@ -4435,10 +4439,14 @@ class App {
               <input type="url" id="manual-url-input" placeholder="https://..." />
               <button @click=${this.#uploadManualFromUrl}>Upload</button>
             </div>
-            <details class="danger-zone">
-              <summary>⚠ Delete manual</summary>
-              <button @click=${this.#deleteManual}>Delete entire manual</button>
-            </details>
+            ${this.guestMode
+              ? ''
+              : html`
+                  <details class="danger-zone">
+                    <summary>⚠ Delete manual</summary>
+                    <button @click=${this.#deleteManual}>Delete entire manual</button>
+                  </details>
+                `}
 
             ${this.manualBrowserOpen
               ? html`
@@ -4448,7 +4456,9 @@ class App {
                         <li>
                           <strong>${section.title}</strong>
                           <span class="section-id">(${section.section})</span>
-                          <button @click=${() => this.#deleteSection(section.id)}>Delete</button>
+                          ${this.guestMode
+                            ? ''
+                            : html`<button @click=${() => this.#deleteSection(section.id)}>Delete</button>`}
                           <p>${section.content}</p>
                         </li>
                       `,
