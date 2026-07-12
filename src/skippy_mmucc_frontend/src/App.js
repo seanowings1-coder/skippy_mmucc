@@ -56,6 +56,17 @@ const IDENTITY_PROVIDER =
 // page refresh doesn't keep growing the history payload sent to the proxy.
 const MAX_LOCAL_HISTORY = 40;
 
+// Safety net for history compressed by the Async Janitor *before* the
+// `compressed` field existed on the backend Message struct (fixed
+// 2026-07-11 — see overwrite_turn_content in lib.rs). Those old turns are
+// permanently stuck with compressed unset even though their content is
+// literally the Janitor's "[tone: X] fact; fact" shorthand — this pattern
+// match catches them on every reload regardless of the flag, so they still
+// get routed away from the live dialogue turn sequence instead of silently
+// re-poisoning it. Purely additive/non-destructive: never touches stored
+// data, just how a reload interprets it.
+const LEGACY_COMPRESSED_SHORTHAND_PATTERN = /^\[tone:\s*[\w\s-]+\]/i;
+
 const TRIGGER_PHRASES = [
   'let me make sure i write this down',
   'let me grab my notepad',
@@ -1654,7 +1665,12 @@ class App {
     // as literal in-character dialogue (the exact bug this field was added
     // to fix; see overwrite_turn_content in lib.rs).
     const raw = await this.backendActor.get_history(id);
-    this.history = raw.map((m) => ({ ...m, compressed: m.compressed?.[0] === true }));
+    this.history = raw.map((m) => ({
+      ...m,
+      compressed:
+        m.compressed?.[0] === true ||
+        (m.role === 'assistant' && LEGACY_COMPRESSED_SHORTHAND_PATTERN.test(m.content)),
+    }));
     // Async Janitor: context copy starts as a mirror of display history (which
     // may already carry compressed entries from a prior session's background
     // passes) — the two only diverge going forward, once new turns land and
