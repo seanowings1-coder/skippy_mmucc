@@ -3350,8 +3350,20 @@ class App {
       }))
       .filter((seg) => seg.text.length > 0);
 
+    // Unlike `segments` above, this fallback had no empty-text guard —
+    // confirmed live 2026-07-11: a reply that stripped down to nothing
+    // (e.g. content that's entirely formatting/code once stripMarkdown runs)
+    // still reached here, sending `/speak?text=` with an empty parameter,
+    // which the proxy correctly 400s, surfacing as a "media error" fallback
+    // to Economy for a reply that never had anything to actually say.
+    const fallbackText = stripMarkdown(text);
+    if (segments.length === 0 && !fallbackText) {
+      if (onComplete) onComplete();
+      return;
+    }
+
     this.#playPremiumSegments(
-      segments.length > 0 ? segments : [{ text: stripMarkdown(text), voice: 'conversational' }],
+      segments.length > 0 ? segments : [{ text: fallbackText, voice: 'conversational' }],
       0,
       onComplete,
     );
