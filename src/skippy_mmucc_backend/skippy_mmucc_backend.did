@@ -24,6 +24,7 @@ type Message = record {
     role : text;
     content : text;
     timestamp : nat64;
+    compressed : opt bool;
 };
 
 type PersonaProfile = record {

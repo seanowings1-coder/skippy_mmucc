@@ -1646,7 +1646,15 @@ class App {
   #switchWorkspace = async (id) => {
     this.activeWorkspaceId = id;
     this.pendingWebSearchQuery = null;
-    this.history = await this.backendActor.get_history(id);
+    // get_history's `compressed` field is `opt bool` — Candid decodes that as
+    // `[]`/`[true]` in JS, not a plain boolean. Unwrap it here so a turn the
+    // Async Janitor compressed in a *previous* session is still correctly
+    // flagged after reload — without this, it comes back indistinguishable
+    // from a real reply and both gets rendered on screen and fed to the LLM
+    // as literal in-character dialogue (the exact bug this field was added
+    // to fix; see overwrite_turn_content in lib.rs).
+    const raw = await this.backendActor.get_history(id);
+    this.history = raw.map((m) => ({ ...m, compressed: m.compressed?.[0] === true }));
     // Async Janitor: context copy starts as a mirror of display history (which
     // may already carry compressed entries from a prior session's background
     // passes) — the two only diverge going forward, once new turns land and
@@ -4159,7 +4167,11 @@ class App {
                 (msg) => html`
                   <div class="transcript-message ${msg.role}">
                     <strong>${msg.role === 'user' ? 'You' : 'Skippy'}:</strong>
-                    ${msg.role === 'assistant' ? renderSkippyMessage(msg.content) : html`<span>${msg.content}</span>`}
+                    ${msg.compressed
+                      ? html`<span class="status" style="font-style:italic;">(earlier reply, condensed for memory — original wording not retained)</span>`
+                      : msg.role === 'assistant'
+                        ? renderSkippyMessage(msg.content)
+                        : html`<span>${msg.content}</span>`}
                   </div>
                 `,
               )}

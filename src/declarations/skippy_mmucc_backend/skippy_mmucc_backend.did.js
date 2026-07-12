@@ -8,6 +8,7 @@ export const idlFactory = ({ IDL }) => {
   const Message = IDL.Record({
     'content' : IDL.Text,
     'role' : IDL.Text,
+    'compressed' : IDL.Opt(IDL.Bool),
     'timestamp' : IDL.Nat64,
   });
   const DocumentSection = IDL.Record({

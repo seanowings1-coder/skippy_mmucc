@@ -51,6 +51,7 @@ export interface EvolutionProfile {
 export interface Message {
   'content' : string,
   'role' : string,
+  'compressed' : [] | [boolean],
   'timestamp' : bigint,
 }
 export interface NewChunk {

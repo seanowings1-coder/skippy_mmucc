@@ -130,6 +130,15 @@ pub struct Message {
     pub role: String,
     pub content: String,
     pub timestamp: u64,
+    /// Set by overwrite_turn_content once the Async Janitor's background
+    /// compression pass replaces this turn's content with a dense shorthand
+    /// summary. Must survive reload (unlike the frontend-only flag this
+    /// replaced) so the frontend can keep routing this turn into a system
+    /// note instead of the normal role sequence after get_history — without
+    /// this marker, a compressed turn coming back from a fresh login/reload
+    /// is indistinguishable from a real reply and gets fed to the LLM (and
+    /// rendered on screen) as literal in-character dialogue.
+    pub compressed: Option<bool>,
 }
 
 #[derive(CandidType, Deserialize, Clone, Debug, Default)]
@@ -1093,8 +1102,8 @@ fn append_turn(workspace_id: u64, user_text: String, assistant_text: String) -> 
     HISTORY.with(|h| {
         let mut h = h.borrow_mut();
         let mut history = h.get(&key).unwrap_or_default();
-        history.messages.push(Message { role: "user".to_string(), content: user_text, timestamp: now });
-        history.messages.push(Message { role: "assistant".to_string(), content: assistant_text, timestamp: now });
+        history.messages.push(Message { role: "user".to_string(), content: user_text, timestamp: now, compressed: None });
+        history.messages.push(Message { role: "assistant".to_string(), content: assistant_text, timestamp: now, compressed: None });
         if history.messages.len() > MAX_HISTORY_MESSAGES {
             let excess = history.messages.len() - MAX_HISTORY_MESSAGES;
             history.messages.drain(0..excess);
@@ -1125,6 +1134,7 @@ fn overwrite_turn_content(workspace_id: u64, timestamp: u64, compressed_text: St
                 .find(|m| m.role == "assistant" && m.timestamp == timestamp)
             {
                 msg.content = compressed_text;
+                msg.compressed = Some(true);
                 h.insert(key, history);
             }
         }
