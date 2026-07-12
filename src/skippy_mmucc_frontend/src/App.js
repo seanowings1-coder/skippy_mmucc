@@ -949,6 +949,10 @@ class App {
   showFuelModal = false;
   lastSpeakEndTime = 0; // timestamp when TTS last finished — used to discard
                         // recognition results that arrived during the cooldown window
+  // Cooldown window in effect for the reply that just finished — set
+  // alongside lastSpeakEndTime by #computeSpeakCooldownMs below. Starts at
+  // the static base and is recomputed per-reply based on length.
+  speakCooldownMs = 1200;
 
   constructor() {
     if (SpeechRecognitionImpl) {
@@ -1107,7 +1111,7 @@ class App {
       this.stopVoiceRecognition = await startRecognition((result) => {
         // Ignore scores while Skippy is speaking or within cooldown after TTS ends —
         // the mic picks up his own audio and he scores as Commander every time.
-        if (this.isSpeaking || Date.now() - this.lastSpeakEndTime < App.#SPEAK_COOLDOWN_MS) return;
+        if (this.isSpeaking || Date.now() - this.lastSpeakEndTime < this.speakCooldownMs) return;
         this.lastSpeakerScore = result;
         // A confident Commander voice match is strong evidence any active
         // Tactical Roster profile (Pillar 16) is stale — e.g. someone said
@@ -1350,6 +1354,10 @@ class App {
       if (myGen !== this.#speechGen) return;
       this.isSpeaking = false;
       this.lastSpeakEndTime = Date.now();
+      // A full generated song is always long — use the max cooldown outright
+      // rather than needing a text length (this plays a data: URI, not TTS
+      // text). See #computeSpeakCooldownMs for why length scales this at all.
+      this.speakCooldownMs = App.#computeSpeakCooldownMs(Infinity);
       this.#render();
       if (this._restartRecognitionAfterTTS && this.state !== 'idle' && !this.stopRequested && !this.recognitionActive) {
         this._restartRecognitionAfterTTS = false;
@@ -1952,6 +1960,21 @@ class App {
   // that were queued during playback but arrive just after isSpeaking flips false.
   static #SPEAK_COOLDOWN_MS = 1200; // ms to ignore mic after TTS ends
 
+  // 2026-07-11: a flat 1200ms window let some LONGER replies' audio tail
+  // slip past it — confirmed live, a "user" turn showed up that was
+  // word-for-word a mis-transcription of Skippy's own immediately-prior
+  // reply ("pure intellect... vast consciousness" straight from his own
+  // last line). onended already fires at the real moment audio playback
+  // stops (see #playPremiumSegments), so this isn't a JS timing bug — it's
+  // that a longer utterance leaves more audio for room echo/mic pickup and
+  // SpeechRecognition's own finalization lag to still be settling once
+  // playback ends. Scales the window with reply length instead of just
+  // raising the flat number, so short check-ins still re-arm the mic
+  // quickly and only genuinely long replies get the wider buffer.
+  static #computeSpeakCooldownMs(textLength) {
+    return Math.min(App.#SPEAK_COOLDOWN_MS + Math.round(textLength * 3), 3200);
+  }
+
   // The double-dong/audio-focus glitch that af78bfe's restart deferral (below,
   // in onend) fixes is Android-specific — deferring unconditionally on every
   // platform meant that if recognition happened to naturally end mid-reply
@@ -1974,7 +1997,7 @@ class App {
     // (karaoke offer or web-search permission) — the user's "yes"/"go" is
     // intentional, not Skippy's own voice looping back.
     const awaitingConfirmation = this.pendingKaraokeOffer || !!this.pendingWebSearchQuery || !!this.pendingRosterStep;
-    if (!awaitingConfirmation && Date.now() - this.lastSpeakEndTime < App.#SPEAK_COOLDOWN_MS) return;
+    if (!awaitingConfirmation && Date.now() - this.lastSpeakEndTime < this.speakCooldownMs) return;
     if (this.state === 'listening') {
       const lowerChunk = chunk.toLowerCase();
       const matchedPhrase = TRIGGER_PHRASES.find((phrase) =>
@@ -3255,6 +3278,9 @@ class App {
   #playPremiumSegments = (segments, index, onComplete = null) => {
     if (index >= segments.length) return;
     const { text: segText, voice } = segments[index];
+    // Whole reply's length (not just this segment) — used to scale the
+    // post-speech mic cooldown, see #computeSpeakCooldownMs.
+    const totalReplyLength = segments.reduce((sum, s) => sum + s.text.length, 0);
 
     // Captured once per segment-playback attempt — see #speechGen's
     // declaration for why every async callback below re-checks this before
@@ -3314,6 +3340,7 @@ class App {
       } else {
         this.isSpeaking = false;
         this.lastSpeakEndTime = Date.now();
+        this.speakCooldownMs = App.#computeSpeakCooldownMs(totalReplyLength);
         this.#render();
         // If recognition died while TTS had audio focus, restart it now.
         if (this._restartRecognitionAfterTTS && this.state !== 'idle' && !this.stopRequested && !this.recognitionActive) {
@@ -3336,6 +3363,7 @@ class App {
         console.warn('[Skippy] premium audio errored after playback started — ignoring fallback');
         this.isSpeaking = false;
         this.lastSpeakEndTime = Date.now();
+        this.speakCooldownMs = App.#computeSpeakCooldownMs(totalReplyLength);
         this.#render();
         return;
       }
@@ -3400,6 +3428,7 @@ class App {
       utterance.onend = () => {
         this.isSpeaking = false;
         this.lastSpeakEndTime = Date.now();
+        this.speakCooldownMs = App.#computeSpeakCooldownMs(text.length);
         this.#render();
         // If recognition died while TTS had audio focus, restart it now.
         // Mirrors the Premium audio path below — without this, Economy-voiced
