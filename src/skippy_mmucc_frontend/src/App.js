@@ -1958,21 +1958,19 @@ class App {
 
   // How long after TTS ends to ignore mic input — catches recognition results
   // that were queued during playback but arrive just after isSpeaking flips false.
-  static #SPEAK_COOLDOWN_MS = 1200; // ms to ignore mic after TTS ends
+  // 2026-07-11: raised 1200 -> 2500. The original length-scaling fix (see
+  // #computeSpeakCooldownMs) assumed only LONG replies needed more buffer —
+  // disproven live: a SHORT reply ("Understood. I will behave.", ~25 chars)
+  // still got self-echoed back almost immediately as a bogus "user" turn,
+  // and the length formula barely raises the window for that short a text
+  // (1200 + ~75ms). The base itself was too tight, not just the scaling —
+  // room echo/recognition finalization lag apparently isn't proportional to
+  // utterance length the way assumed. Length-scaling stays layered on top
+  // for genuinely long replies, which still deserve extra margin.
+  static #SPEAK_COOLDOWN_MS = 2500; // ms to ignore mic after TTS ends
 
-  // 2026-07-11: a flat 1200ms window let some LONGER replies' audio tail
-  // slip past it — confirmed live, a "user" turn showed up that was
-  // word-for-word a mis-transcription of Skippy's own immediately-prior
-  // reply ("pure intellect... vast consciousness" straight from his own
-  // last line). onended already fires at the real moment audio playback
-  // stops (see #playPremiumSegments), so this isn't a JS timing bug — it's
-  // that a longer utterance leaves more audio for room echo/mic pickup and
-  // SpeechRecognition's own finalization lag to still be settling once
-  // playback ends. Scales the window with reply length instead of just
-  // raising the flat number, so short check-ins still re-arm the mic
-  // quickly and only genuinely long replies get the wider buffer.
   static #computeSpeakCooldownMs(textLength) {
-    return Math.min(App.#SPEAK_COOLDOWN_MS + Math.round(textLength * 3), 3200);
+    return Math.min(App.#SPEAK_COOLDOWN_MS + Math.round(textLength * 3), 4500);
   }
 
   // The double-dong/audio-focus glitch that af78bfe's restart deferral (below,
