@@ -645,6 +645,22 @@ function stripMarkdown(text) {
     .trim();
 }
 
+// Fraction of `chunk`'s words that also appear in `spokenText` — used to
+// tell a genuine new user utterance apart from SpeechRecognition finalizing
+// a mis-transcription of Skippy's own just-played audio. Both confirmed-live
+// self-echo incidents were near-verbatim word overlap with his prior reply
+// ("understood I will behave" vs. "Understood. I will behave."; "pure
+// intellect... vast consciousness" lifted straight from his own line), so
+// this targets the actual mechanism instead of guessing a fixed time window.
+function wordOverlapRatio(chunk, spokenText) {
+  const normalize = (s) => s.toLowerCase().replace(/[^a-z0-9\s]/g, '').split(/\s+/).filter(Boolean);
+  const chunkWords = normalize(chunk);
+  if (chunkWords.length === 0) return 0;
+  const spokenWords = new Set(normalize(spokenText));
+  const overlap = chunkWords.filter((w) => spokenWords.has(w)).length;
+  return overlap / chunkWords.length;
+}
+
 // Dual-Voice routing ("Marco Hietala Protocol") — splits a reply on 🎶...🎶
 // markers (the proxy's Lyric Generator instruction wraps parody verses this
 // way) into ordered segments, each tagged for the conversational or singing
@@ -951,8 +967,24 @@ class App {
                         // recognition results that arrived during the cooldown window
   // Cooldown window in effect for the reply that just finished — set
   // alongside lastSpeakEndTime by #computeSpeakCooldownMs below. Starts at
-  // the static base and is recomputed per-reply based on length.
+  // the static base and is recomputed per-reply based on length. Only used
+  // for the background speaker-recognition score gate now (see
+  // #startSpeakerRecognition) — #handleFinalChunk uses content matching
+  // instead, see lastSpokenText below.
   speakCooldownMs = 1200;
+  // The text of Skippy's last reply — used by #isLikelySelfEcho to tell a
+  // genuine new user utterance apart from the mic re-hearing his own words,
+  // instead of blindly blocking all input for a fixed window after he stops
+  // talking (that approach fixed self-hearing but broke natural
+  // conversation continuation — a real user follow-up said immediately
+  // after Skippy finishes got silently dropped too, confirmed live 2026-07-11).
+  lastSpokenText = '';
+  // Debounce/merge buffer for #handleFinalChunk — accumulates final chunks
+  // that arrive in quick succession (Chrome ending/restarting recognition
+  // mid-sentence) before dispatching as one utterance. See the dispatch
+  // site's comment for why this exists.
+  #pendingUtterance = '';
+  #pendingUtteranceTimer = null;
 
   constructor() {
     if (SpeechRecognitionImpl) {
@@ -1358,6 +1390,10 @@ class App {
       // rather than needing a text length (this plays a data: URI, not TTS
       // text). See #computeSpeakCooldownMs for why length scales this at all.
       this.speakCooldownMs = App.#computeSpeakCooldownMs(Infinity);
+      // No transcript to compare against (data: URI, not TTS text) —
+      // #isLikelySelfEcho just won't match anything, the short flat gap
+      // still covers the instant-overlap case.
+      this.lastSpokenText = '';
       this.#render();
       if (this._restartRecognitionAfterTTS && this.state !== 'idle' && !this.stopRequested && !this.recognitionActive) {
         this._restartRecognitionAfterTTS = false;
@@ -1956,21 +1992,45 @@ class App {
     }
   }
 
-  // How long after TTS ends to ignore mic input — catches recognition results
-  // that were queued during playback but arrive just after isSpeaking flips false.
-  // 2026-07-11: raised 1200 -> 2500. The original length-scaling fix (see
-  // #computeSpeakCooldownMs) assumed only LONG replies needed more buffer —
-  // disproven live: a SHORT reply ("Understood. I will behave.", ~25 chars)
-  // still got self-echoed back almost immediately as a bogus "user" turn,
-  // and the length formula barely raises the window for that short a text
-  // (1200 + ~75ms). The base itself was too tight, not just the scaling —
-  // room echo/recognition finalization lag apparently isn't proportional to
-  // utterance length the way assumed. Length-scaling stays layered on top
-  // for genuinely long replies, which still deserve extra margin.
+  // How long after TTS ends to ignore mic input for the BACKGROUND SPEAKER-
+  // RECOGNITION SCORE ONLY (#startSpeakerRecognition below) — his own voice
+  // scoring as a false-positive match. This does NOT gate whether a message
+  // reaches Skippy as a new turn anymore; see #isLikelySelfEcho for that.
+  // 2026-07-11: raising this to fix a self-hearing bug (flat 1200ms let some
+  // replies' audio tail slip past it) turned out to also block genuine
+  // immediate user follow-ups from starting a new turn at all — confirmed
+  // live, natural conversation continuation broke, requiring the user to
+  // re-say a trigger phrase. Time-based blocking and "is this really his own
+  // voice" are different questions; only the latter still needs a window
+  // this wide, since voice-timbre persistence isn't tied to word content.
   static #SPEAK_COOLDOWN_MS = 2500; // ms to ignore mic after TTS ends
 
   static #computeSpeakCooldownMs(textLength) {
     return Math.min(App.#SPEAK_COOLDOWN_MS + Math.round(textLength * 3), 4500);
+  }
+
+  // Short, fixed buffer for #handleFinalChunk's conversational gate — just
+  // covers the literal instant hardware/audio-buffer overlap right at
+  // onended. #isLikelySelfEcho (content-based) does the real work of
+  // catching a delayed self-transcription without blocking real speech.
+  static #FINAL_CHUNK_MIN_GAP_MS = 500;
+
+  // How long #handleFinalChunk waits after a final chunk before dispatching
+  // it, in case Chrome's recognition restart split one utterance into two
+  // "final" results — merges anything that arrives within this window
+  // instead of sending the first fragment as a complete question. User's
+  // explicit call 2026-07-11: prefer a small fixed delay on every reply
+  // over a heuristic that guesses wrong sometimes in either direction.
+  static #UTTERANCE_MERGE_DELAY_MS = 700;
+
+  // A final chunk counts as Skippy's own audio getting mis-transcribed, not
+  // a real new user turn, if it heavily overlaps his last reply's words and
+  // arrived reasonably soon after he stopped talking. See lastSpokenText's
+  // declaration for the two confirmed-live incidents this targets.
+  #isLikelySelfEcho(chunk) {
+    if (!this.lastSpokenText) return false;
+    if (Date.now() - this.lastSpeakEndTime > 8000) return false; // stale, don't compare far-apart text
+    return wordOverlapRatio(chunk, this.lastSpokenText) >= 0.6;
   }
 
   // The double-dong/audio-focus glitch that af78bfe's restart deferral (below,
@@ -1988,14 +2048,23 @@ class App {
     // triggering a new reply. Barge-in is unaffected (it fires on interim
     // results in onresult, not here).
     if (this.isSpeaking) return;
-    // Also discard results that arrived during the cooldown window after TTS
-    // ended — these are the tail of Skippy's own audio being finalized by the
-    // recognition engine a split-second after isSpeaking flipped to false.
-    // Skip the cooldown when waiting for a deliberate one-word confirmation
+    // Also discard results that are either (a) right at the instant audio
+    // stopped (hardware buffer overlap) or (b) heavily overlap what Skippy
+    // just said (his own audio finalized late by the recognition engine) —
+    // see #isLikelySelfEcho. Content-matching instead of a long flat timer
+    // means a genuine new user follow-up right after he stops talking still
+    // goes through immediately, instead of requiring a fresh trigger phrase
+    // (confirmed live 2026-07-11: a long flat cooldown broke exactly that).
+    // Skip both checks when waiting for a deliberate one-word confirmation
     // (karaoke offer or web-search permission) — the user's "yes"/"go" is
     // intentional, not Skippy's own voice looping back.
     const awaitingConfirmation = this.pendingKaraokeOffer || !!this.pendingWebSearchQuery || !!this.pendingRosterStep;
-    if (!awaitingConfirmation && Date.now() - this.lastSpeakEndTime < this.speakCooldownMs) return;
+    if (
+      !awaitingConfirmation &&
+      (Date.now() - this.lastSpeakEndTime < App.#FINAL_CHUNK_MIN_GAP_MS || this.#isLikelySelfEcho(chunk))
+    ) {
+      return;
+    }
     if (this.state === 'listening') {
       const lowerChunk = chunk.toLowerCase();
       const matchedPhrase = TRIGGER_PHRASES.find((phrase) =>
@@ -2008,10 +2077,26 @@ class App {
         this.noteBuffer = remainder;
         this.state = 'dictating';
       } else if (chunk.trim()) {
-        // Not a note-taking trigger phrase — treat it as a direct question/
-        // remark for Skippy and dispatch it to the proxy right away.
-        console.log('[Skippy] dispatching final transcript to proxy:', chunk);
-        this.#askSkippy(chunk.trim());
+        // Not a note-taking trigger phrase — buffer it briefly instead of
+        // dispatching immediately. Chrome's SpeechRecognition can end and
+        // restart on its own mid-utterance even with continuous: true
+        // (documented Chrome quirk, see #IS_ANDROID's restart-deferral
+        // comment) — a genuine long sentence can get split into two "final"
+        // results, and dispatching the first fragment right away meant
+        // Skippy replied to half a sentence, confirmed live 2026-07-11.
+        // Waiting a short beat to see if more speech follows and merging it
+        // in fixes that at the cost of a small fixed delay on every reply.
+        this.#pendingUtterance = this.#pendingUtterance
+          ? `${this.#pendingUtterance} ${chunk.trim()}`
+          : chunk.trim();
+        clearTimeout(this.#pendingUtteranceTimer);
+        this.#pendingUtteranceTimer = setTimeout(() => {
+          const finalText = this.#pendingUtterance;
+          this.#pendingUtterance = '';
+          this.#pendingUtteranceTimer = null;
+          console.log('[Skippy] dispatching final transcript to proxy:', finalText);
+          this.#askSkippy(finalText);
+        }, App.#UTTERANCE_MERGE_DELAY_MS);
       }
     } else if (this.state === 'dictating') {
       this.noteBuffer = `${this.noteBuffer} ${chunk}`.trim();
@@ -2060,6 +2145,11 @@ class App {
     this.state = 'idle';
     this.noteBuffer = '';
     this.liveTranscript = '';
+    // Cancel any merge-buffered utterance still waiting to dispatch — the
+    // user explicitly stopped listening, so it shouldn't fire after the fact.
+    clearTimeout(this.#pendingUtteranceTimer);
+    this.#pendingUtteranceTimer = null;
+    this.#pendingUtterance = '';
     this.recognition.stop();
     this.#render();
   };
@@ -3279,6 +3369,7 @@ class App {
     // Whole reply's length (not just this segment) — used to scale the
     // post-speech mic cooldown, see #computeSpeakCooldownMs.
     const totalReplyLength = segments.reduce((sum, s) => sum + s.text.length, 0);
+    const totalReplyText = segments.map((s) => s.text).join(' ');
 
     // Captured once per segment-playback attempt — see #speechGen's
     // declaration for why every async callback below re-checks this before
@@ -3339,6 +3430,7 @@ class App {
         this.isSpeaking = false;
         this.lastSpeakEndTime = Date.now();
         this.speakCooldownMs = App.#computeSpeakCooldownMs(totalReplyLength);
+        this.lastSpokenText = totalReplyText;
         this.#render();
         // If recognition died while TTS had audio focus, restart it now.
         if (this._restartRecognitionAfterTTS && this.state !== 'idle' && !this.stopRequested && !this.recognitionActive) {
@@ -3362,6 +3454,7 @@ class App {
         this.isSpeaking = false;
         this.lastSpeakEndTime = Date.now();
         this.speakCooldownMs = App.#computeSpeakCooldownMs(totalReplyLength);
+        this.lastSpokenText = totalReplyText;
         this.#render();
         return;
       }
@@ -3427,6 +3520,7 @@ class App {
         this.isSpeaking = false;
         this.lastSpeakEndTime = Date.now();
         this.speakCooldownMs = App.#computeSpeakCooldownMs(text.length);
+        this.lastSpokenText = text;
         this.#render();
         // If recognition died while TTS had audio focus, restart it now.
         // Mirrors the Premium audio path below — without this, Economy-voiced
