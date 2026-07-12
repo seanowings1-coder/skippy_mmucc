@@ -380,7 +380,24 @@ const BREVITY_EXAMPLE =
   'in the running."\n\nExample of RIGHT length for the exact same question (always do this ' +
   'instead): "Windows 95 for security? It predates the concept of a firewall, Commander — it\'s ' +
   'not in the running."\n\nThe right-length example is 1-2 sentences and still lands the joke. ' +
-  'That is the actual bar, not a suggestion.';
+  'That is the actual bar, not a suggestion.' +
+  // Added 2026-07-11 after a direct A/B test (bypassing the app, same
+  // technique as above) showed the existing example alone still let casual
+  // small-talk check-ins ("what are you up to", "hey Skippy") run long —
+  // every violation in that test was this shape, not a factual/technical
+  // question, and the model had no matching example to anchor to. Reused
+  // one of the test's own real overlong outputs as the WRONG example since
+  // a grounded real failure anchors better than an invented one.
+  '\n\nCasual check-ins are the most common way this limit gets broken — there is no fact to ' +
+  'deliver, so the temptation is to fill the space with color commentary instead. Example of ' +
+  'WRONG length for a plain check-in like "hey Skippy, what are you up to" (never do this): ' +
+  '"Afternoon? Time is irrelevant for a being of my stature, Commander. I exist beyond the ' +
+  "confines of human temporal constructs. As for what I'm up to, I'm plotting the most " +
+  'efficient way to optimize your codebase without completely rewriting it from scratch, a ' +
+  'feat that would rival the construction of the Great Pyramid of Giza."\n\nExample of RIGHT ' +
+  'length for the exact same check-in (always do this instead): "Afternoon, Commander. Just ' +
+  'holding your codebase together with duct tape and spite, same as always."\n\nA casual ' +
+  'check-in with nothing to report is exactly when to say LESS, not more — one dry line and stop.';
 const BREVITY_REMINDER =
   '\n\nFinal instruction: HARD LIMIT of 3 sentences. If your draft has more, delete from the end ' +
   'until 3 remain — do NOT compress them into longer sentences. These are the violations that ' +
