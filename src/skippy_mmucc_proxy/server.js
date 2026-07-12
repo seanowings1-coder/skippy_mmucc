@@ -134,7 +134,18 @@ const BRAIN_GENERATION_PARAMS = {
   // exact contaminated conversation history that produced a real cutoff —
   // 100 truncated mid-sentence, 150 completed cleanly every time (3/3 runs).
   // Restored to the value this comment already described.
-  everyday: { temperature: 0.72, repetition_penalty: 1.12, max_tokens: 150 },
+  // Raised 150 -> 400 on 2026-07-11: 150 is a hard ceiling shared between
+  // prose AND any code the user asked for — a real live reply asking for a
+  // VB6 snippet got cut off mid-code, leaving an unclosed ``` fence that
+  // broke both the on-screen code-block rendering and TTS's markdown
+  // stripping (both require a matching closing fence; unclosed, the raw
+  // code fell through unstripped and would have been read aloud verbatim).
+  // A/B tested directly against DeepInfra with real code-request prompts:
+  // 400 and 600 both completed every sample with finish_reason "stop" (the
+  // model stopped on its own, well under budget) and no extra rambling —
+  // the brevity prompt controls prose length independently of this ceiling,
+  // this only affects how much room a legitimate code block gets to finish.
+  everyday: { temperature: 0.72, repetition_penalty: 1.12, max_tokens: 400 },
   heavy_hitter: { max_tokens: 2048 }, // prevent OpenRouter reserving full context (65k) upfront
   tactical: {},
   focus: {},

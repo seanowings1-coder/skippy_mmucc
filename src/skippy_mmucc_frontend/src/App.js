@@ -574,8 +574,19 @@ function proxyWsUrl(path) {
 // Renders a Skippy reply with fenced code blocks as copyable <pre> elements.
 // Regular text gets markdown stripped (bold/italic/inline-code); code blocks
 // get a language label and a Copy button that flips to "Copied!" for 2s.
+// Defensive backstop for a reply whose code fence never closes (e.g. the
+// model got cut off mid-code by the brain's max_tokens ceiling). Both
+// renderSkippyMessage (display) and stripMarkdown (TTS prep) below require a
+// matching closing ``` to recognize a code block at all — without this, an
+// unclosed fence fell through unstripped: garbled raw text on screen, and
+// worse, the entire raw code block sent to TTS and read aloud verbatim.
+function closeUnterminatedCodeFence(text) {
+  const fenceCount = (text.match(/```/g) || []).length;
+  return fenceCount % 2 !== 0 ? `${text}\n\`\`\`` : text;
+}
+
 function renderSkippyMessage(content) {
-  const parts = content.split(/(```[\s\S]*?```)/g);
+  const parts = closeUnterminatedCodeFence(content).split(/(```[\s\S]*?```)/g);
   return parts.map((part) => {
     const codeMatch = part.match(/^```(\w*)\n?([\s\S]*?)\n?```$/);
     if (codeMatch) {
@@ -616,7 +627,7 @@ const SILENT_AUDIO_DATA_URI =
 const SINGING_VOICE_GAIN = 1.8;
 
 function stripMarkdown(text) {
-  return text
+  return closeUnterminatedCodeFence(text)
     .replace(/```[\s\S]*?```/g, '')
     .replace(/\*\*(.*?)\*\*/g, '$1')
     // Single-asterisk spans are virtually always roleplay stage directions/
