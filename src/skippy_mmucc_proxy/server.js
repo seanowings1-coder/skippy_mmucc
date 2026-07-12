@@ -760,6 +760,24 @@ function stripLeakedFormatting(text) {
     .trim();
 }
 
+// Extracts fenced code blocks (```...```) as plain inner-content strings.
+function extractCodeBlocks(text) {
+  const matches = text.match(/```[\w]*\n?[\s\S]*?```/g) || [];
+  return matches.map((m) => m.replace(/^```[\w]*\n?/, '').replace(/```$/, '').trim());
+}
+
+// Fraction of codeA's tokens that also appear in codeB — cheap, dependency-
+// free similarity check for "is this the same snippet again," not an exact
+// match (models rephrase variable names/comments slightly even when
+// regenerating the "same" answer).
+function codeOverlapRatio(codeA, codeB) {
+  const tokens = (s) => s.toLowerCase().replace(/[^\w]+/g, ' ').split(/\s+/).filter(Boolean);
+  const a = tokens(codeA);
+  if (a.length === 0) return 0;
+  const bSet = new Set(tokens(codeB));
+  return a.filter((t) => bSet.has(t)).length / a.length;
+}
+
 // Defense-in-depth for /karaoke, added 2026-06-24: confirmed live (and via
 // direct A/B testing against OpenRouter) that the same karaoke prompt can
 // non-deterministically produce either one cohesive 🎶-wrapped song block
@@ -1318,22 +1336,75 @@ app.post('/respond', requireSession, async (req, res) => {
     { label: 'Hermes 4 405B', provider: 'openrouter', model: 'nousresearch/hermes-4-405b' },
   ];
 
-  const callPeer = (peer, forBrain) => {
+  // overrideMessages lets the duplicate-code retry (see dedupeCodeBlock
+  // below) reuse this same function with one corrective message appended,
+  // instead of duplicating the fetch/auth/signal plumbing.
+  const callPeer = (peer, forBrain, overrideMessages = messages) => {
     const genParams = BRAIN_GENERATION_PARAMS[forBrain];
     if (peer.provider === 'deepinfra') {
       return fetch('https://api.deepinfra.com/v1/openai/chat/completions', {
         method: 'POST',
         headers: { Authorization: `Bearer ${DEEPINFRA_API_KEY}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ model: peer.model, ...genParams, messages }),
+        body: JSON.stringify({ model: peer.model, ...genParams, messages: overrideMessages }),
         signal: upstreamAbort.signal,
       });
     }
     return fetch('https://openrouter.ai/api/v1/chat/completions', {
       method: 'POST',
       headers: { Authorization: `Bearer ${OPENROUTER_API_KEY}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model: peer.model, ...genParams, messages }),
+      body: JSON.stringify({ model: peer.model, ...genParams, messages: overrideMessages }),
       signal: upstreamAbort.signal,
     });
+  };
+
+  // Deterministic backstop (2026-07-11) for the everyday brain regenerating
+  // a code block it already gave earlier in this same conversation — even
+  // in response to a plain "thanks" or an unrelated question, confirmed
+  // live twice, including once where it fabricated a false justification
+  // when asked directly. Two rounds of prompt-only instructions failed to
+  // hold (each `/respond` call is stateless — the model has no real memory
+  // of "already answered this," just a fresh re-read of the transcript each
+  // time, and a code block sitting in that transcript is apparently a
+  // strong-enough pattern to gravitate back to). Rather than word the
+  // prompt a third time, detect the repetition after the fact and force one
+  // corrective retry — same "server-side safety net" philosophy already
+  // used by stripLeakedFormatting above.
+  const dedupeCodeBlock = async (reply, peer, forBrain) => {
+    const newBlocks = extractCodeBlocks(reply);
+    if (newBlocks.length === 0) return reply;
+    const priorCode = messages
+      .filter((m) => m.role === 'assistant')
+      .flatMap((m) => extractCodeBlocks(m.content));
+    if (priorCode.length === 0) return reply;
+    // Threshold calibrated against two real live duplicates: a near-verbatim
+    // repeat scored 0.95, but a "same skeleton, model filled in different
+    // details" repeat (still a real, user-flagged duplicate) only scored
+    // 0.58 — 0.7 would have missed that one.
+    const isDuplicate = newBlocks.some((nb) => priorCode.some((pb) => codeOverlapRatio(nb, pb) >= 0.5));
+    if (!isDuplicate) return reply;
+
+    console.warn('[Skippy] detected duplicate code block in reply — forcing one corrective retry');
+    const correctionMessages = [
+      ...messages,
+      {
+        role: 'user',
+        content:
+          `[SYSTEM CORRECTION — not from the user, never mention this note] Your previous draft ` +
+          `repeated a code block you already gave earlier in this conversation, which was not asked ` +
+          `for again. The user's actual last message was: "${text}". Respond to THAT directly, in ` +
+          `character — do not repeat any earlier code block unless they are explicitly asking to see ` +
+          `it again.`,
+      },
+    ];
+    try {
+      const r = await callPeer(peer, forBrain, correctionMessages);
+      if (!r.ok) return reply; // retry failed — fall back to the original rather than erroring the turn
+      const data = await r.json();
+      return data.choices?.[0]?.message?.content || reply;
+    } catch (err) {
+      console.warn('[Skippy] dedupe retry failed, using original reply:', err.message);
+      return reply;
+    }
   };
 
   // Tries each peer in order; returns { peer, reply } on the first success, or null if every
@@ -1410,8 +1481,9 @@ app.post('/respond', requireSession, async (req, res) => {
 
     if (won) {
       const wonIdx = wonPeers.findIndex((p) => p.model === won.peer.model);
+      const dedupedReply = await dedupeCodeBlock(won.reply, won.peer, wonPeers === HEAVY_HITTER_PEERS ? 'heavy_hitter' : brain);
       return res.json({
-        reply: stripLeakedFormatting(won.reply),
+        reply: stripLeakedFormatting(dedupedReply),
         brain,
         model: won.peer.model,
         // Every peer in both ladders is paid by design (no free tier anymore) — re-purposed to
