@@ -2278,9 +2278,25 @@ class App {
         // Skippy replied to half a sentence, confirmed live 2026-07-11.
         // Waiting a short beat to see if more speech follows and merging it
         // in fixes that at the cost of a small fixed delay on every reply.
-        this.#pendingUtterance = this.#pendingUtterance
-          ? `${this.#pendingUtterance} ${chunk.trim()}`
-          : chunk.trim();
+        const trimmedChunk = chunk.trim();
+        const pendingLower = this.#pendingUtterance.toLowerCase();
+        const chunkLower = trimmedChunk.toLowerCase();
+        if (this.#pendingUtterance && chunkLower.startsWith(pendingLower)) {
+          // Mobile Chrome quirk (confirmed live 2026-07-14, snowballing
+          // "so so so doing so doing a..." transcripts): on a flaky mobile
+          // connection, SpeechRecognition periodically re-sends the ENTIRE
+          // accumulated transcript as a new "final" result instead of just
+          // the new words. The new chunk already contains everything we
+          // have, so replace it rather than appending or every word doubles.
+          this.#pendingUtterance = trimmedChunk;
+        } else if (this.#pendingUtterance && pendingLower.startsWith(chunkLower)) {
+          // New chunk is a stale/shorter repeat of what we already have —
+          // ignore it rather than appending a duplicate.
+        } else {
+          this.#pendingUtterance = this.#pendingUtterance
+            ? `${this.#pendingUtterance} ${trimmedChunk}`
+            : trimmedChunk;
+        }
         clearTimeout(this.#pendingUtteranceTimer);
         this.#pendingUtteranceTimer = setTimeout(() => {
           const finalText = this.#pendingUtterance;
