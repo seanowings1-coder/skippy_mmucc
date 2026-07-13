@@ -60,6 +60,17 @@ const ELEVENLABS_MODEL_ID = process.env.ELEVENLABS_MODEL_ID || 'eleven_turbo_v2_
 // below). Not per-Principal like the conversational voiceId — there's one
 // singing voice for the whole app, not one per user.
 const ELEVENLABS_SINGING_VOICE_ID = process.env.ELEVENLABS_SINGING_VOICE_ID;
+// TTS -> Fish Audio migration (2026-07-12, see CLAUDE.md "Planned
+// Migrations"). /speak now calls Fish Audio instead of ElevenLabs — kept
+// ELEVENLABS_* above untouched/unused-by-/speak rather than deleted, per the
+// documented plan ("Old ELEVENLABS_* env vars stay in .env until migration is
+// confirmed live"), so a revert is a one-function change, not a re-derivation.
+const FISH_AUDIO_API_KEY = process.env.FISH_AUDIO_API_KEY;
+const FISH_AUDIO_VOICE_ID = process.env.FISH_AUDIO_VOICE_ID;
+// No separate singing voice from Fish Audio yet (only one voice was cloned
+// so far) — falls back to the conversational voice below, same pattern
+// ELEVENLABS_SINGING_VOICE_ID already used when unset.
+const FISH_AUDIO_SINGING_VOICE_ID = process.env.FISH_AUDIO_SINGING_VOICE_ID;
 
 // Brain Switching (Pillar 3) — 3-tier OpenRouter model matrix, selected by
 // plain string-matching on the transcript in App.js, never a second
@@ -260,7 +271,11 @@ async function requireSession(req, res, next) {
     req.skippySession = {
       principal: sessionInfo.principal,
       name: sessionInfo.name?.[0],
-      voiceId: sessionInfo.voice_id?.[0] || ELEVENLABS_VOICE_ID,
+      // Fish Audio migration (2026-07-12): default is now a Fish reference_id,
+      // not an ElevenLabs voice ID. A Principal with a custom voice_id already
+      // stored via set_persona_profile (still an ElevenLabs ID, pre-migration)
+      // would override this and break — check Profile in Workspace Security.
+      voiceId: sessionInfo.voice_id?.[0] || FISH_AUDIO_VOICE_ID,
     };
     next();
   } catch (err) {
@@ -287,7 +302,9 @@ async function speakRequireSession(req, res, next) {
     req.skippySession = {
       principal: sessionInfo.principal,
       name: sessionInfo.name?.[0],
-      voiceId: sessionInfo.voice_id?.[0] || ELEVENLABS_VOICE_ID,
+      // See the matching comment in requireSession above — Fish Audio voice
+      // ID default now, not ElevenLabs.
+      voiceId: sessionInfo.voice_id?.[0] || FISH_AUDIO_VOICE_ID,
     };
     next();
   } catch (err) {
@@ -2297,9 +2314,9 @@ app.get('/speak', speakRequireSession, async (req, res) => {
   // yet, rather than erroring the whole reply over one missing optional key.
   const wantsSingingVoice = req.query.voice === 'singing';
   const voiceId =
-    (wantsSingingVoice && ELEVENLABS_SINGING_VOICE_ID) || req.skippySession.voiceId;
-  if (!ELEVENLABS_API_KEY || !voiceId) {
-    return res.status(502).json({ error: 'ELEVENLABS_API_KEY or ELEVENLABS_VOICE_ID is not set.' });
+    (wantsSingingVoice && FISH_AUDIO_SINGING_VOICE_ID) || req.skippySession.voiceId;
+  if (!FISH_AUDIO_API_KEY || !voiceId) {
+    return res.status(502).json({ error: 'FISH_AUDIO_API_KEY or FISH_AUDIO_VOICE_ID is not set.' });
   }
 
   // App.js's #detachCurrentAudio (barge-in, or a fresh reply cutting off the
@@ -2338,45 +2355,34 @@ app.get('/speak', speakRequireSession, async (req, res) => {
   req.on('error', () => {});
 
   try {
-    const response = await fetch(
-      `https://api.elevenlabs.io/v1/text-to-speech/${voiceId}/stream`,
-      {
-        method: 'POST',
-        headers: {
-          'xi-api-key': ELEVENLABS_API_KEY,
-          'Content-Type': 'application/json',
-          Accept: 'audio/mpeg',
-        },
-        body: JSON.stringify({
-          text,
-          model_id: ELEVENLABS_MODEL_ID,
-          // Honest limitation, confirmed live 2026-06-23: ElevenLabs' TTS
-          // API synthesizes expressive speech, not pitched musical melody —
-          // there is no real "singing" mode here regardless of voice
-          // cloning, which is why the singing voice came out sounding like
-          // rhythmic spoken word/rap rather than an actual sung performance.
-          // Lower stability pushes the delivery toward more dynamic, varied,
-          // theatrical inflection (closer to "performed" than flat
-          // narration) — a real but partial improvement, not true singing.
-          // Getting actual musical pitch would need a different
-          // vendor/service entirely (e.g. a dedicated AI singing/music
-          // generator), not a setting on this endpoint.
-          ...(wantsSingingVoice ? { voice_settings: { stability: 0.25, similarity_boost: 0.85 } } : {}),
-        }),
-        signal: upstreamAbort.signal,
+    const response = await fetch('https://api.fish.audio/v1/tts', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${FISH_AUDIO_API_KEY}`,
+        'Content-Type': 'application/json',
+        // Selects the synthesis model tier, not the cloned voice (that's
+        // reference_id below) — s2-pro is Fish's expressive/high-fidelity
+        // tier, matching what the voice was cloned under.
+        model: 's2-pro',
       },
-    );
+      body: JSON.stringify({
+        text,
+        reference_id: voiceId,
+        format: 'mp3',
+      }),
+      signal: upstreamAbort.signal,
+    });
 
     if (!response.ok || !response.body) {
       const detail = await response.text();
-      return res.status(502).json({ error: `ElevenLabs error: ${response.status} ${detail}` });
+      return res.status(502).json({ error: `Fish Audio error: ${response.status} ${detail}` });
     }
 
     res.setHeader('Content-Type', 'audio/mpeg');
     Readable.fromWeb(response.body).pipe(res);
   } catch (err) {
     if (err.name === 'AbortError') return; // client already gone, nothing to send back
-    res.status(502).json({ error: `Failed to reach ElevenLabs: ${err.message}` });
+    res.status(502).json({ error: `Failed to reach Fish Audio: ${err.message}` });
   }
 });
 
