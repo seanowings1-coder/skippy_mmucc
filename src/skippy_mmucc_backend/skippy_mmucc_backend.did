@@ -93,6 +93,28 @@ type EvolutionLogEntry = record {
     summary : text;
 };
 
+type GeneratedArtifact = record {
+    id : nat64;
+    owner : principal;
+    kind : text;
+    data : blob;
+    mime : opt text;
+    title : opt text;
+    created_at : nat64;
+    total_size : opt nat64;
+    chunk_count : opt nat32;
+};
+
+type ArtifactMeta = record {
+    id : nat64;
+    kind : text;
+    mime : opt text;
+    title : opt text;
+    created_at : nat64;
+    total_size : opt nat64;
+    chunk_count : opt nat32;
+};
+
 service : (principal, principal, principal) -> {
     "greet": (text) -> (text) query;
 
@@ -147,4 +169,15 @@ service : (principal, principal, principal) -> {
     // get_pump_config: returns (frontend_canister_id, pump_threshold, pump_amount, min_backend_reserve) in cycles.
     "trigger_fuel_pump": () -> (text);
     "get_pump_config": () -> (principal, nat, nat, nat) query;
+
+    // Pillar 22 (Generated Artifacts) — durable per-owner storage for
+    // anything Skippy creates (karaoke audio, workspace exports, Project
+    // Briefs), beyond the one-off browser download those features already
+    // offer. Not append-only, unlike Pillar 12's emergency audio ledger.
+    "start_artifact": (text, opt text, opt text) -> (nat64);
+    "append_artifact_chunk": (nat64, blob) -> ();
+    "get_artifact_chunk": (nat64, nat32) -> (opt blob) query;
+    "list_my_artifacts": () -> (vec ArtifactMeta) query;
+    "get_artifact": (nat64) -> (opt GeneratedArtifact) query;
+    "delete_artifact": (nat64) -> ();
 }

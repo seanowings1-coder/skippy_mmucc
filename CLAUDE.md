@@ -112,7 +112,7 @@ Express.js server. All routes require the `requireSession` middleware (validates
 | `POST /critic-loop` | Archive-time Critic Loop (self-critique → Evolution Matrix deltas) |
 | `POST /karaoke-offer` | In-character excited ask before performing (one-step before `/karaoke`) |
 | `POST /karaoke` | Full karaoke performance (original lyrics only, no max_tokens cap) |
-| `GET /speak` | ElevenLabs TTS synthesis |
+| `GET /speak` | Fish Audio TTS synthesis (migrated from ElevenLabs 2026-07-12 — see Planned Migrations) |
 | `POST /embed` | Single text embedding (for RAG query vectors) |
 | `POST /chunk-and-embed` | File upload (PDF/Word via mammoth/pdf-parse) → chunk → embed → canister |
 | `POST /chunk-and-embed-url` | URL fetch → chunk → embed → canister |
@@ -169,9 +169,12 @@ Read from `get_my_evolution_profile()` on load; updated on Course Correction phr
 COMMANDER_PRINCIPAL=<II principal>
 PARTNER_PRINCIPAL=<II principal>
 OPENROUTER_API_KEY=
-ELEVENLABS_API_KEY=
-ELEVENLABS_VOICE_ID=           # default R.C. Bray clone voice
-ELEVENLABS_SINGING_VOICE_ID=   # karaoke voice (may differ)
+FISH_AUDIO_API_KEY=            # /speak's active TTS provider since 2026-07-12
+FISH_AUDIO_VOICE_ID=           # cloned Skippy voice (reference_id)
+FISH_AUDIO_SINGING_VOICE_ID=   # optional — falls back to FISH_AUDIO_VOICE_ID if unset
+ELEVENLABS_API_KEY=            # legacy — no longer called by /speak, kept per migration plan below
+ELEVENLABS_VOICE_ID=           # legacy — former default R.C. Bray clone voice
+ELEVENLABS_SINGING_VOICE_ID=   # legacy — former karaoke voice
 OPENROUTER_MODEL=              # everyday free primary (e.g. openai/gpt-4o-mini)
 OPENROUTER_MODEL_FALLBACK=     # everyday free fallback (e.g. sao10k/l3-lunaris-8b)
 OPENROUTER_MODEL_PAID=         # optional override for paid primary
@@ -198,7 +201,7 @@ Planned/aspirational system design for features not yet fully implemented.
 
 ### 2. Self-Dictation Audio Pipeline
 - Background Web Speech API listener for user-configured personal trigger phrases ("Let me make sure I write this down...", "Let me grab my notepad..."). Captures only the user's own dictation — not other parties, who are never recorded without disclosed consent.
-- On trigger detection: starts local transcription, routes to OpenRouter via `/respond`, synthesizes response via ElevenLabs.
+- On trigger detection: starts local transcription, routes to OpenRouter via `/respond`, synthesizes response via `/speak` (Fish Audio).
 
 ### 3. ICP Storage Layer & Knowledge Base
 - MMUCC V6 (Model Minimum Uniform Crash Criteria) and ANSI D.16 (Manual on Classification of Motor Vehicle Traffic Accidents) reference manuals uploaded via `/chunk-and-embed` or `/chunk-and-embed-url`.
@@ -237,11 +240,10 @@ Heavy Hitter also gets a dedicated persona dial-down in the system prompt (appli
 - Env vars: `DEEPINFRA_API_KEY`, `DEEPINFRA_MODEL_SNAPPY`, `DEEPINFRA_MODEL_SNAPPY_FALLBACK`, `DEEPINFRA_MODEL_SUPERBRAIN`, `DEEPINFRA_MODEL_TACTICAL` — see "Required .env variables" above.
 - **Not yet done** (next pass): `/karaoke`, `/karaoke-offer`, `/project-brief`, `/critic-loop`, and the `/embed` embeddings call are still OpenRouter-only, on the old `EVERYDAY_CASCADE` array (kept — still actively used by those routes, not dead code even though `/respond` no longer uses it for everyday).
 
-### TTS → Fish Audio
-Replacing ElevenLabs with Fish Audio (S2 Pro engine) to reduce cost.
+### TTS → Fish Audio — SHIPPED 2026-07-12, live-tested and confirmed working
+Replaced ElevenLabs with Fish Audio (`s2-pro` model) in `/speak` to reduce cost. `POST https://api.fish.audio/v1/tts`, `Authorization: Bearer $FISH_AUDIO_API_KEY`, `model: s2-pro` header, body `{ text, reference_id: voiceId, format: 'mp3' }` — response is a raw MP3 stream, same shape as the old ElevenLabs call, so the existing `Readable.fromWeb(...).pipe(res)` piping needed no changes. Both `requireSession`/`speakRequireSession`'s per-Principal `voiceId` fallback now default to `FISH_AUDIO_VOICE_ID` instead of `ELEVENLABS_VOICE_ID`. Verified against the real API (402 insufficient-credit before the account had funds, then a genuine 200 + playable MP3) before shipping. Committed `skippy_mmucc` `084f409` / `Skippy-proxy` `56aa204`, pushed, confirmed live via Railway deploy log and a real in-app voice test.
 
-- Fish Audio supports bracketed emotion tags at sentence start: `[smug]`, `[sigh]`, `[excited]`, etc.
-- System prompt must instruct Skippy to **begin sentences with a bracketed emotion tag** so Fish Audio can act them out physically.
-- New env vars needed: `FISH_AUDIO_API_KEY`, `FISH_AUDIO_VOICE_ID`.
-- `/speak` route in `server.js` switches from ElevenLabs `xi-api-key` header to Fish Audio's auth scheme.
-- Old `ELEVENLABS_*` env vars stay in `.env` until migration is confirmed live.
+- **Known un-migrated caveat**: a Principal with a custom `voice_id` already stored via `set_persona_profile` (from before this migration) still holds an old ElevenLabs ID, which would now be sent to Fish Audio as `reference_id` and fail — check Workspace Security → Profile if either Principal ever set a custom value there.
+- **Emotion tags — deliberately NOT implemented, open design conflict, do not add without resolving this first**: Fish Audio supports bracketed emotion tags (`[smug]`, `[sigh]`, `[excited]`) at sentence start, and the original plan was to have the system prompt instruct Skippy to emit them. But the 2026-07-11 persona session added an explicit opposite rule to `<system_constraints>` — "Never prefix any sentence with bracketed metadata like `[tone: dry]`" — to stop the Async Janitor's internal `[tone: X]` shorthand from leaking into live dialogue (see `CLAUDE.md`'s persona-recitation-snowball history). Adding emotion-tag instructions on top without very carefully reconciling the two (the model needs to reliably tell `[smug]` apart from `[tone: dry]`, a distinction this project's own experience says needs a concrete example, not just abstract wording) risks reopening that exact leak. Scope this as its own pass with A/B testing, not a quick addition.
+- **Cost caveat, not yet resolved**: Fish Audio is currently running a "S2.1 Pro free for developers" promo — the live test cost $0.00 and didn't touch the account's separate pay-as-you-go "Team Wallet" balance at all. Real steady-state per-character cost (~$0.015/1K chars, vs ElevenLabs Turbo's ~$0.05/1K chars) is unconfirmed until the promo ends and real metered billing is observed. Also unresolved: whether the $15/mo Fish Audio Plus plan is required for API access at all, or just for keeping the cloned voice private (10 private voice slots) — see the Plus-plan memory note, test by downgrading only once the promo visibly ends.
+- `ELEVENLABS_*` env vars and the `/api/fuel` ElevenLabs balance check are untouched — kept per the original plan until this migration has more real-world runtime, and because `/karaoke`, `/karaoke-offer`, `/project-brief`, and `/critic-loop` are still fully OpenRouter/ElevenLabs and out of scope for this pass.

@@ -28,6 +28,15 @@ const EVOLUTION_LOG_MEMORY_ID: MemoryId = MemoryId::new(11);
 // Master Fuel Pump (Pillar 21) — backend holds cycles and auto-tops-up frontend.
 // MemoryId 12 is reserved for this; never renumber or reuse any slot.
 const FRONTEND_CANISTER_ID_MEMORY_ID: MemoryId = MemoryId::new(12);
+// Pillar 22 (Generated Artifacts) — anything Skippy creates (karaoke songs,
+// workspace exports, Project Briefs) that the user wants saved beyond a
+// one-off browser download. 13 is the next free slot; never renumber/reuse.
+const GENERATED_ARTIFACTS_MEMORY_ID: MemoryId = MemoryId::new(13);
+// Pillar 22 follow-up (2026-07-13) — chunked artifact bytes, split out of
+// GeneratedArtifact itself once a real user need (large document uploads,
+// full-length karaoke songs) made the single-blob-per-call design too small
+// for anything past ~1.8MB. 14 is the next free slot.
+const ARTIFACT_CHUNKS_MEMORY_ID: MemoryId = MemoryId::new(14);
 
 // Pillar 19 (Self-Evolution & Metacognitive Matrix) — hard caps on every
 // personality weight, confirmed 2026-06-22: growth should be natural and
@@ -46,6 +55,23 @@ const MAX_HISTORY_MESSAGES: usize = 40;
 // Generous bound since this holds up to MAX_HISTORY_MESSAGES whole messages
 // per Principal, not one row like DocumentSection.
 const MAX_HISTORY_SIZE: u32 = 200_000;
+
+// Pillar 22 (Generated Artifacts) — max size of ONE chunk, enforced in
+// append_artifact_chunk. The real constraint is the IC's own hard cap on a
+// single ingress call/response payload (~2MB, see CLAUDE.md's
+// list_sections_by_manual note for the same limit elsewhere) — a chunk
+// accepted past this could never actually be sent as one call's argument or
+// read back as one call's response. Comfortably below 2MB to leave room for
+// Candid encoding overhead on top of the raw bytes.
+const MAX_ARTIFACT_CHUNK_SIZE: usize = 1_800_000;
+
+// Pillar 22 follow-up (2026-07-13) — sanity ceiling on a whole artifact's
+// TOTAL size across all its chunks combined, not the IC's own call-size
+// limit (chunking already handles that). This guards against a runaway
+// upload (bug or otherwise) consuming unbounded stable memory. 50MB is
+// generous for the real use case (large reference documents, full-length
+// karaoke songs) without being unlimited.
+const MAX_ARTIFACT_TOTAL_SIZE: u64 = 50_000_000;
 
 // Session tokens are short-lived and only ever re-derived by logging in again,
 // so they live in heap memory rather than stable memory — losing them on a
@@ -361,6 +387,127 @@ impl Storable for EmergencyAudioChunk {
     };
 }
 
+/// Pillar 22 (Generated Artifacts) — anything Skippy creates (karaoke songs,
+/// workspace exports, Project Briefs) that the user explicitly saves beyond
+/// the one-off browser download those features already offer. Unlike Pillar
+/// 12's emergency audio ledger, this is NOT append-only — no evidentiary
+/// requirement here, so `delete_artifact` is a real, offered method.
+///
+/// `data` is kept (not removed) purely for backward compatibility with any
+/// artifact saved before 2026-07-13's chunked-storage follow-up — decoding
+/// an old stored record still needs a value for every non-Option field.
+/// Every artifact saved from 2026-07-13 onward leaves `data` empty and uses
+/// `total_size`/`chunk_count` (both `Option` per the Candid schema
+/// invariant — old records predate these fields entirely) plus the real
+/// bytes in `ARTIFACT_CHUNKS` instead, since a single blob field can never
+/// hold anything past the IC's ~2MB call size limit.
+#[derive(CandidType, Deserialize, Clone, Debug)]
+pub struct GeneratedArtifact {
+    pub id: u64,
+    pub owner: Principal,
+    pub kind: String,
+    pub data: Vec<u8>,
+    pub mime: Option<String>,
+    pub title: Option<String>,
+    pub created_at: u64,
+    pub total_size: Option<u64>,
+    pub chunk_count: Option<u32>,
+}
+
+impl Storable for GeneratedArtifact {
+    fn to_bytes(&self) -> Cow<'_, [u8]> {
+        Cow::Owned(Encode!(self).unwrap())
+    }
+
+    fn into_bytes(self) -> Vec<u8> {
+        Encode!(&self).unwrap()
+    }
+
+    fn from_bytes(bytes: Cow<[u8]>) -> Self {
+        Decode!(bytes.as_ref(), Self).unwrap()
+    }
+
+    const BOUND: Bound = Bound::Bounded {
+        // No longer needs to fit a whole blob (data is empty for anything
+        // chunked) — just the metadata fields plus Candid overhead.
+        max_size: 2_000,
+        is_fixed_size: false,
+    };
+}
+
+/// Metadata-only view of a GeneratedArtifact, returned by `list_my_artifacts`
+/// so listing doesn't pull every blob's full bytes over the wire — only
+/// `get_artifact_chunk` (fetching one chunk at a time) returns real bytes.
+#[derive(CandidType, Deserialize, Clone, Debug)]
+pub struct ArtifactMeta {
+    pub id: u64,
+    pub kind: String,
+    pub mime: Option<String>,
+    pub title: Option<String>,
+    pub created_at: u64,
+    pub total_size: Option<u64>,
+    pub chunk_count: Option<u32>,
+}
+
+/// Composite key for `ARTIFACT_CHUNKS` (Pillar 22 follow-up) — mirrors
+/// `HistoryKey`'s pattern. `Ord`/`PartialOrd` are derived field-order
+/// (artifact_id first) purely so this can key a `StableBTreeMap`; no query
+/// relies on that ordering, but it does mean all of one artifact's chunks
+/// sort contiguously, which is a nice property even though nothing depends
+/// on it today.
+#[derive(CandidType, Deserialize, Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct ArtifactChunkKey {
+    pub artifact_id: u64,
+    pub chunk_index: u32,
+}
+
+impl Storable for ArtifactChunkKey {
+    fn to_bytes(&self) -> Cow<'_, [u8]> {
+        Cow::Owned(Encode!(self).unwrap())
+    }
+
+    fn into_bytes(self) -> Vec<u8> {
+        Encode!(&self).unwrap()
+    }
+
+    fn from_bytes(bytes: Cow<[u8]>) -> Self {
+        Decode!(bytes.as_ref(), Self).unwrap()
+    }
+
+    const BOUND: Bound = Bound::Bounded {
+        max_size: 32,
+        is_fixed_size: false,
+    };
+}
+
+/// One chunk of a large artifact's bytes — MAX_ARTIFACT_CHUNK_SIZE-bounded
+/// by construction (append_artifact_chunk rejects anything larger), so this
+/// can always be sent/returned as a single IC call's payload.
+#[derive(CandidType, Deserialize, Clone, Debug)]
+pub struct ArtifactChunk {
+    pub data: Vec<u8>,
+}
+
+impl Storable for ArtifactChunk {
+    fn to_bytes(&self) -> Cow<'_, [u8]> {
+        Cow::Owned(Encode!(self).unwrap())
+    }
+
+    fn into_bytes(self) -> Vec<u8> {
+        Encode!(&self).unwrap()
+    }
+
+    fn from_bytes(bytes: Cow<[u8]>) -> Self {
+        Decode!(bytes.as_ref(), Self).unwrap()
+    }
+
+    const BOUND: Bound = Bound::Bounded {
+        // MAX_ARTIFACT_CHUNK_SIZE (~1.8MB) plus Candid encoding overhead.
+        max_size: 2_000_000,
+        is_fixed_size: false,
+    };
+}
+
 /// A Principal's self-set display name and ElevenLabs voice ID (Pillar 3's
 /// dual-voice routing). Not secret, unlike the whitelist — settable at
 /// runtime by each user for themselves, no redeploy needed.
@@ -568,6 +715,16 @@ thread_local! {
         RefCell::new(StableCell::init(
             MEMORY_MANAGER.with(|m| m.borrow().get(FRONTEND_CANISTER_ID_MEMORY_ID)),
             Principal::anonymous(),
+        ));
+
+    static GENERATED_ARTIFACTS: RefCell<StableBTreeMap<u64, GeneratedArtifact, Memory>> =
+        RefCell::new(StableBTreeMap::init(
+            MEMORY_MANAGER.with(|m| m.borrow().get(GENERATED_ARTIFACTS_MEMORY_ID)),
+        ));
+
+    static ARTIFACT_CHUNKS: RefCell<StableBTreeMap<ArtifactChunkKey, ArtifactChunk, Memory>> =
+        RefCell::new(StableBTreeMap::init(
+            MEMORY_MANAGER.with(|m| m.borrow().get(ARTIFACT_CHUNKS_MEMORY_ID)),
         ));
 
     // TOCTOU guard: the canister suspends at every .await, allowing a concurrent
@@ -1384,4 +1541,142 @@ fn verify_unlock() -> bool {
 #[query]
 fn greet(name: String) -> String {
     format!("Hello, {}!", name)
+}
+
+/// Shared by every Pillar 22 method that operates on an existing artifact.
+/// Traps (same "not found or not owned" non-leaking shape as
+/// `assert_workspace_owner`) rather than returning a Result, matching this
+/// file's established convention.
+fn assert_artifact_owner(caller: Principal, id: u64) -> GeneratedArtifact {
+    match GENERATED_ARTIFACTS.with(|a| a.borrow().get(&id)) {
+        Some(art) if art.owner == caller => art,
+        _ => ic_cdk::trap("Artifact not found or not owned by caller."),
+    }
+}
+
+/// Pillar 22 (Generated Artifacts) — creates a new artifact record with zero
+/// chunks so far; the caller then makes one or more `append_artifact_chunk`
+/// calls to actually populate it (see that method's doc comment for why a
+/// single blob-in-one-call design couldn't hold anything past ~1.8MB).
+/// `kind` is a free-form tag the frontend defines and interprets (e.g.
+/// "karaoke", "workspace_export", "project_brief") — the backend never
+/// branches on it.
+#[update]
+fn start_artifact(kind: String, mime: Option<String>, title: Option<String>) -> u64 {
+    let caller = assert_whitelisted();
+    let id = take_next_id();
+    let artifact = GeneratedArtifact {
+        id,
+        owner: caller,
+        kind,
+        data: Vec::new(),
+        mime,
+        title,
+        created_at: ic_cdk::api::time(),
+        total_size: Some(0),
+        chunk_count: Some(0),
+    };
+    GENERATED_ARTIFACTS.with(|a| a.borrow_mut().insert(id, artifact));
+    id
+}
+
+/// Appends one chunk (in order — the frontend is responsible for calling
+/// this sequentially, chunk 0 first) to an artifact `start_artifact` already
+/// created. Each chunk is capped at MAX_ARTIFACT_CHUNK_SIZE since it has to
+/// travel as a single IC ingress call's argument; the running total across
+/// all of an artifact's chunks is separately capped at
+/// MAX_ARTIFACT_TOTAL_SIZE as a sanity backstop against unbounded stable
+/// memory growth from a runaway upload.
+#[update]
+fn append_artifact_chunk(artifact_id: u64, chunk: Vec<u8>) {
+    let caller = assert_whitelisted();
+    let mut artifact = assert_artifact_owner(caller, artifact_id);
+    if chunk.len() > MAX_ARTIFACT_CHUNK_SIZE {
+        ic_cdk::trap("Chunk too large (over the IC's ~2MB call payload cap) — split it smaller.");
+    }
+    let chunk_index = artifact.chunk_count.unwrap_or(0);
+    let new_total = artifact.total_size.unwrap_or(0) + chunk.len() as u64;
+    if new_total > MAX_ARTIFACT_TOTAL_SIZE {
+        ic_cdk::trap("Artifact too large overall (over the 50MB total size cap).");
+    }
+    ARTIFACT_CHUNKS.with(|c| {
+        c.borrow_mut().insert(
+            ArtifactChunkKey { artifact_id, chunk_index },
+            ArtifactChunk { data: chunk },
+        )
+    });
+    artifact.chunk_count = Some(chunk_index + 1);
+    artifact.total_size = Some(new_total);
+    GENERATED_ARTIFACTS.with(|a| a.borrow_mut().insert(artifact_id, artifact));
+}
+
+/// Fetches one chunk of one artifact, for the frontend to reassemble in
+/// order (chunk 0, chunk 1, ...) up to the `chunk_count` reported by
+/// `list_my_artifacts`/`get_artifact`. Always safe to return as a single
+/// call's response since every stored chunk is MAX_ARTIFACT_CHUNK_SIZE-
+/// bounded by `append_artifact_chunk`.
+#[query]
+fn get_artifact_chunk(artifact_id: u64, chunk_index: u32) -> Option<Vec<u8>> {
+    let caller = assert_whitelisted();
+    assert_artifact_owner(caller, artifact_id);
+    ARTIFACT_CHUNKS
+        .with(|c| c.borrow().get(&ArtifactChunkKey { artifact_id, chunk_index }))
+        .map(|chunk| chunk.data)
+}
+
+/// Metadata-only listing (no blob data) of the caller's own saved artifacts
+/// — keeps a routine list call cheap regardless of how large the underlying
+/// artifacts are. Use `chunk_count` from here to drive a download loop over
+/// `get_artifact_chunk`.
+#[query]
+fn list_my_artifacts() -> Vec<ArtifactMeta> {
+    let caller = assert_whitelisted();
+    GENERATED_ARTIFACTS.with(|a| {
+        a.borrow()
+            .iter()
+            .map(|entry| entry.value().clone())
+            .filter(|art| art.owner == caller)
+            .map(|art| ArtifactMeta {
+                id: art.id,
+                kind: art.kind,
+                mime: art.mime,
+                title: art.title,
+                created_at: art.created_at,
+                total_size: art.total_size,
+                chunk_count: art.chunk_count,
+            })
+            .collect()
+    })
+}
+
+/// Fetches one artifact's metadata (plus its legacy `data` field, only ever
+/// populated for something saved before the 2026-07-13 chunked-storage
+/// follow-up — everything since then leaves it empty and uses
+/// `get_artifact_chunk` instead). Returns None for both "no such id" and
+/// "exists but not yours" — same non-leaking shape as everywhere else
+/// ownership is checked in this file.
+#[query]
+fn get_artifact(id: u64) -> Option<GeneratedArtifact> {
+    let caller = assert_whitelisted();
+    GENERATED_ARTIFACTS
+        .with(|a| a.borrow().get(&id))
+        .filter(|art| art.owner == caller)
+}
+
+/// Hard-delete — the whole point of this store versus a one-off download is
+/// that the user can also make it go away again (unlike Pillar 12's
+/// deliberately-append-only emergency audio). Also removes every chunk, not
+/// just the metadata record.
+#[update]
+fn delete_artifact(id: u64) {
+    let caller = assert_whitelisted();
+    let artifact = assert_artifact_owner(caller, id);
+    let chunk_count = artifact.chunk_count.unwrap_or(0);
+    ARTIFACT_CHUNKS.with(|c| {
+        let mut c = c.borrow_mut();
+        for chunk_index in 0..chunk_count {
+            c.remove(&ArtifactChunkKey { artifact_id: id, chunk_index });
+        }
+    });
+    GENERATED_ARTIFACTS.with(|a| a.borrow_mut().remove(&id));
 }

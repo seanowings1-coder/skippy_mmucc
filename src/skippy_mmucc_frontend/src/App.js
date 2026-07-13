@@ -661,6 +661,39 @@ function wordOverlapRatio(chunk, spokenText) {
   return overlap / chunkWords.length;
 }
 
+// Must match MAX_ARTIFACT_CHUNK_SIZE / MAX_ARTIFACT_TOTAL_SIZE in lib.rs.
+// Pillar 22 follow-up (2026-07-13): artifacts are now chunked (large files —
+// full-length karaoke, big documents — are the whole point), so this is no
+// longer a "reject the save" ceiling, just the size each individual
+// start_artifact/append_artifact_chunk call splits at.
+const MAX_ARTIFACT_CHUNK_SIZE = 1_800_000;
+// Client-side mirror of the backend's sanity cap, checked before spending a
+// long chunked upload only to have the last chunk rejected — fails fast
+// instead.
+const MAX_ARTIFACT_TOTAL_SIZE = 50_000_000;
+
+// An IC agent rejection's raw `.message` is a wall of text — Request ID,
+// reject code, the full CBOR certificate, a docs link — with the actual
+// human-readable canister trap message buried in the middle as
+// `message: '...'`. Pulls just that out for display; falls back to the raw
+// message for anything that doesn't match this shape (e.g. a plain network
+// error), so this never hides a real error, just declutters the common case.
+function extractCanisterTrapMessage(err) {
+  const match = /Canister called `ic0\.trap` with message: '([^']+)'/.exec(err?.message || '');
+  return match ? match[1] : err?.message || String(err);
+}
+
+// Pillar 22 (Generated Artifacts) — decodes a base64 `data:` URI (ACE-Step's
+// karaoke audio response shape) into raw bytes for save_generated_artifact,
+// which takes a Candid `blob`, not a data URI string.
+function dataUriToBytes(dataUri) {
+  const base64 = dataUri.split(',')[1] || '';
+  const binary = atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return bytes;
+}
+
 // Dual-Voice routing ("Marco Hietala Protocol") — splits a reply on 🎶...🎶
 // markers (the proxy's Lyric Generator instruction wraps parody verses this
 // way) into ordered segments, each tagged for the conversational or singing
@@ -895,6 +928,14 @@ class App {
   // "Save Song" control has something to point at — cleared/replaced by
   // every subsequent karaoke attempt, not persisted across reloads.
   lastKaraokeAudio = null;
+  // Pillar 22 (Generated Artifacts) — most recent generated Project Brief
+  // (bytes + title), cached the same way as lastKaraokeAudio so the "save to
+  // memory" button doesn't have to re-run the /project-brief LLM call just
+  // to save what was already generated for download.
+  lastProjectBrief = null;
+  // Metadata-only list from list_my_artifacts (no blob data) — populated on
+  // login/workspace switch and refreshed after every save/delete.
+  savedArtifacts = [];
   audioUnlocked = false;
   // Monotonic counter + abort handle so a new utterance can immediately
   // interrupt whatever Skippy is currently saying or still waiting on,
@@ -963,6 +1004,11 @@ class App {
   showLeftDrawer = false;
   showRightDrawer = false;
   showFuelModal = false;
+  // Toggles the "Save Song" dropdown (Download vs. Keep in Memory) — a
+  // single button that opens a small menu instead of two separate floating
+  // buttons, per user feedback 2026-07-13 ("that is why I was doing the
+  // 'what' earlier" — two side-by-side buttons read as confusing/unrelated).
+  showKaraokeSaveMenu = false;
   lastSpeakEndTime = 0; // timestamp when TTS last finished — used to discard
                         // recognition results that arrived during the cooldown window
   // Cooldown window in effect for the reply that just finished — set
@@ -1085,6 +1131,7 @@ class App {
     try {
       await this.#loadWorkspaces();
       await this.#refreshManualOptions();
+      this.savedArtifacts = await this.backendActor.list_my_artifacts();
       const profileOpt = await this.backendActor.get_my_persona_profile();
       const profile = profileOpt[0];
       this.profileName = profile?.name?.[0] || '';
@@ -1420,12 +1467,10 @@ class App {
     }
   };
 
-  // "Any way the song can be saved... and exported?" — the audio only ever
-  // lived in memory for one playback (fetched fresh from ACE-Step each time,
-  // never stored anywhere). This is a plain browser file download of the
-  // already-in-hand data: URI, not new backend storage — the simplest thing
-  // that actually answers the question, with no canister/stable-memory
-  // design needed for what's currently a one-off experimental feature.
+  // "Any way the song can be saved... and exported?" — plain browser file
+  // download of the already-in-hand data: URI. Kept alongside (not replaced
+  // by) #saveArtifact below, per Pillar 22's design: download and "save to
+  // Skippy's memory" are two independent actions, not one or the other.
   #downloadKaraokeAudio = () => {
     if (!this.lastKaraokeAudio) return;
     const a = document.createElement('a');
@@ -1434,6 +1479,123 @@ class App {
     document.body.appendChild(a);
     a.click();
     a.remove();
+  };
+
+  // Pillar 22 (Generated Artifacts) — persists a blob to durable per-owner
+  // canister storage so it survives beyond a one-off browser download and
+  // can be deleted later, unlike everything above. `kind` is a free-form tag
+  // this frontend defines and reads back (the backend never branches on it).
+  //
+  // Chunked (2026-07-13 follow-up): a single call can never carry more than
+  // ~1.8MB (the IC's own ingress size limit), so this always goes through
+  // start_artifact + one or more append_artifact_chunk calls in sequence,
+  // even for something tiny — one chunk is just the degenerate case, not a
+  // special path. Sequential (not parallel) on purpose: chunk order matters
+  // for reassembly, and it keeps a failed upload's error unambiguous (which
+  // chunk failed) rather than juggling concurrent in-flight calls.
+  #saveArtifact = async (kind, bytes, mime, title) => {
+    if (bytes.length > MAX_ARTIFACT_TOTAL_SIZE) {
+      this.statusMessage = `Too large to save (${(bytes.length / 1_000_000).toFixed(1)}MB, max 50MB).`;
+      this.#render();
+      return;
+    }
+    const totalChunks = Math.max(1, Math.ceil(bytes.length / MAX_ARTIFACT_CHUNK_SIZE));
+    this.statusMessage = 'Saving to Skippy\'s memory...';
+    this.#render();
+    try {
+      const artifactId = await this.backendActor.start_artifact(kind, mime ? [mime] : [], title ? [title] : []);
+      for (let i = 0; i < totalChunks; i++) {
+        const chunk = bytes.subarray(i * MAX_ARTIFACT_CHUNK_SIZE, (i + 1) * MAX_ARTIFACT_CHUNK_SIZE);
+        if (totalChunks > 1) {
+          this.statusMessage = `Saving to Skippy's memory... (${i + 1}/${totalChunks})`;
+          this.#render();
+        }
+        await this.backendActor.append_artifact_chunk(artifactId, chunk);
+      }
+      this.statusMessage = 'Saved.';
+      this.savedArtifacts = await this.backendActor.list_my_artifacts();
+    } catch (err) {
+      this.statusMessage = `Couldn't save: ${extractCanisterTrapMessage(err)}`;
+    }
+    this.#render();
+  };
+
+  // Fetches one saved artifact's chunks in order and reassembles them,
+  // then triggers a plain browser download — the save/keep side already put
+  // it in canister storage, this is just getting a local copy back out.
+  // Falls back to the legacy single-blob `data` field (via get_artifact) for
+  // anything saved before the 2026-07-13 chunking follow-up.
+  #downloadSavedArtifact = async (id) => {
+    try {
+      const meta = await this.backendActor.get_artifact(id);
+      const artifact = meta[0];
+      if (!artifact) {
+        this.statusMessage = "Couldn't find that artifact — it may have already been deleted.";
+        this.#render();
+        return;
+      }
+      const chunkCount = artifact.chunk_count?.[0] ?? 0;
+      let bytes;
+      if (chunkCount > 0) {
+        const parts = [];
+        for (let i = 0; i < chunkCount; i++) {
+          if (chunkCount > 1) {
+            this.statusMessage = `Downloading... (${i + 1}/${chunkCount})`;
+            this.#render();
+          }
+          const chunkResult = await this.backendActor.get_artifact_chunk(id, i);
+          const chunk = chunkResult[0];
+          if (!chunk) throw new Error(`Missing chunk ${i} of ${chunkCount} — artifact may be corrupted.`);
+          parts.push(new Uint8Array(chunk));
+        }
+        const totalLength = parts.reduce((sum, p) => sum + p.length, 0);
+        bytes = new Uint8Array(totalLength);
+        let offset = 0;
+        for (const part of parts) {
+          bytes.set(part, offset);
+          offset += part.length;
+        }
+      } else {
+        // Legacy single-blob artifact (saved before chunking existed).
+        bytes = new Uint8Array(artifact.data);
+      }
+      const mime = artifact.mime?.[0] || 'application/octet-stream';
+      const blob = new Blob([bytes], { type: mime });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      const ext = mime === 'audio/mpeg' ? 'mp3' : mime.includes('wordprocessingml') ? 'docx' : 'md';
+      const slug = (artifact.title?.[0] || artifact.kind).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+      a.download = `${slug || 'skippy-artifact'}.${ext}`;
+      a.click();
+      URL.revokeObjectURL(url);
+      this.statusMessage = 'Downloaded.';
+    } catch (err) {
+      this.statusMessage = `Couldn't download: ${extractCanisterTrapMessage(err)}`;
+    }
+    this.#render();
+  };
+
+  #deleteSavedArtifact = async (id) => {
+    try {
+      await this.backendActor.delete_artifact(id);
+      this.savedArtifacts = this.savedArtifacts.filter((a) => a.id !== id);
+    } catch (err) {
+      this.statusMessage = `Couldn't delete: ${extractCanisterTrapMessage(err)}`;
+    }
+    this.#render();
+  };
+
+  #saveKaraokeToMemory = () => {
+    if (!this.lastKaraokeAudio) return;
+    // 2026-07-13: no longer size-limited to one call's worth — #saveArtifact
+    // chunks automatically, so even a full-length song saves fine now.
+    this.#saveArtifact(
+      'karaoke',
+      dataUriToBytes(this.lastKaraokeAudio),
+      'audio/mpeg',
+      `Karaoke — ${new Date().toLocaleString()}`,
+    );
   };
 
   // The cached session identity in `this.identity`/`this.backendActor` is
@@ -1643,7 +1805,11 @@ class App {
   // timestamps are a bigint (nanoseconds) when they came from the canister's
   // get_history, but a plain ms Number for anything appended locally this
   // session (#recordTurn) before the next login round-trips it — handle both.
-  #exportWorkspace = () => {
+  // Shared by #exportWorkspace (download) and #saveWorkspaceExportToMemory
+  // (Pillar 22 save) — building this is cheap/synchronous (no network call,
+  // unlike the Project Brief below), so both actions just rebuild it fresh
+  // rather than caching.
+  #buildWorkspaceExportText = () => {
     const workspace = this.workspaces.find((w) => w.id === this.activeWorkspaceId);
     const title = workspace?.name || 'Skippy Conversation';
     const toDate = (ts) =>
@@ -1654,8 +1820,17 @@ class App {
       const who = role === 'user' ? 'You' : 'Skippy';
       lines.push(`**${who}** (${toDate(timestamp).toISOString()}):`, '', content, '');
     }
+    return { title, text: lines.join('\n') };
+  };
 
-    const blob = new Blob([lines.join('\n')], { type: 'text/markdown' });
+  #saveWorkspaceExportToMemory = () => {
+    const { title, text } = this.#buildWorkspaceExportText();
+    this.#saveArtifact('workspace_export', new TextEncoder().encode(text), 'text/markdown', title);
+  };
+
+  #exportWorkspace = () => {
+    const { title, text } = this.#buildWorkspaceExportText();
+    const blob = new Blob([text], { type: 'text/markdown' });
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
     link.href = url;
@@ -1868,6 +2043,12 @@ class App {
         ],
       });
       const blob = await Packer.toBlob(doc);
+      // Pillar 22 — cached so #saveProjectBriefToMemory doesn't have to re-run
+      // this whole LLM synthesis call just to save what was already generated.
+      this.lastProjectBrief = {
+        bytes: new Uint8Array(await blob.arrayBuffer()),
+        title: workspace?.name || 'Workspace',
+      };
       const url = URL.createObjectURL(blob);
       const link = document.createElement('a');
       link.href = url;
@@ -1880,6 +2061,17 @@ class App {
       this.statusMessage = `Couldn't generate project brief: ${err.message}`;
     }
     this.#render();
+  };
+
+  #saveProjectBriefToMemory = () => {
+    if (!this.lastProjectBrief) return;
+    const { bytes, title } = this.lastProjectBrief;
+    this.#saveArtifact(
+      'project_brief',
+      bytes,
+      'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+      title,
+    );
   };
 
   // Dual-Voice routing (Pillar 18) needs to boost the singing voice's
@@ -4000,9 +4192,31 @@ class App {
             ></span>
             ${this.lastKaraokeAudio
               ? html`
-                  <button class="badge" title="Save the last karaoke song as an MP3" @click=${() => this.#downloadKaraokeAudio()}>
-                    💾 Save Song
-                  </button>
+                  <span style="position:relative;display:inline-block;">
+                    <button
+                      class="badge"
+                      title="Save the last karaoke song"
+                      @click=${() => { this.showKaraokeSaveMenu = !this.showKaraokeSaveMenu; this.#render(); }}
+                    >
+                      💾 Save Song ${this.showKaraokeSaveMenu ? '▴' : '▾'}
+                    </button>
+                    ${this.showKaraokeSaveMenu
+                      ? html`
+                          <div class="save-song-menu">
+                            <button
+                              @click=${() => { this.showKaraokeSaveMenu = false; this.#downloadKaraokeAudio(); this.#render(); }}
+                            >
+                              ⬇ Save locally (download .mp3)
+                            </button>
+                            <button
+                              @click=${() => { this.showKaraokeSaveMenu = false; this.#saveKaraokeToMemory(); }}
+                            >
+                              🗂 Save to Skippy's memory
+                            </button>
+                          </div>
+                        `
+                      : ''}
+                  </span>
                 `
               : ''}
             ${(() => {
@@ -4101,10 +4315,51 @@ class App {
               <button @click=${this.#exportWorkspace} ?disabled=${this.history.length === 0}>
                 Export (.md)
               </button>
+              <button
+                title="Keep this export in Skippy's memory (canister storage, not just a download)"
+                @click=${this.#saveWorkspaceExportToMemory}
+                ?disabled=${this.history.length === 0}
+              >
+                🗂 Save Export to Memory
+              </button>
               <button @click=${this.#generateProjectBrief} ?disabled=${this.history.length === 0}>
                 Generate Project Brief
               </button>
+              <button
+                title="Keep the last generated brief in Skippy's memory (canister storage, not just a download)"
+                @click=${this.#saveProjectBriefToMemory}
+                ?disabled=${!this.lastProjectBrief}
+              >
+                🗂 Save Brief to Memory
+              </button>
               <button @click=${this.#deleteActiveWorkspaceForever}>Delete forever</button>
+            </details>
+
+            <details class="saved-artifacts">
+              <summary>Skippy's Memory (${this.savedArtifacts.length})</summary>
+              ${this.savedArtifacts.length === 0
+                ? html`<p class="status">Nothing saved yet — use a "Save to Memory" button on a karaoke song, export, or brief.</p>`
+                : html`
+                    <ul>
+                      ${this.savedArtifacts
+                        .slice()
+                        .sort((a, b) => Number(b.created_at) - Number(a.created_at))
+                        .map(
+                          (art) => html`
+                            <li>
+                              <strong>${art.title?.[0] || art.kind}</strong>
+                              <span class="section-id">(${art.kind})</span>
+                              <br />
+                              <span class="status">
+                                ${new Date(Number(art.created_at / 1_000_000n)).toLocaleString()}
+                              </span>
+                              <button @click=${() => this.#downloadSavedArtifact(art.id)}>Download</button>
+                              <button @click=${() => this.#deleteSavedArtifact(art.id)}>Delete</button>
+                            </li>
+                          `,
+                        )}
+                    </ul>
+                  `}
             </details>
           ` : ''}
         </section>

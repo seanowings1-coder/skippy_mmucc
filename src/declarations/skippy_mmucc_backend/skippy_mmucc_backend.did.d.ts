@@ -2,6 +2,15 @@ import type { Principal } from '@icp-sdk/core/principal';
 import type { ActorMethod } from '@icp-sdk/core/agent';
 import type { IDL } from '@icp-sdk/core/candid';
 
+export interface ArtifactMeta {
+  'id' : bigint,
+  'title' : [] | [string],
+  'kind' : string,
+  'mime' : [] | [string],
+  'created_at' : bigint,
+  'total_size' : [] | [bigint],
+  'chunk_count' : [] | [number],
+}
 export interface CourierMessage {
   'id' : bigint,
   'content' : string,
@@ -48,6 +57,17 @@ export interface EvolutionProfile {
   'snark_level' : number,
   'vendor_skepticism' : number,
 }
+export interface GeneratedArtifact {
+  'id' : bigint,
+  'title' : [] | [string],
+  'owner' : Principal,
+  'data' : Uint8Array | number[],
+  'kind' : string,
+  'mime' : [] | [string],
+  'created_at' : bigint,
+  'total_size' : [] | [bigint],
+  'chunk_count' : [] | [number],
+}
 export interface Message {
   'content' : string,
   'role' : string,
@@ -87,6 +107,10 @@ export interface _SERVICE {
     BigUint64Array | bigint[]
   >,
   'add_manual_section' : ActorMethod<[string, string, string, string], bigint>,
+  'append_artifact_chunk' : ActorMethod<
+    [bigint, Uint8Array | number[]],
+    undefined
+  >,
   'append_emergency_audio_chunk' : ActorMethod<
     [bigint, Uint8Array | number[]],
     bigint
@@ -94,9 +118,15 @@ export interface _SERVICE {
   'append_turn' : ActorMethod<[bigint, string, string], bigint>,
   'archive_workspace' : ActorMethod<[bigint], undefined>,
   'create_workspace' : ActorMethod<[string], bigint>,
+  'delete_artifact' : ActorMethod<[bigint], undefined>,
   'delete_manual' : ActorMethod<[string], bigint>,
   'delete_manual_section' : ActorMethod<[bigint], boolean>,
   'delete_workspace' : ActorMethod<[bigint], undefined>,
+  'get_artifact' : ActorMethod<[bigint], [] | [GeneratedArtifact]>,
+  'get_artifact_chunk' : ActorMethod<
+    [bigint, number],
+    [] | [Uint8Array | number[]]
+  >,
   'get_cycle_balance' : ActorMethod<[], bigint>,
   'get_history' : ActorMethod<[bigint], Array<Message>>,
   'get_manual_section' : ActorMethod<[bigint], [] | [DocumentSection]>,
@@ -109,6 +139,7 @@ export interface _SERVICE {
     Array<EmergencyAudioChunk>
   >,
   'list_manual_names' : ActorMethod<[], Array<string>>,
+  'list_my_artifacts' : ActorMethod<[], Array<ArtifactMeta>>,
   'list_my_emergencies' : ActorMethod<[], Array<EmergencyEvent>>,
   'list_my_evolution_log' : ActorMethod<[number], Array<EvolutionLogEntry>>,
   'list_my_workspaces' : ActorMethod<[], Array<Workspace>>,
@@ -130,6 +161,10 @@ export interface _SERVICE {
     Array<ScoredSection>
   >,
   'set_persona_profile' : ActorMethod<[string, string], undefined>,
+  'start_artifact' : ActorMethod<
+    [string, [] | [string], [] | [string]],
+    bigint
+  >,
   'start_emergency' : ActorMethod<[string], bigint>,
   'trigger_fuel_pump' : ActorMethod<[], string>,
   'update_associated_manuals' : ActorMethod<[bigint, Array<string>], undefined>,

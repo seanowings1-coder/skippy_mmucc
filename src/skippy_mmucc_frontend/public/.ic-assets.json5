@@ -1,0 +1,10 @@
+[
+  {
+    "match": "**/*",
+    "security_policy": "standard",
+    "headers": {
+      "Permissions-Policy": "microphone=(self)",
+      "Content-Security-Policy": "default-src 'self'; script-src 'self' 'unsafe-eval'; connect-src 'self' https://*.icp0.io https://*.ic0.app https://skippy-proxy-production.up.railway.app; img-src 'self' data:; style-src 'self' 'unsafe-inline'; media-src 'self' data:;"
+    }
+  }
+]

@@ -227,6 +227,35 @@ button:disabled {
   box-shadow: none;
 }
 
+.save-song-menu {
+  position: absolute;
+  top: calc(100% + 0.3em);
+  right: 0;
+  z-index: 20;
+  display: flex;
+  flex-direction: column;
+  min-width: 15em;
+  border-radius: 8px;
+  border: 1px solid var(--border-strong);
+  background: var(--bg-dark-armor-raised);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+  overflow: hidden;
+
+  button {
+    text-align: left;
+    padding: 0.6em 0.9em;
+    border: none;
+    border-radius: 0;
+    background: transparent;
+    font-size: 0.85em;
+    white-space: nowrap;
+
+    &:hover {
+      background: var(--bg-dark-armor);
+    }
+  }
+}
+
 // Cost-tier LED — color escalates T4→T7 from amber to red via inline style.
 // Free tiers (T1-T3) leave it dark. Color and glow are set by App.js.
 .tier-dot {

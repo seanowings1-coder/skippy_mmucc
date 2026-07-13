@@ -5,6 +5,17 @@ export const idlFactory = ({ IDL }) => {
     'section' : IDL.Text,
     'embedding' : IDL.Vec(IDL.Float32),
   });
+  const GeneratedArtifact = IDL.Record({
+    'id' : IDL.Nat64,
+    'title' : IDL.Opt(IDL.Text),
+    'owner' : IDL.Principal,
+    'data' : IDL.Vec(IDL.Nat8),
+    'kind' : IDL.Text,
+    'mime' : IDL.Opt(IDL.Text),
+    'created_at' : IDL.Nat64,
+    'total_size' : IDL.Opt(IDL.Nat64),
+    'chunk_count' : IDL.Opt(IDL.Nat32),
+  });
   const Message = IDL.Record({
     'content' : IDL.Text,
     'role' : IDL.Text,
@@ -35,6 +46,15 @@ export const idlFactory = ({ IDL }) => {
     'data' : IDL.Vec(IDL.Nat8),
     'emergency_id' : IDL.Nat64,
     'created_at' : IDL.Nat64,
+  });
+  const ArtifactMeta = IDL.Record({
+    'id' : IDL.Nat64,
+    'title' : IDL.Opt(IDL.Text),
+    'kind' : IDL.Text,
+    'mime' : IDL.Opt(IDL.Text),
+    'created_at' : IDL.Nat64,
+    'total_size' : IDL.Opt(IDL.Nat64),
+    'chunk_count' : IDL.Opt(IDL.Nat32),
   });
   const EmergencyEvent = IDL.Record({
     'id' : IDL.Nat64,
@@ -94,6 +114,7 @@ export const idlFactory = ({ IDL }) => {
         [IDL.Nat64],
         [],
       ),
+    'append_artifact_chunk' : IDL.Func([IDL.Nat64, IDL.Vec(IDL.Nat8)], [], []),
     'append_emergency_audio_chunk' : IDL.Func(
         [IDL.Nat64, IDL.Vec(IDL.Nat8)],
         [IDL.Nat64],
@@ -102,9 +123,20 @@ export const idlFactory = ({ IDL }) => {
     'append_turn' : IDL.Func([IDL.Nat64, IDL.Text, IDL.Text], [IDL.Nat64], []),
     'archive_workspace' : IDL.Func([IDL.Nat64], [], []),
     'create_workspace' : IDL.Func([IDL.Text], [IDL.Nat64], []),
+    'delete_artifact' : IDL.Func([IDL.Nat64], [], []),
     'delete_manual' : IDL.Func([IDL.Text], [IDL.Nat64], []),
     'delete_manual_section' : IDL.Func([IDL.Nat64], [IDL.Bool], []),
     'delete_workspace' : IDL.Func([IDL.Nat64], [], []),
+    'get_artifact' : IDL.Func(
+        [IDL.Nat64],
+        [IDL.Opt(GeneratedArtifact)],
+        ['query'],
+      ),
+    'get_artifact_chunk' : IDL.Func(
+        [IDL.Nat64, IDL.Nat32],
+        [IDL.Opt(IDL.Vec(IDL.Nat8))],
+        ['query'],
+      ),
     'get_cycle_balance' : IDL.Func([], [IDL.Nat64], ['query']),
     'get_history' : IDL.Func([IDL.Nat64], [IDL.Vec(Message)], ['query']),
     'get_manual_section' : IDL.Func(
@@ -130,6 +162,7 @@ export const idlFactory = ({ IDL }) => {
         ['query'],
       ),
     'list_manual_names' : IDL.Func([], [IDL.Vec(IDL.Text)], ['query']),
+    'list_my_artifacts' : IDL.Func([], [IDL.Vec(ArtifactMeta)], ['query']),
     'list_my_emergencies' : IDL.Func([], [IDL.Vec(EmergencyEvent)], ['query']),
     'list_my_evolution_log' : IDL.Func(
         [IDL.Nat32],
@@ -181,6 +214,11 @@ export const idlFactory = ({ IDL }) => {
         ['query'],
       ),
     'set_persona_profile' : IDL.Func([IDL.Text, IDL.Text], [], []),
+    'start_artifact' : IDL.Func(
+        [IDL.Text, IDL.Opt(IDL.Text), IDL.Opt(IDL.Text)],
+        [IDL.Nat64],
+        [],
+      ),
     'start_emergency' : IDL.Func([IDL.Text], [IDL.Nat64], []),
     'trigger_fuel_pump' : IDL.Func([], [IDL.Text], []),
     'update_associated_manuals' : IDL.Func(
