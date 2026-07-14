@@ -1498,7 +1498,7 @@ class App {
   // special path. Sequential (not parallel) on purpose: chunk order matters
   // for reassembly, and it keeps a failed upload's error unambiguous (which
   // chunk failed) rather than juggling concurrent in-flight calls.
-  #saveArtifact = async (kind, bytes, mime, title) => {
+  #saveArtifact = async (kind, bytes, mime, title, notes) => {
     if (bytes.length > MAX_ARTIFACT_TOTAL_SIZE) {
       this.statusMessage = `Too large to save (${(bytes.length / 1_000_000).toFixed(1)}MB, max 50MB).`;
       this.#render();
@@ -1508,7 +1508,12 @@ class App {
     this.statusMessage = 'Saving to Skippy\'s memory...';
     this.#render();
     try {
-      const artifactId = await this.backendActor.start_artifact(kind, mime ? [mime] : [], title ? [title] : []);
+      const artifactId = await this.backendActor.start_artifact(
+        kind,
+        mime ? [mime] : [],
+        title ? [title] : [],
+        notes ? [notes] : [],
+      );
       for (let i = 0; i < totalChunks; i++) {
         const chunk = bytes.subarray(i * MAX_ARTIFACT_CHUNK_SIZE, (i + 1) * MAX_ARTIFACT_CHUNK_SIZE);
         if (totalChunks > 1) {
@@ -1637,6 +1642,18 @@ class App {
     this.#render();
   };
 
+  // 2026-07-14 — user's own ask: "I should be able to add meta data to the
+  // file that is saved so I can quickly look at it and find the file I
+  // want." A plain browser prompt() at save time, shared by all three save
+  // call sites below, rather than a dedicated input field — matches the
+  // one-off nature of the request without adding new UI chrome. Returns
+  // null on cancel or an empty note (nothing gets stored either way).
+  #promptForArtifactNote = () => {
+    const raw = window.prompt("Add a note to help find this later (optional):", '');
+    const trimmed = raw?.trim();
+    return trimmed || null;
+  };
+
   #saveKaraokeToMemory = () => {
     if (!this.lastKaraokeAudio) return;
     // 2026-07-13: no longer size-limited to one call's worth — #saveArtifact
@@ -1646,6 +1663,7 @@ class App {
       dataUriToBytes(this.lastKaraokeAudio),
       'audio/mpeg',
       `Karaoke — ${new Date().toLocaleString()}`,
+      this.#promptForArtifactNote(),
     );
   };
 
@@ -1876,7 +1894,13 @@ class App {
 
   #saveWorkspaceExportToMemory = () => {
     const { title, text } = this.#buildWorkspaceExportText();
-    this.#saveArtifact('workspace_export', new TextEncoder().encode(text), 'text/markdown', title);
+    this.#saveArtifact(
+      'workspace_export',
+      new TextEncoder().encode(text),
+      'text/markdown',
+      title,
+      this.#promptForArtifactNote(),
+    );
   };
 
   #exportWorkspace = () => {
@@ -2122,6 +2146,7 @@ class App {
       bytes,
       'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
       title,
+      this.#promptForArtifactNote(),
     );
   };
 
@@ -4423,6 +4448,9 @@ class App {
                               <span class="status">
                                 ${new Date(Number(art.created_at / 1_000_000n)).toLocaleString()}
                               </span>
+                              ${art.notes?.[0]
+                                ? html`<br /><span class="artifact-note">${art.notes[0]}</span>`
+                                : ''}
                               ${isPreviewable
                                 ? html`<button @click=${() => this.#previewSavedArtifact(art.id)}>
                                     ${isOpen ? 'Hide' : 'Preview'}

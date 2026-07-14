@@ -412,6 +412,11 @@ pub struct GeneratedArtifact {
     pub created_at: u64,
     pub total_size: Option<u64>,
     pub chunk_count: Option<u32>,
+    // User-entered free-text note (2026-07-14) — lets the user tell similar
+    // saves apart later without downloading each one. Option-wrapped per the
+    // Candid schema invariant: records saved before this field existed have
+    // no value for it.
+    pub notes: Option<String>,
 }
 
 impl Storable for GeneratedArtifact {
@@ -447,6 +452,7 @@ pub struct ArtifactMeta {
     pub created_at: u64,
     pub total_size: Option<u64>,
     pub chunk_count: Option<u32>,
+    pub notes: Option<String>,
 }
 
 /// Composite key for `ARTIFACT_CHUNKS` (Pillar 22 follow-up) — mirrors
@@ -1562,7 +1568,7 @@ fn assert_artifact_owner(caller: Principal, id: u64) -> GeneratedArtifact {
 /// "karaoke", "workspace_export", "project_brief") — the backend never
 /// branches on it.
 #[update]
-fn start_artifact(kind: String, mime: Option<String>, title: Option<String>) -> u64 {
+fn start_artifact(kind: String, mime: Option<String>, title: Option<String>, notes: Option<String>) -> u64 {
     let caller = assert_whitelisted();
     let id = take_next_id();
     let artifact = GeneratedArtifact {
@@ -1575,6 +1581,7 @@ fn start_artifact(kind: String, mime: Option<String>, title: Option<String>) -> 
         created_at: ic_cdk::api::time(),
         total_size: Some(0),
         chunk_count: Some(0),
+        notes,
     };
     GENERATED_ARTIFACTS.with(|a| a.borrow_mut().insert(id, artifact));
     id
@@ -1644,6 +1651,7 @@ fn list_my_artifacts() -> Vec<ArtifactMeta> {
                 created_at: art.created_at,
                 total_size: art.total_size,
                 chunk_count: art.chunk_count,
+                notes: art.notes,
             })
             .collect()
     })

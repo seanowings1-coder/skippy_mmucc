@@ -10,6 +10,7 @@ export interface ArtifactMeta {
   'created_at' : bigint,
   'total_size' : [] | [bigint],
   'chunk_count' : [] | [number],
+  'notes' : [] | [string],
 }
 export interface CourierMessage {
   'id' : bigint,
@@ -67,6 +68,7 @@ export interface GeneratedArtifact {
   'created_at' : bigint,
   'total_size' : [] | [bigint],
   'chunk_count' : [] | [number],
+  'notes' : [] | [string],
 }
 export interface Message {
   'content' : string,
@@ -162,7 +164,7 @@ export interface _SERVICE {
   >,
   'set_persona_profile' : ActorMethod<[string, string], undefined>,
   'start_artifact' : ActorMethod<
-    [string, [] | [string], [] | [string]],
+    [string, [] | [string], [] | [string], [] | [string]],
     bigint
   >,
   'start_emergency' : ActorMethod<[string], bigint>,

@@ -15,6 +15,7 @@ export const idlFactory = ({ IDL }) => {
     'created_at' : IDL.Nat64,
     'total_size' : IDL.Opt(IDL.Nat64),
     'chunk_count' : IDL.Opt(IDL.Nat32),
+    'notes' : IDL.Opt(IDL.Text),
   });
   const Message = IDL.Record({
     'content' : IDL.Text,
@@ -55,6 +56,7 @@ export const idlFactory = ({ IDL }) => {
     'created_at' : IDL.Nat64,
     'total_size' : IDL.Opt(IDL.Nat64),
     'chunk_count' : IDL.Opt(IDL.Nat32),
+    'notes' : IDL.Opt(IDL.Text),
   });
   const EmergencyEvent = IDL.Record({
     'id' : IDL.Nat64,
@@ -215,7 +217,7 @@ export const idlFactory = ({ IDL }) => {
       ),
     'set_persona_profile' : IDL.Func([IDL.Text, IDL.Text], [], []),
     'start_artifact' : IDL.Func(
-        [IDL.Text, IDL.Opt(IDL.Text), IDL.Opt(IDL.Text)],
+        [IDL.Text, IDL.Opt(IDL.Text), IDL.Opt(IDL.Text), IDL.Opt(IDL.Text)],
         [IDL.Nat64],
         [],
       ),

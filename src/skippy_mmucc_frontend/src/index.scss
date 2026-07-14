@@ -256,6 +256,15 @@ button:disabled {
   }
 }
 
+// Skippy's Memory user-entered note (2026-07-14) — shown under the
+// title/kind/date so items can be told apart without downloading each one.
+.artifact-note {
+  display: inline-block;
+  margin-top: 0.2em;
+  font-style: italic;
+  opacity: 0.85;
+}
+
 // Skippy's Memory inline preview (2026-07-14) — audio/text shown in place
 // under the saved-artifact list item instead of requiring a download first.
 .artifact-preview-audio {

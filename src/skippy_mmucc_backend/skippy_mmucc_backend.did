@@ -103,6 +103,7 @@ type GeneratedArtifact = record {
     created_at : nat64;
     total_size : opt nat64;
     chunk_count : opt nat32;
+    notes : opt text;
 };
 
 type ArtifactMeta = record {
@@ -113,6 +114,7 @@ type ArtifactMeta = record {
     created_at : nat64;
     total_size : opt nat64;
     chunk_count : opt nat32;
+    notes : opt text;
 };
 
 service : (principal, principal, principal) -> {
@@ -174,7 +176,7 @@ service : (principal, principal, principal) -> {
     // anything Skippy creates (karaoke audio, workspace exports, Project
     // Briefs), beyond the one-off browser download those features already
     // offer. Not append-only, unlike Pillar 12's emergency audio ledger.
-    "start_artifact": (text, opt text, opt text) -> (nat64);
+    "start_artifact": (text, opt text, opt text, opt text) -> (nat64);
     "append_artifact_chunk": (nat64, blob) -> ();
     "get_artifact_chunk": (nat64, nat32) -> (opt blob) query;
     "list_my_artifacts": () -> (vec ArtifactMeta) query;
