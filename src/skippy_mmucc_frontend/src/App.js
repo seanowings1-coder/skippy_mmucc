@@ -345,6 +345,15 @@ const ROSTER_TRIGGER_PROMPT_REPLIES = [
 ];
 
 const KARAOKE_TRIGGER_PHRASES = ['karaoke', 'sing a song', 'jam out', 'rock out'];
+// Subset of the above that actually implies a style/theme, unlike the
+// generic 'karaoke'/'sing a song'. 2026-07-14 finding: when the user's
+// confirm turn itself repeats a trigger phrase ("rock out Skippy" as the
+// answer to the offer), the repeatedTrigger shortcut below treats that
+// phrase purely as a "yes, perform" signal and discards its content —
+// confirmed live, produced a song with zero relation to "rock out" because
+// the model got no topic at all. Used as a topic fallback (below
+// extractKaraokeTopic's "about X" phrasing, which still wins if present).
+const GENRE_KARAOKE_TRIGGER_PHRASES = ['jam out', 'rock out'];
 // Lets a user pin the song to a real subject ("Skippy sing a song about the
 // rain") instead of always getting whatever the LLM free-associates from
 // shared history — logged 2026-07-09 after the user reported songs jumping
@@ -2832,7 +2841,11 @@ class App {
       KARAOKE_TRIGGER_PHRASES.some((phrase) => lowerText.includes(phrase))
     ) {
       this.pendingKaraokeOffer = true;
-      this.pendingKaraokeTopic = extractKaraokeTopic(text);
+      // "about X" phrasing wins if present; otherwise fall back to a
+      // style-implying trigger word ("rock out") as the theme rather than
+      // discarding it — see GENRE_KARAOKE_TRIGGER_PHRASES above.
+      this.pendingKaraokeTopic =
+        extractKaraokeTopic(text) || GENRE_KARAOKE_TRIGGER_PHRASES.find((phrase) => lowerText.includes(phrase));
       this.statusMessage = "Skippy is revving up...";
       this.#render();
       let offerReply;
@@ -2877,8 +2890,15 @@ class App {
       this.pendingKaraokeOffer = false; // any response resolves the offer, yes or no
       if ((hasAffirmation && isTrivialRemainder(remainder)) || repeatedTrigger) {
         // A topic given on the confirm turn itself ("yes, about the rain")
-        // overrides one given on the original trigger, since it's more recent.
-        const topic = extractKaraokeTopic(text) || this.pendingKaraokeTopic;
+        // overrides one given on the original trigger, since it's more
+        // recent. If the confirm itself was a style-implying trigger phrase
+        // ("rock out Skippy" as the answer to the offer), use that as the
+        // theme too rather than silently discarding it — see
+        // GENRE_KARAOKE_TRIGGER_PHRASES above.
+        const topic =
+          extractKaraokeTopic(text) ||
+          this.pendingKaraokeTopic ||
+          GENRE_KARAOKE_TRIGGER_PHRASES.find((phrase) => lowerText.includes(phrase));
         this.pendingKaraokeTopic = null;
         await this.#performKaraoke(text, topic);
         return;

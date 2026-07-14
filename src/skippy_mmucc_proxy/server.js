@@ -860,9 +860,29 @@ function mergeKaraokeMarkers(rawText) {
     sungSegments.push(match[1].trim());
     lastIndex = pattern.lastIndex;
   }
-  if (!sawFirst || sungSegments.length <= 1) return text;
+  if (!sawFirst) return text;
+
+  // Degenerate marker pairs the model sometimes emits — e.g. a stray
+  // "🎶 🎶" with nothing real between them, confirmed live 2026-07-14
+  // tacked onto the very end of a reply — capture as an empty/whitespace-
+  // only segment. Counting that as "already a valid single pair" was the
+  // bug: the entire real song ends up sitting in introText/trailingText,
+  // completely unwrapped, and never gets routed to the singing voice at
+  // all (App.js's splitVoiceSegments only recognizes real 🎶-wrapped
+  // content). Drop empty segments before deciding whether this reply
+  // actually has a usable pair.
+  const realSegments = sungSegments.filter((s) => s.length > 0);
+
+  if (realSegments.length === 0) {
+    // No usable content inside ANY marker pair — same last-resort as the
+    // zero-marker case above: strip the stray markers and wrap everything,
+    // rather than leaving the real lyrics unwrapped and silently spoken in
+    // the conversational voice.
+    return `🎶 ${text.replace(/🎶/gu, '').trim()} 🎶`;
+  }
+  if (realSegments.length === 1) return text;
   const trailingText = text.slice(lastIndex);
-  return `${introText}🎶 ${sungSegments.join('\n')} 🎶${trailingText}`;
+  return `${introText}🎶 ${realSegments.join('\n')} 🎶${trailingText}`;
 }
 
 const app = express();
