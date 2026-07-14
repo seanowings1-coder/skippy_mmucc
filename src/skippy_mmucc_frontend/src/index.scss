@@ -256,6 +256,26 @@ button:disabled {
   }
 }
 
+// Skippy's Memory inline preview (2026-07-14) — audio/text shown in place
+// under the saved-artifact list item instead of requiring a download first.
+.artifact-preview-audio {
+  display: block;
+  width: 100%;
+  margin-top: 0.5em;
+}
+
+.artifact-preview-text {
+  max-height: 16em;
+  overflow-y: auto;
+  margin-top: 0.5em;
+  padding: 0.6em;
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  background: var(--bg-dark-armor);
+  white-space: pre-wrap;
+  font-size: 0.85em;
+}
+
 // Cost-tier LED — color escalates T4→T7 from amber to red via inline style.
 // Free tiers (T1-T3) leave it dark. Color and glow are set by App.js.
 .tier-dot {

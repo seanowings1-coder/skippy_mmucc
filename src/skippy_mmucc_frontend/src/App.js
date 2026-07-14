@@ -936,6 +936,11 @@ class App {
   // Metadata-only list from list_my_artifacts (no blob data) — populated on
   // login/workspace switch and refreshed after every save/delete.
   savedArtifacts = [];
+  // In-app preview for a Skippy's Memory item (2026-07-14) — { id, kind:
+  // 'audio'|'text', url?, content? }, or null when nothing's expanded.
+  // Only one at a time; opening a new one closes/revokes the last so blob
+  // URLs from #previewSavedArtifact don't leak.
+  previewArtifact = null;
   audioUnlocked = false;
   // Monotonic counter + abort handle so a new utterance can immediately
   // interrupt whatever Skippy is currently saying or still waiting on,
@@ -1520,45 +1525,51 @@ class App {
     this.#render();
   };
 
-  // Fetches one saved artifact's chunks in order and reassembles them,
-  // then triggers a plain browser download — the save/keep side already put
-  // it in canister storage, this is just getting a local copy back out.
-  // Falls back to the legacy single-blob `data` field (via get_artifact) for
-  // anything saved before the 2026-07-13 chunking follow-up.
+  // Fetches one saved artifact's chunks in order and reassembles them into
+  // one Uint8Array. Shared by #downloadSavedArtifact and #previewSavedArtifact
+  // so both go through the exact same reassembly path. Falls back to the
+  // legacy single-blob `data` field (via get_artifact) for anything saved
+  // before the 2026-07-13 chunking follow-up. Throws on failure — callers
+  // are responsible for the try/catch and status message.
+  #fetchArtifactBytes = async (id, onProgress) => {
+    const meta = await this.backendActor.get_artifact(id);
+    const artifact = meta[0];
+    if (!artifact) {
+      throw new Error("Couldn't find that artifact — it may have already been deleted.");
+    }
+    const chunkCount = artifact.chunk_count?.[0] ?? 0;
+    let bytes;
+    if (chunkCount > 0) {
+      const parts = [];
+      for (let i = 0; i < chunkCount; i++) {
+        if (chunkCount > 1 && onProgress) onProgress(i + 1, chunkCount);
+        const chunkResult = await this.backendActor.get_artifact_chunk(id, i);
+        const chunk = chunkResult[0];
+        if (!chunk) throw new Error(`Missing chunk ${i} of ${chunkCount} — artifact may be corrupted.`);
+        parts.push(new Uint8Array(chunk));
+      }
+      const totalLength = parts.reduce((sum, p) => sum + p.length, 0);
+      bytes = new Uint8Array(totalLength);
+      let offset = 0;
+      for (const part of parts) {
+        bytes.set(part, offset);
+        offset += part.length;
+      }
+    } else {
+      // Legacy single-blob artifact (saved before chunking existed).
+      bytes = new Uint8Array(artifact.data);
+    }
+    return { artifact, bytes };
+  };
+
+  // Triggers a plain browser download — the save/keep side already put the
+  // artifact in canister storage, this is just getting a local copy back out.
   #downloadSavedArtifact = async (id) => {
     try {
-      const meta = await this.backendActor.get_artifact(id);
-      const artifact = meta[0];
-      if (!artifact) {
-        this.statusMessage = "Couldn't find that artifact — it may have already been deleted.";
+      const { artifact, bytes } = await this.#fetchArtifactBytes(id, (i, total) => {
+        this.statusMessage = `Downloading... (${i}/${total})`;
         this.#render();
-        return;
-      }
-      const chunkCount = artifact.chunk_count?.[0] ?? 0;
-      let bytes;
-      if (chunkCount > 0) {
-        const parts = [];
-        for (let i = 0; i < chunkCount; i++) {
-          if (chunkCount > 1) {
-            this.statusMessage = `Downloading... (${i + 1}/${chunkCount})`;
-            this.#render();
-          }
-          const chunkResult = await this.backendActor.get_artifact_chunk(id, i);
-          const chunk = chunkResult[0];
-          if (!chunk) throw new Error(`Missing chunk ${i} of ${chunkCount} — artifact may be corrupted.`);
-          parts.push(new Uint8Array(chunk));
-        }
-        const totalLength = parts.reduce((sum, p) => sum + p.length, 0);
-        bytes = new Uint8Array(totalLength);
-        let offset = 0;
-        for (const part of parts) {
-          bytes.set(part, offset);
-          offset += part.length;
-        }
-      } else {
-        // Legacy single-blob artifact (saved before chunking existed).
-        bytes = new Uint8Array(artifact.data);
-      }
+      });
       const mime = artifact.mime?.[0] || 'application/octet-stream';
       const blob = new Blob([bytes], { type: mime });
       const url = URL.createObjectURL(blob);
@@ -1576,10 +1587,50 @@ class App {
     this.#render();
   };
 
+  // In-app preview (2026-07-14) — no round-trip through the Downloads folder
+  // just to check whether a saved item is the right one. Only audio and
+  // plain-text/markdown are previewable inline; Word docs (project briefs)
+  // are a binary zip format that would need a new parsing dependency to
+  // render, so they stay download-only rather than reaching for one just
+  // for this. Clicking an already-open item's Preview button closes it.
+  #previewSavedArtifact = async (id) => {
+    if (this.previewArtifact?.id === id) {
+      if (this.previewArtifact.url) URL.revokeObjectURL(this.previewArtifact.url);
+      this.previewArtifact = null;
+      this.#render();
+      return;
+    }
+    try {
+      const { artifact, bytes } = await this.#fetchArtifactBytes(id, (i, total) => {
+        this.statusMessage = `Loading preview... (${i}/${total})`;
+        this.#render();
+      });
+      const mime = artifact.mime?.[0] || '';
+      if (this.previewArtifact?.url) URL.revokeObjectURL(this.previewArtifact.url);
+      if (mime.startsWith('audio/')) {
+        const url = URL.createObjectURL(new Blob([bytes], { type: mime }));
+        this.previewArtifact = { id, kind: 'audio', url };
+      } else if (mime.startsWith('text/')) {
+        this.previewArtifact = { id, kind: 'text', content: new TextDecoder().decode(bytes) };
+      } else {
+        this.statusMessage = "Preview isn't available for this file type — download it to view.";
+        this.previewArtifact = null;
+      }
+    } catch (err) {
+      this.statusMessage = `Couldn't load preview: ${extractCanisterTrapMessage(err)}`;
+      this.previewArtifact = null;
+    }
+    this.#render();
+  };
+
   #deleteSavedArtifact = async (id) => {
     try {
       await this.backendActor.delete_artifact(id);
       this.savedArtifacts = this.savedArtifacts.filter((a) => a.id !== id);
+      if (this.previewArtifact?.id === id) {
+        if (this.previewArtifact.url) URL.revokeObjectURL(this.previewArtifact.url);
+        this.previewArtifact = null;
+      }
     } catch (err) {
       this.statusMessage = `Couldn't delete: ${extractCanisterTrapMessage(err)}`;
     }
@@ -4360,8 +4411,11 @@ class App {
                       ${this.savedArtifacts
                         .slice()
                         .sort((a, b) => Number(b.created_at) - Number(a.created_at))
-                        .map(
-                          (art) => html`
+                        .map((art) => {
+                          const mime = art.mime?.[0] || '';
+                          const isPreviewable = mime.startsWith('audio/') || mime.startsWith('text/');
+                          const isOpen = this.previewArtifact?.id === art.id;
+                          return html`
                             <li>
                               <strong>${art.title?.[0] || art.kind}</strong>
                               <span class="section-id">(${art.kind})</span>
@@ -4369,11 +4423,22 @@ class App {
                               <span class="status">
                                 ${new Date(Number(art.created_at / 1_000_000n)).toLocaleString()}
                               </span>
+                              ${isPreviewable
+                                ? html`<button @click=${() => this.#previewSavedArtifact(art.id)}>
+                                    ${isOpen ? 'Hide' : 'Preview'}
+                                  </button>`
+                                : ''}
                               <button @click=${() => this.#downloadSavedArtifact(art.id)}>Download</button>
                               <button @click=${() => this.#deleteSavedArtifact(art.id)}>Delete</button>
+                              ${isOpen && this.previewArtifact.kind === 'audio'
+                                ? html`<audio controls src=${this.previewArtifact.url} class="artifact-preview-audio"></audio>`
+                                : ''}
+                              ${isOpen && this.previewArtifact.kind === 'text'
+                                ? html`<pre class="artifact-preview-text">${this.previewArtifact.content}</pre>`
+                                : ''}
                             </li>
-                          `,
-                        )}
+                          `;
+                        })}
                     </ul>
                   `}
             </details>
