@@ -37,6 +37,10 @@ const GENERATED_ARTIFACTS_MEMORY_ID: MemoryId = MemoryId::new(13);
 // full-length karaoke songs) made the single-blob-per-call design too small
 // for anything past ~1.8MB. 14 is the next free slot.
 const ARTIFACT_CHUNKS_MEMORY_ID: MemoryId = MemoryId::new(14);
+// Pillar 23 (Contacts) — durable per-owner address book so voice can resolve
+// "email the plumber" to a real address without ever having to dictate one.
+// 15 is the next free slot; never renumber/reuse.
+const CONTACTS_MEMORY_ID: MemoryId = MemoryId::new(15);
 
 // Pillar 19 (Self-Evolution & Metacognitive Matrix) — hard caps on every
 // personality weight, confirmed 2026-06-22: growth should be natural and
@@ -514,6 +518,48 @@ impl Storable for ArtifactChunk {
     };
 }
 
+/// Pillar 23 (Contacts) — a durable per-owner address book so a voice
+/// command like "email the plumber" can resolve to a real address without
+/// ever dictating one (email addresses are only ever entered via a typed
+/// form, never spoken). `relationship`/`company`/`keywords` are all
+/// searched together when resolving a spoken name/description to a contact
+/// — the frontend owns that matching logic, this struct just holds the data.
+/// `shared` defaults false (private) at creation; the user's explicit call
+/// 2026-07-14 was "private and both... default to private" — a contact only
+/// becomes visible to the other whitelisted Principal when its owner opts
+/// in, and only the owner can ever change that (see assert_contact_owner).
+#[derive(CandidType, Deserialize, Clone, Debug)]
+pub struct Contact {
+    pub id: u64,
+    pub owner: Principal,
+    pub name: String,
+    pub email: String,
+    pub relationship: Option<String>,
+    pub company: Option<String>,
+    pub keywords: Option<Vec<String>>,
+    pub shared: bool,
+    pub created_at: u64,
+}
+
+impl Storable for Contact {
+    fn to_bytes(&self) -> Cow<'_, [u8]> {
+        Cow::Owned(Encode!(self).unwrap())
+    }
+
+    fn into_bytes(self) -> Vec<u8> {
+        Encode!(&self).unwrap()
+    }
+
+    fn from_bytes(bytes: Cow<[u8]>) -> Self {
+        Decode!(bytes.as_ref(), Self).unwrap()
+    }
+
+    const BOUND: Bound = Bound::Bounded {
+        max_size: 2_000,
+        is_fixed_size: false,
+    };
+}
+
 /// A Principal's self-set display name and ElevenLabs voice ID (Pillar 3's
 /// dual-voice routing). Not secret, unlike the whitelist — settable at
 /// runtime by each user for themselves, no redeploy needed.
@@ -731,6 +777,11 @@ thread_local! {
     static ARTIFACT_CHUNKS: RefCell<StableBTreeMap<ArtifactChunkKey, ArtifactChunk, Memory>> =
         RefCell::new(StableBTreeMap::init(
             MEMORY_MANAGER.with(|m| m.borrow().get(ARTIFACT_CHUNKS_MEMORY_ID)),
+        ));
+
+    static CONTACTS: RefCell<StableBTreeMap<u64, Contact, Memory>> =
+        RefCell::new(StableBTreeMap::init(
+            MEMORY_MANAGER.with(|m| m.borrow().get(CONTACTS_MEMORY_ID)),
         ));
 
     // TOCTOU guard: the canister suspends at every .await, allowing a concurrent
@@ -1687,4 +1738,96 @@ fn delete_artifact(id: u64) {
         }
     });
     GENERATED_ARTIFACTS.with(|a| a.borrow_mut().remove(&id));
+}
+
+/// Shared by every Pillar 23 method that mutates an existing contact — only
+/// the owner can edit/delete/re-share their own contact, even after it's
+/// been shared with the other Principal (sharing only grants read/matching
+/// visibility, never write access). Same non-leaking trap shape as
+/// `assert_artifact_owner`.
+fn assert_contact_owner(caller: Principal, id: u64) -> Contact {
+    match CONTACTS.with(|c| c.borrow().get(&id)) {
+        Some(contact) if contact.owner == caller => contact,
+        _ => ic_cdk::trap("Contact not found or not owned by caller."),
+    }
+}
+
+/// Pillar 23 (Contacts). `shared` defaults to whatever the caller passes —
+/// the frontend's add-contact form defaults its checkbox to unchecked, so a
+/// new contact is private unless the user explicitly opts in at creation
+/// (or later, via update_contact).
+#[update]
+fn add_contact(
+    name: String,
+    email: String,
+    relationship: Option<String>,
+    company: Option<String>,
+    keywords: Option<Vec<String>>,
+    shared: bool,
+) -> u64 {
+    let caller = assert_whitelisted();
+    let id = take_next_id();
+    let contact = Contact {
+        id,
+        owner: caller,
+        name,
+        email,
+        relationship,
+        company,
+        keywords,
+        shared,
+        created_at: ic_cdk::api::time(),
+    };
+    CONTACTS.with(|c| c.borrow_mut().insert(id, contact));
+    id
+}
+
+/// Returns the caller's own contacts plus any of the other whitelisted
+/// Principal's contacts they've marked `shared` — same "look up the other
+/// Principal" idiom as `queue_courier_message`. A contact's owner never
+/// changes when shared; the other Principal just gains read/matching
+/// visibility, not write access (see assert_contact_owner).
+#[query]
+fn list_my_contacts() -> Vec<Contact> {
+    let caller = assert_whitelisted();
+    let commander = COMMANDER_PRINCIPAL.with(|c| *c.borrow().get());
+    let partner = PARTNER_PRINCIPAL.with(|c| *c.borrow().get());
+    let other = if caller == commander { partner } else { commander };
+    CONTACTS.with(|c| {
+        c.borrow()
+            .iter()
+            .map(|entry| entry.value().clone())
+            .filter(|contact| contact.owner == caller || (contact.owner == other && contact.shared))
+            .collect()
+    })
+}
+
+/// Full-replace update (matches this file's existing edit-form convention,
+/// e.g. roster-style editing) — owner-only.
+#[update]
+fn update_contact(
+    id: u64,
+    name: String,
+    email: String,
+    relationship: Option<String>,
+    company: Option<String>,
+    keywords: Option<Vec<String>>,
+    shared: bool,
+) {
+    let caller = assert_whitelisted();
+    let mut contact = assert_contact_owner(caller, id);
+    contact.name = name;
+    contact.email = email;
+    contact.relationship = relationship;
+    contact.company = company;
+    contact.keywords = keywords;
+    contact.shared = shared;
+    CONTACTS.with(|c| c.borrow_mut().insert(id, contact));
+}
+
+#[update]
+fn delete_contact(id: u64) {
+    let caller = assert_whitelisted();
+    assert_contact_owner(caller, id);
+    CONTACTS.with(|c| c.borrow_mut().remove(&id));
 }

@@ -12,6 +12,17 @@ export interface ArtifactMeta {
   'chunk_count' : [] | [number],
   'notes' : [] | [string],
 }
+export interface Contact {
+  'id' : bigint,
+  'shared' : boolean,
+  'relationship' : [] | [string],
+  'owner' : Principal,
+  'name' : string,
+  'created_at' : bigint,
+  'email' : string,
+  'keywords' : [] | [Array<string>],
+  'company' : [] | [string],
+}
 export interface CourierMessage {
   'id' : bigint,
   'content' : string,
@@ -104,6 +115,17 @@ export interface Workspace {
 export type WorkspaceStatus = { 'Active' : null } |
   { 'Archived' : null };
 export interface _SERVICE {
+  'add_contact' : ActorMethod<
+    [
+      string,
+      string,
+      [] | [string],
+      [] | [string],
+      [] | [Array<string>],
+      boolean,
+    ],
+    bigint
+  >,
   'add_manual_chunks' : ActorMethod<
     [string, [] | [string], Array<NewChunk>],
     BigUint64Array | bigint[]
@@ -121,6 +143,7 @@ export interface _SERVICE {
   'archive_workspace' : ActorMethod<[bigint], undefined>,
   'create_workspace' : ActorMethod<[string], bigint>,
   'delete_artifact' : ActorMethod<[bigint], undefined>,
+  'delete_contact' : ActorMethod<[bigint], undefined>,
   'delete_manual' : ActorMethod<[string], bigint>,
   'delete_manual_section' : ActorMethod<[bigint], boolean>,
   'delete_workspace' : ActorMethod<[bigint], undefined>,
@@ -142,6 +165,7 @@ export interface _SERVICE {
   >,
   'list_manual_names' : ActorMethod<[], Array<string>>,
   'list_my_artifacts' : ActorMethod<[], Array<ArtifactMeta>>,
+  'list_my_contacts' : ActorMethod<[], Array<Contact>>,
   'list_my_emergencies' : ActorMethod<[], Array<EmergencyEvent>>,
   'list_my_evolution_log' : ActorMethod<[number], Array<EvolutionLogEntry>>,
   'list_my_workspaces' : ActorMethod<[], Array<Workspace>>,
@@ -170,6 +194,18 @@ export interface _SERVICE {
   'start_emergency' : ActorMethod<[string], bigint>,
   'trigger_fuel_pump' : ActorMethod<[], string>,
   'update_associated_manuals' : ActorMethod<[bigint, Array<string>], undefined>,
+  'update_contact' : ActorMethod<
+    [
+      bigint,
+      string,
+      string,
+      [] | [string],
+      [] | [string],
+      [] | [Array<string>],
+      boolean,
+    ],
+    undefined
+  >,
   'update_scratchpad' : ActorMethod<[bigint, string], undefined>,
   'validate_session' : ActorMethod<[string], [] | [SessionInfo]>,
   'verify_unlock' : ActorMethod<[], boolean>,

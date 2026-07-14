@@ -117,6 +117,18 @@ type ArtifactMeta = record {
     notes : opt text;
 };
 
+type Contact = record {
+    id : nat64;
+    owner : principal;
+    name : text;
+    email : text;
+    relationship : opt text;
+    company : opt text;
+    keywords : opt vec text;
+    shared : bool;
+    created_at : nat64;
+};
+
 service : (principal, principal, principal) -> {
     "greet": (text) -> (text) query;
 
@@ -182,4 +194,13 @@ service : (principal, principal, principal) -> {
     "list_my_artifacts": () -> (vec ArtifactMeta) query;
     "get_artifact": (nat64) -> (opt GeneratedArtifact) query;
     "delete_artifact": (nat64) -> ();
+
+    // Pillar 23 (Contacts) — durable per-owner address book so voice can
+    // resolve "email the plumber" without ever dictating a raw address.
+    // Private by default; shared contacts are read-visible to the other
+    // whitelisted Principal but stay owner-only for edits/deletes.
+    "add_contact": (text, text, opt text, opt text, opt vec text, bool) -> (nat64);
+    "list_my_contacts": () -> (vec Contact) query;
+    "update_contact": (nat64, text, text, opt text, opt text, opt vec text, bool) -> ();
+    "delete_contact": (nat64) -> ();
 }

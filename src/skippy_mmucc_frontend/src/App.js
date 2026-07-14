@@ -366,6 +366,41 @@ function extractKaraokeTopic(text) {
   const topic = match[1].replace(/[.?!]+$/, '').trim();
   return topic || null;
 }
+
+// Pillar 23 (Contacts) — voice trigger for resolving a spoken description
+// ("email the plumber", "send an email to my wife") to a stored contact.
+// Deliberately NOT a bare "email" trigger — "what's my email address" would
+// false-positive on that. Each phrase already includes its own leading
+// article/possessive where one naturally follows ("email the", "email my"),
+// so extraction below never has to guess whether to strip one.
+const EMAIL_CONTACT_TRIGGER_PHRASES = [
+  'send an email to', 'send email to', 'email the', 'email my', 'email to',
+];
+function extractEmailRecipientQuery(text) {
+  const lowerText = text.toLowerCase();
+  const matchedPhrase = EMAIL_CONTACT_TRIGGER_PHRASES.find((phrase) => lowerText.includes(phrase));
+  if (!matchedPhrase) return null;
+  const matchIndex = lowerText.indexOf(matchedPhrase);
+  let remainder = text.slice(matchIndex + matchedPhrase.length).trim();
+  // "send an email to" doesn't consume a following article/possessive the
+  // way "email the"/"email my" do — strip a leftover one here.
+  remainder = remainder.replace(/^(the|my)\s+/i, '');
+  remainder = remainder.replace(/[.,!?]+$/, '').trim();
+  return remainder || null;
+}
+
+// Substring match against every searchable field — case-insensitive both
+// directions (query-in-field and field-in-query) so "John" matches a
+// contact named "John Smith" and "the plumber" (already trigger-stripped to
+// "plumber") matches a contact with relationship/company/keyword "plumber".
+function findMatchingContacts(contacts, query) {
+  const q = query.toLowerCase().trim();
+  if (!q) return [];
+  return contacts.filter((c) => {
+    const fields = [c.name, c.relationship?.[0], c.company?.[0], ...(c.keywords?.[0] || [])].filter(Boolean);
+    return fields.some((f) => f.toLowerCase().includes(q) || q.includes(f.toLowerCase()));
+  });
+}
 // A pool, not one fixed line — confirmed live 2026-06-24: hearing the exact
 // same offer verbatim every single time read as flat/robotic rather than
 // the "excited kid getting a puppy" energy this is supposed to have. Still
@@ -908,6 +943,18 @@ class App {
   rosterProfiles = JSON.parse(localStorage.getItem('skippy_roster_profiles') || '[]');
   activeRosterProfile = null;
   editingRosterIndex = null;
+  // Pillar 23 (Contacts) — unlike Roster above, this IS real canister data
+  // (owner-scoped, optionally shared with the other whitelisted Principal),
+  // populated from list_my_contacts() at login, not localStorage.
+  contacts = [];
+  editingContactId = null;
+  // Voice "email the X" resolution state. pendingContactDisambiguation holds
+  // { query, candidates } while waiting for the user to pick between 2+
+  // matches; pendingEmailContact holds the single resolved contact once one
+  // is settled on — the actual compose/read-back/Gmail-handoff flow that
+  // consumes this is a separate follow-up pass, not built yet.
+  pendingContactDisambiguation = null;
+  pendingEmailContact = null;
   // On-device speaker recognition (open-source, no API key — see voiceId.js)
   // — persona/tone signal only (see voiceId.js's header comment for why).
   // `hasEnrolledVoice` is
@@ -1146,6 +1193,7 @@ class App {
       await this.#loadWorkspaces();
       await this.#refreshManualOptions();
       this.savedArtifacts = await this.backendActor.list_my_artifacts();
+      this.contacts = await this.backendActor.list_my_contacts();
       const profileOpt = await this.backendActor.get_my_persona_profile();
       const profile = profileOpt[0];
       this.profileName = profile?.name?.[0] || '';
@@ -1775,6 +1823,66 @@ class App {
     this.#render();
   };
 
+  // Pillar 23 (Contacts) — real canister data, unlike Roster above, so every
+  // mutation round-trips through the backend and refreshes from its
+  // response rather than optimistically editing a local array. Email
+  // addresses are only ever entered here, via this typed form — never
+  // dictated by voice (see the Contact struct's own doc comment for why).
+  #saveContact = async (e) => {
+    e.preventDefault();
+    const form = e.target;
+    const name = form.elements.contactName.value.trim();
+    const email = form.elements.contactEmail.value.trim();
+    const relationship = form.elements.contactRelationship.value.trim();
+    const company = form.elements.contactCompany.value.trim();
+    const keywords = form.elements.contactKeywords.value
+      .split(',')
+      .map((k) => k.trim())
+      .filter(Boolean);
+    const shared = form.elements.contactShared.checked;
+    if (!name || !email) return;
+    const relationshipArg = relationship ? [relationship] : [];
+    const companyArg = company ? [company] : [];
+    const keywordsArg = keywords.length ? [keywords] : [];
+    try {
+      if (this.editingContactId !== null) {
+        await this.backendActor.update_contact(
+          this.editingContactId, name, email, relationshipArg, companyArg, keywordsArg, shared,
+        );
+        this.editingContactId = null;
+      } else {
+        await this.backendActor.add_contact(name, email, relationshipArg, companyArg, keywordsArg, shared);
+      }
+      this.contacts = await this.backendActor.list_my_contacts();
+      form.reset();
+      this.statusMessage = 'Contact saved.';
+    } catch (err) {
+      this.statusMessage = `Couldn't save contact: ${extractCanisterTrapMessage(err)}`;
+    }
+    this.#render();
+  };
+
+  #editContact = (id) => {
+    this.editingContactId = id;
+    this.#render();
+  };
+
+  #cancelEditContact = () => {
+    this.editingContactId = null;
+    this.#render();
+  };
+
+  #deleteContact = async (id) => {
+    try {
+      await this.backendActor.delete_contact(id);
+      this.contacts = this.contacts.filter((c) => c.id !== id);
+      if (this.editingContactId === id) this.editingContactId = null;
+    } catch (err) {
+      this.statusMessage = `Couldn't delete contact: ${extractCanisterTrapMessage(err)}`;
+    }
+    this.#render();
+  };
+
   #logout = async () => {
     await this.authClient.logout();
     this.identity = null;
@@ -2335,7 +2443,9 @@ class App {
     // Skip both checks when waiting for a deliberate one-word confirmation
     // (karaoke offer or web-search permission) — the user's "yes"/"go" is
     // intentional, not Skippy's own voice looping back.
-    const awaitingConfirmation = this.pendingKaraokeOffer || !!this.pendingWebSearchQuery || !!this.pendingRosterStep;
+    const awaitingConfirmation =
+      this.pendingKaraokeOffer || !!this.pendingWebSearchQuery || !!this.pendingRosterStep ||
+      !!this.pendingContactDisambiguation;
     if (
       !awaitingConfirmation &&
       (Date.now() - this.lastSpeakEndTime < App.#FINAL_CHUNK_MIN_GAP_MS || this.#isLikelySelfEcho(chunk))
@@ -2816,6 +2926,59 @@ class App {
     // during Guest Mode same as every other persistent-state-changing action.
     if (!this.guestMode && COURSE_CORRECTION_PHRASES.some((phrase) => lowerText.includes(phrase))) {
       this.#applyCourseCorrection(text);
+      return;
+    }
+
+    // Pillar 23 (Contacts) — voice email-recipient resolution, step 2:
+    // waiting for the user to pick between 2+ candidates listed below.
+    // Gated off in Guest Mode same as Roster-add/Course Correction — a
+    // guest has no business triggering an email to someone in the owner's
+    // (possibly private) contact list.
+    if (!this.guestMode && this.pendingContactDisambiguation) {
+      const { candidates } = this.pendingContactDisambiguation;
+      this.pendingContactDisambiguation = null;
+      const picked = candidates.find((c) => lowerText.includes(c.name.toLowerCase()));
+      if (!picked) {
+        const ack = "Didn't catch which one, Commander — say the name again, or just tell me who to email.";
+        this.#recordTurn(text, ack);
+        this.#render();
+        this.#speak(ack);
+        return;
+      }
+      this.pendingEmailContact = picked;
+      const ack = `Got it — ${picked.name} at ${picked.email}. What would you like the email to say?`;
+      this.#recordTurn(text, ack);
+      this.#render();
+      this.#speak(ack);
+      return;
+    }
+
+    // Step 1: trigger heard ("email the plumber", "send an email to my
+    // wife") — resolve to zero/one/many contacts. Never dictated raw
+    // addresses; those only ever get typed into the Contacts form.
+    const emailRecipientQuery = !this.guestMode ? extractEmailRecipientQuery(text) : null;
+    if (emailRecipientQuery) {
+      const matches = findMatchingContacts(this.contacts, emailRecipientQuery);
+      let ack;
+      if (matches.length === 0) {
+        // Consistent with the anti-hallucination rule server-side — an
+        // honest "I don't have that" rather than guessing an address.
+        ack =
+          `No contact matches "${emailRecipientQuery}" in your list, Commander — add one in the ` +
+          'Contacts panel, or just tell me the address directly.';
+      } else if (matches.length === 1) {
+        this.pendingEmailContact = matches[0];
+        ack = `Got it — ${matches[0].name} at ${matches[0].email}. What would you like the email to say?`;
+      } else {
+        this.pendingContactDisambiguation = { query: emailRecipientQuery, candidates: matches };
+        const names = matches
+          .map((c) => (c.company?.[0] ? `${c.name} (${c.company[0]})` : c.name))
+          .join(', or ');
+        ack = `I've got ${matches.length} matches for "${emailRecipientQuery}": ${names}. Which one?`;
+      }
+      this.#recordTurn(text, ack);
+      this.#render();
+      this.#speak(ack);
       return;
     }
 
@@ -4695,6 +4858,71 @@ class App {
                 </li>
               `,
             )}
+          </ul>
+        </details>
+
+        <details class="tactical-roster">
+          <summary>Contacts (${this.contacts.length})</summary>
+          <p class="status">
+            Private by default — a contact is only visible to your partner if you check "Share."
+            Email addresses are always typed here, never dictated by voice.
+          </p>
+          ${(() => {
+            const editing = this.editingContactId !== null
+              ? this.contacts.find((c) => c.id === this.editingContactId)
+              : null;
+            return html`
+              <form @submit=${this.#saveContact}>
+                <label>Name
+                  <input name="contactName" type="text" placeholder="Jane" required .value=${editing?.name ?? ''} />
+                </label>
+                <label>Email
+                  <input name="contactEmail" type="email" placeholder="jane@example.com" required .value=${editing?.email ?? ''} />
+                </label>
+                <label>Relationship
+                  <input name="contactRelationship" type="text" placeholder="wife" .value=${editing?.relationship?.[0] ?? ''} />
+                </label>
+                <label>Company
+                  <input name="contactCompany" type="text" placeholder="Ace Plumbing" .value=${editing?.company?.[0] ?? ''} />
+                </label>
+                <label>Keywords (comma-separated)
+                  <input name="contactKeywords" type="text" placeholder="plumber, plumbing, pipes" .value=${(editing?.keywords?.[0] ?? []).join(', ')} />
+                </label>
+                <label style="display:flex;align-items:center;gap:0.4em;">
+                  <input name="contactShared" type="checkbox" ?checked=${editing?.shared ?? false} />
+                  Share with partner
+                </label>
+                <div style="display:flex;gap:0.5em;margin-top:0.4em;">
+                  <button type="submit">${editing ? 'Save changes' : '+ Add contact'}</button>
+                  ${editing ? html`<button type="button" @click=${this.#cancelEditContact}>Cancel</button>` : ''}
+                </div>
+              </form>
+            `;
+          })()}
+          <ul>
+            ${this.contacts.map((c) => {
+              const isMine = c.owner?.toText?.() === this.principalText;
+              return html`
+                <li style="margin:0.5em 0;">
+                  <div>
+                    <strong>${c.name}</strong> — ${c.email}
+                    ${c.relationship?.[0] ? ` · ${c.relationship[0]}` : ''}
+                    ${c.company?.[0] ? ` · ${c.company[0]}` : ''}
+                    ${!isMine ? html`<span class="section-id"> (shared)</span>` : ''}
+                    ${isMine && c.shared ? html`<span class="section-id"> (shared with partner)</span>` : ''}
+                  </div>
+                  ${c.keywords?.[0]?.length ? html`<div class="status" style="margin:0.2em 0 0.3em;">${c.keywords[0].join(', ')}</div>` : ''}
+                  ${isMine
+                    ? html`
+                        <div style="display:flex;gap:0.4em;">
+                          <button @click=${() => this.#editContact(c.id)}>Edit</button>
+                          <button @click=${() => this.#deleteContact(c.id)}>Delete</button>
+                        </div>
+                      `
+                    : ''}
+                </li>
+              `;
+            })}
           </ul>
         </details>
         `}

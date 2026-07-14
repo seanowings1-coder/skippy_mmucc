@@ -58,6 +58,17 @@ export const idlFactory = ({ IDL }) => {
     'chunk_count' : IDL.Opt(IDL.Nat32),
     'notes' : IDL.Opt(IDL.Text),
   });
+  const Contact = IDL.Record({
+    'id' : IDL.Nat64,
+    'shared' : IDL.Bool,
+    'relationship' : IDL.Opt(IDL.Text),
+    'owner' : IDL.Principal,
+    'name' : IDL.Text,
+    'created_at' : IDL.Nat64,
+    'email' : IDL.Text,
+    'keywords' : IDL.Opt(IDL.Vec(IDL.Text)),
+    'company' : IDL.Opt(IDL.Text),
+  });
   const EmergencyEvent = IDL.Record({
     'id' : IDL.Nat64,
     'secure_token' : IDL.Text,
@@ -106,6 +117,18 @@ export const idlFactory = ({ IDL }) => {
     'voice_id' : IDL.Opt(IDL.Text),
   });
   return IDL.Service({
+    'add_contact' : IDL.Func(
+        [
+          IDL.Text,
+          IDL.Text,
+          IDL.Opt(IDL.Text),
+          IDL.Opt(IDL.Text),
+          IDL.Opt(IDL.Vec(IDL.Text)),
+          IDL.Bool,
+        ],
+        [IDL.Nat64],
+        [],
+      ),
     'add_manual_chunks' : IDL.Func(
         [IDL.Text, IDL.Opt(IDL.Text), IDL.Vec(NewChunk)],
         [IDL.Vec(IDL.Nat64)],
@@ -126,6 +149,7 @@ export const idlFactory = ({ IDL }) => {
     'archive_workspace' : IDL.Func([IDL.Nat64], [], []),
     'create_workspace' : IDL.Func([IDL.Text], [IDL.Nat64], []),
     'delete_artifact' : IDL.Func([IDL.Nat64], [], []),
+    'delete_contact' : IDL.Func([IDL.Nat64], [], []),
     'delete_manual' : IDL.Func([IDL.Text], [IDL.Nat64], []),
     'delete_manual_section' : IDL.Func([IDL.Nat64], [IDL.Bool], []),
     'delete_workspace' : IDL.Func([IDL.Nat64], [], []),
@@ -165,6 +189,7 @@ export const idlFactory = ({ IDL }) => {
       ),
     'list_manual_names' : IDL.Func([], [IDL.Vec(IDL.Text)], ['query']),
     'list_my_artifacts' : IDL.Func([], [IDL.Vec(ArtifactMeta)], ['query']),
+    'list_my_contacts' : IDL.Func([], [IDL.Vec(Contact)], ['query']),
     'list_my_emergencies' : IDL.Func([], [IDL.Vec(EmergencyEvent)], ['query']),
     'list_my_evolution_log' : IDL.Func(
         [IDL.Nat32],
@@ -225,6 +250,19 @@ export const idlFactory = ({ IDL }) => {
     'trigger_fuel_pump' : IDL.Func([], [IDL.Text], []),
     'update_associated_manuals' : IDL.Func(
         [IDL.Nat64, IDL.Vec(IDL.Text)],
+        [],
+        [],
+      ),
+    'update_contact' : IDL.Func(
+        [
+          IDL.Nat64,
+          IDL.Text,
+          IDL.Text,
+          IDL.Opt(IDL.Text),
+          IDL.Opt(IDL.Text),
+          IDL.Opt(IDL.Vec(IDL.Text)),
+          IDL.Bool,
+        ],
         [],
         [],
       ),
