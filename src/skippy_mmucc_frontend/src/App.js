@@ -245,6 +245,21 @@ const AFFIRMATION_PHRASES = [
   'rock out',
 ];
 
+// Pillar 23 phase 2 — send-confirmation cues for the email compose session,
+// checked instead of (not alongside) AFFIRMATION_PHRASES + isTrivialRemainder.
+// Live-tested 2026-07-15: real replies were "that's good can you send it" and
+// a bare "send it" — neither is in AFFIRMATION_PHRASES, and even a phrase
+// that does overlap ("go for it") would have failed the isTrivialRemainder
+// gate anyway, since that gate exists for karaoke's "is a NEW topic being
+// added on the confirm turn" ambiguity, which has no equivalent here — a
+// send confirmation is never also carrying a revision worth preserving.
+// Bare "send" is safe even inside "don't send ..." because isCancel (checked
+// first, see below) already catches that exact phrase before this runs.
+const EMAIL_SEND_CONFIRMATION_PHRASES = [
+  'send it', 'send', 'go ahead and send', 'ship it', 'good to go', "that's good",
+  'sounds good', 'looks good', 'perfect', 'that works', 'go for it', 'yes', 'yeah', 'sure',
+];
+
 // Pillar 3's persona/Brain Switching trigger phrases — plain substring
 // matching on the transcript, no secondary classification call. "behave"
 // and "be yourself" require a "skippy" lead-in elsewhere in the same chunk
@@ -376,18 +391,37 @@ function extractKaraokeTopic(text) {
 const EMAIL_CONTACT_TRIGGER_PHRASES = [
   'send an email to', 'send email to', 'email the', 'email my', 'email to',
 ];
+
+// Shared by extractEmailRecipientQuery below and the "who's the email to?"
+// follow-up answer handler — strips a leading article/possessive and
+// trailing punctuation so both paths normalize a spoken name the same way.
+function cleanRecipientQuery(raw) {
+  const cleaned = raw.replace(/^(the|my)\s+/i, '').replace(/[.,!?]+$/, '').trim();
+  return cleaned || null;
+}
 function extractEmailRecipientQuery(text) {
   const lowerText = text.toLowerCase();
   const matchedPhrase = EMAIL_CONTACT_TRIGGER_PHRASES.find((phrase) => lowerText.includes(phrase));
   if (!matchedPhrase) return null;
   const matchIndex = lowerText.indexOf(matchedPhrase);
-  let remainder = text.slice(matchIndex + matchedPhrase.length).trim();
-  // "send an email to" doesn't consume a following article/possessive the
-  // way "email the"/"email my" do — strip a leftover one here.
-  remainder = remainder.replace(/^(the|my)\s+/i, '');
-  remainder = remainder.replace(/[.,!?]+$/, '').trim();
-  return remainder || null;
+  const remainder = text.slice(matchIndex + matchedPhrase.length).trim();
+  return cleanRecipientQuery(remainder);
 }
+
+// Pillar 23 phase 2 — generic "start an email" triggers with NO recipient
+// given in the same utterance ("create me an email," "hey Skippy write an
+// email"). Live-tested 2026-07-15: this exact phrasing slipped past every
+// trigger above and fell through to the general LLM, which improvised an
+// entire fake compose-and-send conversation and ended with a false "Email
+// sent" claim — nothing was ever sent (see ANTI_HALLUCINATION_BLOCK in
+// server.js for the backstop). Only checked when extractEmailRecipientQuery
+// above found nothing, so an inline recipient still wins and skips this
+// extra "who's it to?" round-trip.
+const EMAIL_COMPOSE_START_PHRASES = [
+  'create an email', 'create me an email', 'write an email', 'write me an email',
+  'compose an email', "let's write an email", "let's compose an email", 'draft an email',
+  'i need to email', 'i want to email', 'i want to send an email', 'i need to send an email',
+];
 
 // Substring match against every searchable field — case-insensitive both
 // directions (query-in-field and field-in-query) so "John" matches a
@@ -959,14 +993,18 @@ class App {
   // populated from list_my_contacts() at login, not localStorage.
   contacts = [];
   editingContactId = null;
-  // Voice "email the X" resolution state. pendingContactDisambiguation holds
-  // { query, candidates } while waiting for the user to pick between 2+
-  // matches; pendingEmailContact holds the single resolved contact once one
-  // is settled on, while Skippy is waiting for the user to dictate what the
+  // Voice "email the X" resolution state. pendingEmailRecipientPrompt is
+  // armed when a generic "create me an email" trigger fires with no
+  // recipient in the same utterance — the next utterance is the answer to
+  // "who's the email to?". pendingContactDisambiguation holds { query,
+  // candidates } while waiting for the user to pick between 2+ matches;
+  // pendingEmailContact holds the single resolved contact once one is
+  // settled on, while Skippy is waiting for the user to dictate what the
   // email should say. pendingEmailDraft holds { contact, subject, body }
   // once a draft exists — Skippy is then waiting for either a send
   // confirmation, a cancel, or a revision instruction (any other utterance).
   // Phase 2, added 2026-07-15 — see CLAUDE.md's Contacts pillar notes.
+  pendingEmailRecipientPrompt = false;
   pendingContactDisambiguation = null;
   pendingEmailContact = null;
   pendingEmailDraft = null;
@@ -1914,6 +1952,34 @@ class App {
     return res.json();
   };
 
+  // Pillar 23 phase 2 — shared by both entry points that resolve a spoken
+  // recipient description to 0/1/many contacts (the inline "email the X"
+  // trigger and the follow-up answer to "who's the email to?"): arms
+  // whichever pending state fits and speaks the matching ack.
+  #resolveEmailRecipient = (query, text) => {
+    const matches = findMatchingContacts(this.contacts, query);
+    let ack;
+    if (matches.length === 0) {
+      // Consistent with the anti-hallucination rule server-side — an
+      // honest "I don't have that" rather than guessing an address.
+      ack =
+        `No contact matches "${query}" in your list, Commander — add one in the ` +
+        'Contacts panel, or just tell me the address directly.';
+    } else if (matches.length === 1) {
+      this.pendingEmailContact = matches[0];
+      ack = `Got it — ${matches[0].name} at ${matches[0].email}. What would you like the email to say?`;
+    } else {
+      this.pendingContactDisambiguation = { query, candidates: matches };
+      const names = matches
+        .map((c) => (c.company?.[0] ? `${c.name} (${c.company[0]})` : c.name))
+        .join(', or ');
+      ack = `I've got ${matches.length} matches for "${query}": ${names}. Which one?`;
+    }
+    this.#recordTurn(text, ack);
+    this.#render();
+    this.#speak(ack);
+  };
+
   #logout = async () => {
     await this.authClient.logout();
     this.identity = null;
@@ -2476,7 +2542,8 @@ class App {
     // intentional, not Skippy's own voice looping back.
     const awaitingConfirmation =
       this.pendingKaraokeOffer || !!this.pendingWebSearchQuery || !!this.pendingRosterStep ||
-      !!this.pendingContactDisambiguation || !!this.pendingEmailContact || !!this.pendingEmailDraft;
+      !!this.pendingContactDisambiguation || !!this.pendingEmailContact || !!this.pendingEmailDraft ||
+      this.pendingEmailRecipientPrompt;
     if (
       !awaitingConfirmation &&
       (Date.now() - this.lastSpeakEndTime < App.#FINAL_CHUNK_MIN_GAP_MS || this.#isLikelySelfEcho(chunk))
@@ -2968,9 +3035,6 @@ class App {
     // what produced the false "Done" claim live-tested 2026-07-14 (see
     // CLAUDE.md's Contacts pillar notes).
     if (!this.guestMode && this.pendingEmailDraft) {
-      const hasAffirmation = AFFIRMATION_PHRASES.some((phrase) => lowerText.includes(phrase));
-      let remainder = lowerText;
-      AFFIRMATION_PHRASES.forEach((phrase) => { remainder = remainder.split(phrase).join(''); });
       const isCancel = ['cancel', 'nevermind', 'never mind', 'forget it', 'scrap it', "don't send"].some(
         (word) => lowerText.includes(word),
       );
@@ -2986,7 +3050,8 @@ class App {
         return;
       }
 
-      if (hasAffirmation && isTrivialRemainder(remainder)) {
+      const hasSendConfirmation = EMAIL_SEND_CONFIRMATION_PHRASES.some((phrase) => lowerText.includes(phrase));
+      if (hasSendConfirmation) {
         this.pendingEmailDraft = null;
         this.pendingEmailContact = null;
         const gmailUrl = buildGmailComposeUrl({ to: draft.contact.email, subject: draft.subject, body: draft.body });
@@ -3088,29 +3153,40 @@ class App {
       return;
     }
 
+    // Pillar 23 phase 2 — answer to "who's the email to?" (armed by the
+    // generic start-trigger below when no recipient was given inline).
+    if (!this.guestMode && this.pendingEmailRecipientPrompt) {
+      this.pendingEmailRecipientPrompt = false;
+      const query = cleanRecipientQuery(text.trim());
+      if (!query) {
+        this.pendingEmailRecipientPrompt = true; // give them another shot
+        const ack = "Didn't catch a name there, Commander — who's this going to?";
+        this.#recordTurn(text, ack);
+        this.#render();
+        this.#speak(ack);
+        return;
+      }
+      this.#resolveEmailRecipient(query, text);
+      return;
+    }
+
     // Step 1: trigger heard ("email the plumber", "send an email to my
     // wife") — resolve to zero/one/many contacts. Never dictated raw
     // addresses; those only ever get typed into the Contacts form.
     const emailRecipientQuery = !this.guestMode ? extractEmailRecipientQuery(text) : null;
     if (emailRecipientQuery) {
-      const matches = findMatchingContacts(this.contacts, emailRecipientQuery);
-      let ack;
-      if (matches.length === 0) {
-        // Consistent with the anti-hallucination rule server-side — an
-        // honest "I don't have that" rather than guessing an address.
-        ack =
-          `No contact matches "${emailRecipientQuery}" in your list, Commander — add one in the ` +
-          'Contacts panel, or just tell me the address directly.';
-      } else if (matches.length === 1) {
-        this.pendingEmailContact = matches[0];
-        ack = `Got it — ${matches[0].name} at ${matches[0].email}. What would you like the email to say?`;
-      } else {
-        this.pendingContactDisambiguation = { query: emailRecipientQuery, candidates: matches };
-        const names = matches
-          .map((c) => (c.company?.[0] ? `${c.name} (${c.company[0]})` : c.name))
-          .join(', or ');
-        ack = `I've got ${matches.length} matches for "${emailRecipientQuery}": ${names}. Which one?`;
-      }
+      this.#resolveEmailRecipient(emailRecipientQuery, text);
+      return;
+    }
+
+    // Pillar 23 phase 2 — generic "start an email" trigger with no
+    // recipient given inline (see EMAIL_COMPOSE_START_PHRASES above).
+    if (
+      !this.guestMode &&
+      EMAIL_COMPOSE_START_PHRASES.some((phrase) => lowerText.includes(phrase))
+    ) {
+      this.pendingEmailRecipientPrompt = true;
+      const ack = "Sure thing, Commander. Who's the email to?";
       this.#recordTurn(text, ack);
       this.#render();
       this.#speak(ack);
