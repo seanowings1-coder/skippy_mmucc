@@ -255,9 +255,13 @@ const AFFIRMATION_PHRASES = [
 // send confirmation is never also carrying a revision worth preserving.
 // Bare "send" is safe even inside "don't send ..." because isCancel (checked
 // first, see below) already catches that exact phrase before this runs.
+// "it's good" added after a second live test 2026-07-15 caught it missing —
+// it fell to the revision branch instead and got treated as an edit
+// instruction, same class of gap as the first round.
 const EMAIL_SEND_CONFIRMATION_PHRASES = [
   'send it', 'send', 'go ahead and send', 'ship it', 'good to go', "that's good",
-  'sounds good', 'looks good', 'perfect', 'that works', 'go for it', 'yes', 'yeah', 'sure',
+  "it's good", 'its good', "that's fine", "that's great", 'sounds good', 'looks good',
+  'perfect', 'that works', 'go for it', 'yes', 'yeah', 'sure',
 ];
 
 // Pillar 3's persona/Brain Switching trigger phrases — plain substring
@@ -2537,16 +2541,25 @@ class App {
     // means a genuine new user follow-up right after he stops talking still
     // goes through immediately, instead of requiring a fresh trigger phrase
     // (confirmed live 2026-07-11: a long flat cooldown broke exactly that).
-    // Skip both checks when waiting for a deliberate one-word confirmation
-    // (karaoke offer or web-search permission) — the user's "yes"/"go" is
-    // intentional, not Skippy's own voice looping back.
+    // Skip the flat timing cooldown when waiting on ANY pending confirmation
+    // — a fast real reply shouldn't be discarded just for arriving quickly.
+    // But only skip the CONTENT self-echo check for the short, one-word-style
+    // confirmations (karaoke offer, web-search permission, roster step) —
+    // those replies are brief enough that echo risk is a non-issue. The
+    // Contacts/email states speak much longer replies (a full drafted email
+    // read back), and live-tested 2026-07-15 confirmed Skippy hearing his
+    // OWN readback got misread as a new revision instruction. Keeping
+    // #isLikelySelfEcho active for those costs nothing for a genuine short
+    // reply ("good to go" has near-zero word overlap with a paragraph-long
+    // readback anyway) while catching an actual echo of that readback.
     const awaitingConfirmation =
       this.pendingKaraokeOffer || !!this.pendingWebSearchQuery || !!this.pendingRosterStep ||
       !!this.pendingContactDisambiguation || !!this.pendingEmailContact || !!this.pendingEmailDraft ||
       this.pendingEmailRecipientPrompt;
+    const skipSelfEchoCheck = this.pendingKaraokeOffer || !!this.pendingWebSearchQuery || !!this.pendingRosterStep;
     if (
-      !awaitingConfirmation &&
-      (Date.now() - this.lastSpeakEndTime < App.#FINAL_CHUNK_MIN_GAP_MS || this.#isLikelySelfEcho(chunk))
+      (!awaitingConfirmation && Date.now() - this.lastSpeakEndTime < App.#FINAL_CHUNK_MIN_GAP_MS) ||
+      (!skipSelfEchoCheck && this.#isLikelySelfEcho(chunk))
     ) {
       return;
     }
