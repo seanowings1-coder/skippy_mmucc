@@ -4986,6 +4986,9 @@ class App {
 
         <details class="workspace-security">
           <summary>Workspace security</summary>
+          ${!this.guestMode
+            ? html`<p class="status" style="word-break:break-all;">Your Principal: ${this.principalText}</p>`
+            : ''}
           <div style="display:flex;gap:0.5em;margin-top:0.5em;">
             <button style="flex:1;" @click=${this.#toggleLexicon} aria-label="Command Lexicon">Commands</button>
             <button style="flex:1;" @click=${this.#toggleManual} aria-label="User Manual">Manual</button>
