@@ -1959,6 +1959,91 @@ app.post('/critic-loop', requireSession, async (req, res) => {
   }
 });
 
+// Pillar 23 (Contacts) phase 2 — turns the user's rough dictated intent into
+// a polished, ready-to-send email. Persona-free, same reasoning as
+// /project-brief and /critic-loop above: this is real correspondence going
+// out under the Commander's own name via the Gmail-handoff flow (see
+// CLAUDE.md's Contacts pillar notes), not an in-character Skippy reply, so
+// none of the sarcasm/persona system prompt applies here. Supports two call
+// shapes: a fresh draft (dictatedContent + recipientName) or a revision pass
+// (previousDraft + revisionInstruction) — the frontend's compose-session
+// state machine decides which by whether a prior draft exists.
+app.post('/compose-email', requireSession, async (req, res) => {
+  if (!OPENROUTER_API_KEY) return res.status(502).json({ error: 'OPENROUTER_API_KEY is not set.' });
+  const recipientName = typeof req.body?.recipientName === 'string' ? req.body.recipientName.trim() : '';
+  const dictatedContent = typeof req.body?.dictatedContent === 'string' ? req.body.dictatedContent.trim() : '';
+  const revisionInstruction =
+    typeof req.body?.revisionInstruction === 'string' ? req.body.revisionInstruction.trim() : '';
+  const previousDraft =
+    req.body?.previousDraft && typeof req.body.previousDraft.subject === 'string' &&
+    typeof req.body.previousDraft.body === 'string'
+      ? req.body.previousDraft
+      : null;
+  if (!recipientName || (!dictatedContent && !(previousDraft && revisionInstruction))) {
+    return res.status(400).json({ error: 'Missing recipientName and dictatedContent (or previousDraft + revisionInstruction).' });
+  }
+
+  const composeSystemPrompt =
+    `You are a professional email-writing assistant — NOT the sarcastic "Skippy" persona used ` +
+    `elsewhere in this app. You turn a user's rough, spoken description of what they want to say ` +
+    `into a polished, ready-to-send email to the named recipient. Write a proper greeting using ` +
+    `the recipient's name, a clear and professional body that faithfully captures everything the ` +
+    `user actually said (never invent additional facts, requests, or details they didn't mention), ` +
+    `and an appropriate sign-off. Respond with ONLY a single JSON object, no markdown fences, no ` +
+    `other text, in exactly this shape: {"subject": string, "body": string}. The body should be ` +
+    `plain text (no HTML), ready to paste into an email client as-is.`;
+
+  const userContent = previousDraft
+    ? `Recipient: ${recipientName}\n\nCurrent draft:\nSubject: ${previousDraft.subject}\n\n` +
+      `${previousDraft.body}\n\nRevise the draft per this instruction: ${revisionInstruction}`
+    : `Recipient: ${recipientName}\n\nWhat the user wants the email to say: ${dictatedContent}`;
+
+  const upstreamAbort = new AbortController();
+  req.on('close', () => {
+    process.nextTick(() => { try { upstreamAbort.abort(); } catch (err) {} });
+  });
+  req.on('error', () => {});
+
+  try {
+    const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${OPENROUTER_API_KEY}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: BRAIN_MODELS.heavy_hitter,
+        messages: [
+          { role: 'system', content: composeSystemPrompt },
+          { role: 'user', content: userContent },
+        ],
+        // Same omitted-max_tokens 402 bug as /project-brief and /critic-loop
+        // above — a single email doesn't need a huge ceiling.
+        max_tokens: 1200,
+      }),
+      signal: upstreamAbort.signal,
+    });
+    if (!response.ok) {
+      const detail = await response.text();
+      return res.status(502).json({ error: `OpenRouter error: ${response.status} ${detail}` });
+    }
+    const data = await response.json();
+    const raw = data.choices?.[0]?.message?.content;
+    if (!raw) return res.status(502).json({ error: 'OpenRouter returned no draft.' });
+    const cleaned = raw.replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/i, '').trim();
+    let parsed;
+    try {
+      parsed = JSON.parse(cleaned);
+    } catch (parseErr) {
+      return res.status(502).json({ error: `Draft was not valid JSON: ${parseErr.message}` });
+    }
+    if (typeof parsed.subject !== 'string' || typeof parsed.body !== 'string') {
+      return res.status(502).json({ error: 'Draft JSON missing subject/body.' });
+    }
+    res.json({ subject: parsed.subject, body: parsed.body });
+  } catch (err) {
+    if (err.name === 'AbortError') return;
+    res.status(502).json({ error: `Failed to reach OpenRouter: ${err.message}` });
+  }
+});
+
 // Book-canon "Karaoke" moment (Skippy's hobby in the Expeditionary Force
 // novels) — a dedicated route, not a /respond flag, same "distinct one-off
 // LLM task gets its own route" convention as /project-brief and

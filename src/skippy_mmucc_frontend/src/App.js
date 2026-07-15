@@ -401,6 +401,17 @@ function findMatchingContacts(contacts, query) {
     return fields.some((f) => f.toLowerCase().includes(q) || q.includes(f.toLowerCase()));
   });
 }
+
+// Pillar 23 phase 2 — pre-fills a real Gmail compose tab under the user's
+// own logged-in Gmail session (no OAuth/API, per the brainstorm decision in
+// CLAUDE.md's Contacts pillar notes: recipients need to see it's really
+// coming from the user's real Gmail address). The final Send click stays
+// manual and cannot be voice-triggered without full Gmail API/OAuth access —
+// an explicitly accepted tradeoff, not a gap.
+function buildGmailComposeUrl({ to, subject, body }) {
+  const params = new URLSearchParams({ view: 'cm', fs: '1', to, su: subject, body });
+  return `https://mail.google.com/mail/?${params.toString()}`;
+}
 // A pool, not one fixed line — confirmed live 2026-06-24: hearing the exact
 // same offer verbatim every single time read as flat/robotic rather than
 // the "excited kid getting a puppy" energy this is supposed to have. Still
@@ -951,10 +962,14 @@ class App {
   // Voice "email the X" resolution state. pendingContactDisambiguation holds
   // { query, candidates } while waiting for the user to pick between 2+
   // matches; pendingEmailContact holds the single resolved contact once one
-  // is settled on — the actual compose/read-back/Gmail-handoff flow that
-  // consumes this is a separate follow-up pass, not built yet.
+  // is settled on, while Skippy is waiting for the user to dictate what the
+  // email should say. pendingEmailDraft holds { contact, subject, body }
+  // once a draft exists — Skippy is then waiting for either a send
+  // confirmation, a cancel, or a revision instruction (any other utterance).
+  // Phase 2, added 2026-07-15 — see CLAUDE.md's Contacts pillar notes.
   pendingContactDisambiguation = null;
   pendingEmailContact = null;
+  pendingEmailDraft = null;
   // On-device speaker recognition (open-source, no API key — see voiceId.js)
   // — persona/tone signal only (see voiceId.js's header comment for why).
   // `hasEnrolledVoice` is
@@ -1883,6 +1898,22 @@ class App {
     this.#render();
   };
 
+  // Pillar 23 phase 2 — thin wrapper around POST /compose-email, shared by
+  // both the initial-dictation and the revision branches of the compose
+  // session below. Throws on any failure; callers decide what to keep armed.
+  #requestEmailDraft = async (payload) => {
+    const res = await fetch(`${PROXY_URL}/compose-email`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Skippy-Session': this.sessionToken },
+      body: JSON.stringify(payload),
+    });
+    if (!res.ok) {
+      const detail = await res.json().catch(() => ({}));
+      throw new Error(detail.error || `compose-email failed: ${res.status}`);
+    }
+    return res.json();
+  };
+
   #logout = async () => {
     await this.authClient.logout();
     this.identity = null;
@@ -2445,7 +2476,7 @@ class App {
     // intentional, not Skippy's own voice looping back.
     const awaitingConfirmation =
       this.pendingKaraokeOffer || !!this.pendingWebSearchQuery || !!this.pendingRosterStep ||
-      !!this.pendingContactDisambiguation;
+      !!this.pendingContactDisambiguation || !!this.pendingEmailContact || !!this.pendingEmailDraft;
     if (
       !awaitingConfirmation &&
       (Date.now() - this.lastSpeakEndTime < App.#FINAL_CHUNK_MIN_GAP_MS || this.#isLikelySelfEcho(chunk))
@@ -2929,6 +2960,74 @@ class App {
       return;
     }
 
+    // Pillar 23 phase 2 — compose session, step 3: a draft already exists
+    // and Skippy is waiting for a send confirmation, a cancel, or (anything
+    // else) a revision instruction. Checked first among the email states
+    // since it's the most "active" one. Real intent is always intercepted
+    // here — it never falls through to the general LLM, which is exactly
+    // what produced the false "Done" claim live-tested 2026-07-14 (see
+    // CLAUDE.md's Contacts pillar notes).
+    if (!this.guestMode && this.pendingEmailDraft) {
+      const hasAffirmation = AFFIRMATION_PHRASES.some((phrase) => lowerText.includes(phrase));
+      let remainder = lowerText;
+      AFFIRMATION_PHRASES.forEach((phrase) => { remainder = remainder.split(phrase).join(''); });
+      const isCancel = ['cancel', 'nevermind', 'never mind', 'forget it', 'scrap it', "don't send"].some(
+        (word) => lowerText.includes(word),
+      );
+      const draft = this.pendingEmailDraft;
+
+      if (isCancel) {
+        this.pendingEmailDraft = null;
+        this.pendingEmailContact = null;
+        const ack = 'Scrapped it, Commander — say the word whenever you want to try again.';
+        this.#recordTurn(text, ack);
+        this.#render();
+        this.#speak(ack);
+        return;
+      }
+
+      if (hasAffirmation && isTrivialRemainder(remainder)) {
+        this.pendingEmailDraft = null;
+        this.pendingEmailContact = null;
+        const gmailUrl = buildGmailComposeUrl({ to: draft.contact.email, subject: draft.subject, body: draft.body });
+        window.open(gmailUrl, '_blank', 'noopener');
+        const ack =
+          `Done — popped it open in Gmail addressed to ${draft.contact.name}. Give it a look and hit ` +
+          'send yourself whenever you\'re happy with it, Commander.';
+        this.#recordTurn(text, ack);
+        this.#render();
+        this.#speak(ack);
+        return;
+      }
+
+      // Anything else is a revision instruction, not a normal chat message.
+      this.statusMessage = 'Skippy is revising the draft...';
+      this.#render();
+      try {
+        const revised = await this.#requestEmailDraft({
+          recipientName: draft.contact.name,
+          previousDraft: { subject: draft.subject, body: draft.body },
+          revisionInstruction: text,
+        });
+        this.statusMessage = '';
+        this.pendingEmailDraft = { contact: draft.contact, subject: revised.subject, body: revised.body };
+        const ack =
+          `Updated it — subject "${revised.subject}." It now reads: "${revised.body}" Good to go, or more changes?`;
+        this.#recordTurn(text, ack);
+        this.#render();
+        this.#speak(ack);
+      } catch (err) {
+        this.statusMessage = '';
+        // Keep the existing draft armed so a hiccup doesn't lose their
+        // work — an honest failure, not a fake "updated it."
+        const ack = "Hit a snag revising that, Commander — still got your last draft. Try the change again?";
+        this.#recordTurn(text, ack);
+        this.#render();
+        this.#speak(ack);
+      }
+      return;
+    }
+
     // Pillar 23 (Contacts) — voice email-recipient resolution, step 2:
     // waiting for the user to pick between 2+ candidates listed below.
     // Gated off in Guest Mode same as Roster-add/Course Correction — a
@@ -2950,6 +3049,42 @@ class App {
       this.#recordTurn(text, ack);
       this.#render();
       this.#speak(ack);
+      return;
+    }
+
+    // Pillar 23 phase 2 — compose session, step 2: contact resolved, Skippy
+    // is waiting for the user to dictate what the email should say.
+    if (!this.guestMode && this.pendingEmailContact) {
+      const contact = this.pendingEmailContact;
+      const isCancel = ['cancel', 'nevermind', 'never mind', 'forget it'].some((word) => lowerText.includes(word));
+      if (isCancel) {
+        this.pendingEmailContact = null;
+        const ack = 'No problem, Commander — scrapped that one.';
+        this.#recordTurn(text, ack);
+        this.#render();
+        this.#speak(ack);
+        return;
+      }
+      this.statusMessage = 'Skippy is drafting the email...';
+      this.#render();
+      try {
+        const drafted = await this.#requestEmailDraft({ recipientName: contact.name, dictatedContent: text });
+        this.statusMessage = '';
+        this.pendingEmailContact = null;
+        this.pendingEmailDraft = { contact, subject: drafted.subject, body: drafted.body };
+        const ack =
+          `Here's what I've got — subject "${drafted.subject}." It reads: "${drafted.body}" Sound good, or want changes?`;
+        this.#recordTurn(text, ack);
+        this.#render();
+        this.#speak(ack);
+      } catch (err) {
+        this.statusMessage = '';
+        // Keep pendingEmailContact armed so they can just redictate.
+        const ack = 'Hit a snag drafting that, Commander — mind saying it again?';
+        this.#recordTurn(text, ack);
+        this.#render();
+        this.#speak(ack);
+      }
       return;
     }
 
