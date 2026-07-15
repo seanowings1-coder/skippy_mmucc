@@ -421,11 +421,38 @@ function extractEmailRecipientQuery(text) {
 // server.js for the backstop). Only checked when extractEmailRecipientQuery
 // above found nothing, so an inline recipient still wins and skips this
 // extra "who's it to?" round-trip.
+//
+// Verb-form phrasing ("i need to email," where "email" is the verb, not a
+// noun following an article) doesn't fit a single regex shape cleanly —
+// kept as an explicit list.
 const EMAIL_COMPOSE_START_PHRASES = [
-  'create an email', 'create me an email', 'write an email', 'write me an email',
-  'compose an email', "let's write an email", "let's compose an email", 'draft an email',
+  "let's write an email", "let's compose an email",
   'i need to email', 'i want to email', 'i want to send an email', 'i need to send an email',
 ];
+// Noun-phrase form ("compose an email," "write me an email") DOES have one
+// consistent shape — a compose verb, a few optional filler words, then
+// "a/an email" — so a regex catches every word-order variant instead of
+// needing each one enumerated. Confirmed live 2026-07-15: a literal phrase
+// list already missed "compose me an email" (word order differs from the
+// listed "compose an email") — the THIRD trigger-phrase whack-a-mole miss
+// this same night, worth closing structurally rather than patching one more
+// entry. Deliberately excludes "send" as a bare verb here — "did you send
+// that email" (a past-tense question, not new compose intent) would
+// false-positive on it; "send" intent is still covered by the explicit
+// phrases above and by EMAIL_CONTACT_TRIGGER_PHRASES's inline-recipient
+// triggers ("send an email to X"). The "a|an|in" alternation (not just
+// "an?") is deliberate: live-tested 2026-07-15, "compose me an email" came
+// through Web Speech API as "compose me IN email" — a plausible an/in
+// mishearing, not a code bug — so "in" is accepted here too. Same
+// asymmetric-consequence reasoning as everywhere else in this flow: a false
+// positive just asks "who's it to?" (harmless), while a miss sends the
+// conversation to the general LLM's unpredictable fallback (confirmed live
+// to sometimes mix in stale content from earlier in the conversation).
+const EMAIL_COMPOSE_INTENT_REGEX = /\b(?:create|write|compose|draft)\b(?:\s+\S+){0,3}\s+(?:a|an|in)\s+email\b/i;
+function hasGenericEmailComposeIntent(text) {
+  const lowerText = text.toLowerCase();
+  return EMAIL_COMPOSE_INTENT_REGEX.test(text) || EMAIL_COMPOSE_START_PHRASES.some((p) => lowerText.includes(p));
+}
 
 // Substring match against every searchable field — case-insensitive both
 // directions (query-in-field and field-in-query) so "John" matches a
@@ -1012,6 +1039,13 @@ class App {
   pendingContactDisambiguation = null;
   pendingEmailContact = null;
   pendingEmailDraft = null;
+  // Live-tested 2026-07-15: browsers don't treat a voice/SpeechRecognition
+  // event as a real user gesture, so window.open() called directly from the
+  // send-confirmation handler gets silently popup-blocked — Skippy would
+  // claim "Done — popped it open" while nothing actually opened. When that
+  // happens, this holds { url, contactName } so a real on-screen button
+  // click (a genuine gesture, which browsers do allow) can open it instead.
+  pendingGmailLink = null;
   // On-device speaker recognition (open-source, no API key — see voiceId.js)
   // — persona/tone signal only (see voiceId.js's header comment for why).
   // `hasEnrolledVoice` is
@@ -1982,6 +2016,16 @@ class App {
     this.#recordTurn(text, ack);
     this.#render();
     this.#speak(ack);
+  };
+
+  // Fallback for when the send-confirmation branch's own window.open() got
+  // popup-blocked (voice isn't a trusted gesture) — this one IS a real
+  // click, which browsers do allow to open a new tab.
+  #openPendingGmailLink = () => {
+    if (!this.pendingGmailLink) return;
+    window.open(this.pendingGmailLink.url, '_blank', 'noopener');
+    this.pendingGmailLink = null;
+    this.#render();
   };
 
   #logout = async () => {
@@ -3068,10 +3112,25 @@ class App {
         this.pendingEmailDraft = null;
         this.pendingEmailContact = null;
         const gmailUrl = buildGmailComposeUrl({ to: draft.contact.email, subject: draft.subject, body: draft.body });
-        window.open(gmailUrl, '_blank', 'noopener');
-        const ack =
-          `Done — popped it open in Gmail addressed to ${draft.contact.name}. Give it a look and hit ` +
-          'send yourself whenever you\'re happy with it, Commander.';
+        // A voice/SpeechRecognition event isn't a real user gesture as far as
+        // the browser's popup blocker is concerned, so this frequently gets
+        // silently blocked (window.open returns null/undefined rather than
+        // throwing) — confirmed live 2026-07-15: Skippy was claiming "Done"
+        // while no tab actually opened. Only claim success if a window
+        // handle actually came back; otherwise arm pendingGmailLink so a
+        // real on-screen click (a genuine gesture) can open it instead.
+        const opened = window.open(gmailUrl, '_blank', 'noopener');
+        let ack;
+        if (opened) {
+          ack =
+            `Done — popped it open in Gmail addressed to ${draft.contact.name}. Give it a look and hit ` +
+            'send yourself whenever you\'re happy with it, Commander.';
+        } else {
+          this.pendingGmailLink = { url: gmailUrl, contactName: draft.contact.name };
+          ack =
+            `Drafted and ready, Commander — your browser blocked me from popping it open on voice alone. ` +
+            'Tap the "Open in Gmail" button on screen and it\'ll pull right up.';
+        }
         this.#recordTurn(text, ack);
         this.#render();
         this.#speak(ack);
@@ -3193,11 +3252,8 @@ class App {
     }
 
     // Pillar 23 phase 2 — generic "start an email" trigger with no
-    // recipient given inline (see EMAIL_COMPOSE_START_PHRASES above).
-    if (
-      !this.guestMode &&
-      EMAIL_COMPOSE_START_PHRASES.some((phrase) => lowerText.includes(phrase))
-    ) {
+    // recipient given inline (see hasGenericEmailComposeIntent above).
+    if (!this.guestMode && hasGenericEmailComposeIntent(text)) {
       this.pendingEmailRecipientPrompt = true;
       const ack = "Sure thing, Commander. Who's the email to?";
       this.#recordTurn(text, ack);
@@ -5194,6 +5250,16 @@ class App {
                   </button>
                   <span class="status">${this.#statusText()}</span>
                 </section>
+
+                ${this.pendingGmailLink
+                  ? html`
+                      <section class="mic-controls desktop-only">
+                        <button @click=${this.#openPendingGmailLink}>
+                          📧 Open in Gmail (addressed to ${this.pendingGmailLink.contactName})
+                        </button>
+                      </section>
+                    `
+                  : ''}
 
                 ${this.state === 'dictating'
                   ? html`
