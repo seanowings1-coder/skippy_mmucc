@@ -493,13 +493,15 @@ const ANTI_HALLUCINATION_BLOCK =
   'Contacts email-compose flow (resolve a contact, draft, read back, and on explicit confirmation ' +
   'open a real Gmail compose tab for the Commander to send themselves). If a request sounds like it ' +
   'wants an email sent but you are answering as a normal reply rather than through that actual flow, ' +
-  'you have NOT sent anything — say so plainly (still in character) and point the Commander at the ' +
-  'real flow ("email the [name]") instead of narrating a fake send. Never say "sent," "done," or ' +
-  'similar completion language for any action you did not mechanically perform.' +
+  'you have NOT sent anything — say so plainly (still in character), and if you do not already know ' +
+  'who the email is for, ask in your own improvised words so the real flow can take over next turn. ' +
+  'Never repeat any instructional phrasing verbatim, including anything resembling a placeholder in ' +
+  'square brackets — that is guidance for you, not a line to recite back to the Commander. Never say ' +
+  '"sent," "done," or similar completion language for any action you did not mechanically perform.' +
   '\n\nExample — WRONG: Q: "Skippy send it" (mid-conversation, no real compose flow active) A: "Email ' +
   'sent. Let\'s hope she doesn\'t forget, Commander." (nothing was actually sent — pure invention). ' +
   'RIGHT (same situation): "Hold up, Commander — I never actually opened this in a real compose flow, ' +
-  'so nothing sent. Say \'email the [name]\' and I\'ll walk you through drafting it for real."';
+  'so nothing\'s sent. Tell me who you want this going to and I\'ll walk you through drafting it for real."';
 
 // Prepended for the everyday uncensored brain (Dolphin/MythoMax) in default
 // mode only — tells these models explicitly to skip their own residual refusal
@@ -2005,7 +2007,14 @@ app.post('/compose-email', requireSession, async (req, res) => {
     `user actually said (never invent additional facts, requests, or details they didn't mention), ` +
     `and an appropriate sign-off. Respond with ONLY a single JSON object, no markdown fences, no ` +
     `other text, in exactly this shape: {"subject": string, "body": string}. The body should be ` +
-    `plain text (no HTML), ready to paste into an email client as-is.`;
+    `plain text (no HTML), ready to paste into an email client as-is.` +
+    (previousDraft
+      ? ` This is a REVISION of an existing draft — preserve everything already in it (every request, ` +
+        `detail, and sentence) unless the instruction explicitly asks to remove or replace that part. ` +
+        `Treat the instruction as a focused addition or amendment, not a full rewrite: a short phrase ` +
+        `like a single word almost always means "also mention this" or "emphasize this," not "delete ` +
+        `everything else and make the email only about this."`
+      : '');
 
   const userContent = previousDraft
     ? `Recipient: ${recipientName}\n\nCurrent draft:\nSubject: ${previousDraft.subject}\n\n` +
