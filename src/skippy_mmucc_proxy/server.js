@@ -1415,21 +1415,25 @@ app.post('/respond', requireSession, async (req, res) => {
   // All peers verified to actually exist via each provider's live model-list endpoint
   // (GET /v1/models) before being hardcoded here, not guessed — this project's established
   // discipline since the Aurora-XL-v3.14 fabrication incident.
+  // Reordered 2026-07-16 per the user's explicit call: day-to-day (everyday/heavy_hitter)
+  // stays 100% DeepInfra; OpenRouter is reserved exclusively for the Steel Rain Haiku racer
+  // (see below), not used as a fall-forward peer in either tier anymore. Dolphin Venice and
+  // Hermes 4 405B (both OpenRouter) were dropped for this reason, not replaced 1:1.
   const EVERYDAY_PEERS = [
+    // Primary intentionally unchanged — already dialed in, don't touch.
     { label: 'Euryale 70B', provider: 'deepinfra', model: DEEPINFRA_MODEL_SNAPPY },
+    { label: 'Hermes 3 70B', provider: 'deepinfra', model: 'NousResearch/Hermes-3-Llama-3.1-70B' },
     { label: 'DeepSeek V4 Flash', provider: 'deepinfra', model: DEEPINFRA_MODEL_SNAPPY_FALLBACK },
-    // Paid (not :free) variant deliberately — the free tier hit a hard OpenRouter rate wall
-    // during this same session's karaoke A/B testing; a peer meant to be reliably available
-    // shouldn't share that exposure.
-    { label: 'Dolphin Venice', provider: 'openrouter', model: 'cognitivecomputations/dolphin-mistral-24b-venice-edition' },
   ];
   const HEAVY_HITTER_PEERS = [
+    // Claude Sonnet moved to primary and upgraded 4.6 -> 5 (also cheaper: $2/$10 per M vs
+    // 4.6's $3/$15) now that DeepInfra hosts Anthropic models directly at official pricing —
+    // guardrails still deliberately intact, same reasoning as before ("you are going to be my
+    // 800 pound monster for coding... I don't need to be diving off the bridge").
+    { label: 'Claude Sonnet 5', provider: 'deepinfra', model: 'anthropic/claude-sonnet-5' },
+    { label: 'Kimi K2.7 Code', provider: 'deepinfra', model: 'moonshotai/Kimi-K2.7-Code' },
+    // 1.6T MoE heavy lifter, now the final catch instead of primary.
     { label: 'DeepSeek V4 Pro', provider: 'deepinfra', model: DEEPINFRA_MODEL_SUPERBRAIN },
-    // Sonnet kept deliberately, guardrails and all — the user wants real safety behavior here
-    // specifically ("you are going to be my 800 pound monster for coding... I don't need to be
-    // diving off the bridge"), unlike the persona tiers where no-guardrails is the requirement.
-    { label: 'Claude Sonnet 4.6', provider: 'openrouter', model: OPENROUTER_MODEL_HEAVY_HITTER },
-    { label: 'Hermes 4 405B', provider: 'openrouter', model: 'nousresearch/hermes-4-405b' },
   ];
 
   // overrideMessages/overrideGenParams let the dedupe retry (see
