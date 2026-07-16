@@ -1046,6 +1046,12 @@ class App {
   // happens, this holds { url, contactName } so a real on-screen button
   // click (a genuine gesture, which browsers do allow) can open it instead.
   pendingGmailLink = null;
+  // Courier Queue (Pillar 7) — polls for messages queued by the other
+  // Principal while THIS session stays open, instead of only delivering on
+  // the next login. Started post-login, cleared on logout. Live-tested
+  // 2026-07-16: delivery previously required a log-out/log-in round trip,
+  // a bad process for someone who leaves the app open for hours.
+  #courierPollHandle = null;
   // On-device speaker recognition (open-source, no API key — see voiceId.js)
   // — persona/tone signal only (see voiceId.js's header comment for why).
   // `hasEnrolledVoice` is
@@ -1291,6 +1297,7 @@ class App {
       this.profileVoiceId = profile?.voice_id?.[0] || '';
       this.evolutionProfile = await this.backendActor.get_my_evolution_profile();
       await this.#deliverPendingCourierMessages();
+      this.#startCourierPolling();
       await this.#refreshFuel();
       // On-device speaker recognition deliberately only ever instantiates
       // after a successful II login (never before, never while locked) —
@@ -2029,6 +2036,7 @@ class App {
   };
 
   #logout = async () => {
+    this.#stopCourierPolling();
     await this.authClient.logout();
     this.identity = null;
     this.principalText = '';
@@ -3749,18 +3757,46 @@ class App {
     this.#speak(reply);
   };
 
-  // Pillar 7 — called once right after login. Delivers any messages the
-  // other whitelisted Principal queued since this Principal's last session,
-  // injected as Skippy's first remark, then cleared (pop_pending_courier_
-  // messages is atomic on the backend side). No LLM call — this is the
-  // sender's literal content, not something to paraphrase or react to.
-  #deliverPendingCourierMessages = async () => {
+  // Pillar 7 — called right after login, and again on every #courierPoll
+  // tick thereafter. Delivers any messages the other whitelisted Principal
+  // queued since the last check, injected as Skippy's own turn, then
+  // cleared (pop_pending_courier_messages is atomic on the backend side).
+  // No LLM call — this is the sender's literal content, not something to
+  // paraphrase or react to. `announce` is false for the silent login-time
+  // call (no TTS context yet) and true for live polling mid-session, where
+  // a render + spoken alert make sense since the user is already here.
+  #deliverPendingCourierMessages = async (announce = false) => {
     const pending = await this.backendActor.pop_pending_courier_messages();
     if (pending.length === 0) return;
     const reply = pending
       .map((m) => `Before I forget — someone wanted me to pass this along: "${m.content}"`)
       .join(' ');
     this.#recordTurn('', reply);
+    if (announce) {
+      this.#render();
+      this.#speak(reply);
+    }
+  };
+
+  // Started post-login (#startCourierPolling), cleared on logout. Fixes the
+  // 2026-07-16 live-test finding: delivery only happened on the NEXT login,
+  // so a Principal who stays logged in for hours never saw a message queued
+  // for them without manually logging out and back in. 90s is frequent
+  // enough to feel timely without hammering the canister with idle queries.
+  #startCourierPolling = () => {
+    if (this.#courierPollHandle || this.guestMode) return;
+    this.#courierPollHandle = setInterval(() => {
+      this.#deliverPendingCourierMessages(true).catch((err) => {
+        console.error('[Skippy] courier poll failed:', err);
+      });
+    }, 90000);
+  };
+
+  #stopCourierPolling = () => {
+    if (this.#courierPollHandle) {
+      clearInterval(this.#courierPollHandle);
+      this.#courierPollHandle = null;
+    }
   };
 
   // Pillar 19 — fetched only on demand (not on every login) since it's just
