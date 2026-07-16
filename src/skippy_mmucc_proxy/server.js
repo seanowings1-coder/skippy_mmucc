@@ -1574,19 +1574,27 @@ app.post('/respond', requireSession, async (req, res) => {
     });
 
   if (brain === 'everyday' || brain === 'heavy_hitter') {
-    // User-deselected peers (2026-07-09): "if a brain technically works but isn't running at
-    // its normal speed today, let me skip it." Everyday-tier only, per the user's explicit
-    // scope call — Steel Rain/tactical always races both entrants regardless, and Heavy Hitter
-    // stays fixed (only 3 peers total, no spare capacity to be picky about). Sticky client-side
-    // (localStorage), sent fresh on every request rather than tracked server-side, consistent
-    // with how mode/brain selection already works — this route has no session state of its own.
-    const disabledLabels = brain === 'everyday' && Array.isArray(req.body?.disabledPeers)
-      ? req.body.disabledPeers.filter((l) => typeof l === 'string')
+    // User-deselected peers (2026-07-09, extended to Heavy Hitter 2026-07-16): "if a brain
+    // technically works but isn't running at its normal speed today, let me skip it." Steel
+    // Rain/tactical still always races both entrants regardless — that mode has no spare
+    // capacity to be picky about, latency is the whole point. Sticky client-side (localStorage),
+    // sent fresh on every request rather than tracked server-side, consistent with how
+    // mode/brain selection already works — this route has no session state of its own.
+    // Shape is `{ everyday: [...], heavy_hitter: [...] }` rather than a flat array so a single
+    // request can carry BOTH tiers' disabled lists at once — needed for the escalation path
+    // below, where an everyday-tier request can end up actually running Heavy Hitter peers and
+    // those should respect Heavy Hitter's own deselections too, not just everyday's.
+    const disabledPeersByTier = req.body?.disabledPeers && typeof req.body.disabledPeers === 'object' && !Array.isArray(req.body.disabledPeers)
+      ? req.body.disabledPeers
+      : {};
+    const disabledLabelsFor = (tier) => Array.isArray(disabledPeersByTier[tier])
+      ? disabledPeersByTier[tier].filter((l) => typeof l === 'string')
       : [];
-    const primaryPeers = brain === 'everyday'
-      ? EVERYDAY_PEERS.filter((p) => !disabledLabels.includes(fullPeerLabel(p)))
-      : HEAVY_HITTER_PEERS;
-    // Every everyday peer deselected == the same "nothing left to try" outcome as every peer
+
+    const disabledLabels = disabledLabelsFor(brain);
+    const primaryPeers = (brain === 'everyday' ? EVERYDAY_PEERS : HEAVY_HITTER_PEERS)
+      .filter((p) => !disabledLabels.includes(fullPeerLabel(p)));
+    // Every peer in a tier deselected == the same "nothing left to try" outcome as every peer
     // failing — fallForward would just return null anyway on an empty list, this skips straight
     // there without a pointless zero-iteration call.
     let won = primaryPeers.length > 0 ? await fallForward(primaryPeers, brain) : null;
@@ -1595,16 +1603,20 @@ app.post('/respond', requireSession, async (req, res) => {
     // comparably good, not a quality ladder).
     let brainDowngrade = false;
     let wonPeers = brain === 'everyday' ? EVERYDAY_PEERS : HEAVY_HITTER_PEERS; // full list for display
+    let wonDisabledLabels = disabledLabels; // for building brainTiers' "disabled" status below
 
     if (!won && brain === 'everyday') {
+      const hhDisabled = disabledLabelsFor('heavy_hitter');
+      const hhPeers = HEAVY_HITTER_PEERS.filter((p) => !hhDisabled.includes(fullPeerLabel(p)));
       console.warn(
         primaryPeers.length === 0
           ? '[Skippy] All everyday peers deselected — escalating to Heavy Hitter'
           : '[Skippy] All everyday peers exhausted — escalating to Heavy Hitter',
       );
-      won = await fallForward(HEAVY_HITTER_PEERS, 'heavy_hitter');
+      won = hhPeers.length > 0 ? await fallForward(hhPeers, 'heavy_hitter') : null;
       brainDowngrade = true;
       wonPeers = HEAVY_HITTER_PEERS;
+      wonDisabledLabels = hhDisabled;
     }
 
     if (won) {
@@ -1621,7 +1633,7 @@ app.post('/respond', requireSession, async (req, res) => {
         // credits" meaning which no longer distinguishes anything for these two tiers.
         paidTier: wonIdx > 0 || brainDowngrade,
         brainDowngrade,
-        brainTiers: buildBrainTiers(wonPeers, wonIdx, wonPeers === EVERYDAY_PEERS ? disabledLabels : []),
+        brainTiers: buildBrainTiers(wonPeers, wonIdx, wonDisabledLabels),
         tierIndex: wonIdx,
       });
     }

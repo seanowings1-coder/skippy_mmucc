@@ -1003,11 +1003,12 @@ class App {
   // Sticky Heavy Hitter override — device-local preference, not security-
   // sensitive, same persistence rationale as rosterProfiles below.
   superBrainLocked = localStorage.getItem('skippy_super_brain_locked') === 'true';
-  // Everyday-peer deselection (2026-07-09) — sticky like superBrainLocked above, same
-  // persistence rationale. Stores the peer's full `brainTiers` label (e.g. "Euryale 70B
-  // (DeepInfra)") so it round-trips directly against server.js's disabledPeers filter with no
-  // translation needed.
+  // Everyday-peer deselection (2026-07-09), extended to Heavy Hitter (2026-07-16) — sticky like
+  // superBrainLocked above, same persistence rationale. Each stores the peer's full `brainTiers`
+  // label (e.g. "Euryale 70B (DeepInfra)") so it round-trips directly against server.js's
+  // disabledPeers filter with no translation needed.
   disabledEverydayPeers = JSON.parse(localStorage.getItem('skippy_disabled_everyday_peers') || '[]');
+  disabledHeavyHitterPeers = JSON.parse(localStorage.getItem('skippy_disabled_heavy_hitter_peers') || '[]');
   // "Tactical Roster" — persona/addressing context only, deliberately with
   // no permission concept of its own (see CLAUDE.md's Pillar 16 note): the
   // only real access boundary in this app is Guest Mode above, which a
@@ -1153,6 +1154,7 @@ class App {
   // TEMPORARY debug aid for verifying Brain Switching (Phase 5.3) — which
   // brain/model actually answered the last message. Drop once confirmed.
   lastBrain = '';
+  brainTiersTier = ''; // which tier's peer list is currently in brainTiers — see #askSkippy's data.brainDowngrade handling
   lastModel = '';
   onPaidTier = false;
   brainFamily = 'dolphin'; // 'dolphin' | 'other' — quip only fires on transition
@@ -1448,14 +1450,18 @@ class App {
     this.#render();
   };
 
-  // Toggles one everyday peer in/out of the fall-forward rotation from the brain-grid modal —
+  // Toggles one peer in/out of the fall-forward rotation from the brain-grid modal —
   // "if a brain technically works but isn't running at its normal speed today, let me skip it."
   // UI-only, no voice trigger (the grid itself is already tap-to-open, this stays consistent).
-  #toggleEverydayPeer = (label) => {
-    this.disabledEverydayPeers = this.disabledEverydayPeers.includes(label)
-      ? this.disabledEverydayPeers.filter((l) => l !== label)
-      : [...this.disabledEverydayPeers, label];
-    localStorage.setItem('skippy_disabled_everyday_peers', JSON.stringify(this.disabledEverydayPeers));
+  // Extended from everyday-only to Heavy Hitter too (2026-07-16) — `tier` picks which sticky
+  // list/localStorage key to update; server.js reads both independently per tier already.
+  #togglePeer = (tier, label) => {
+    const field = tier === 'everyday' ? 'disabledEverydayPeers' : 'disabledHeavyHitterPeers';
+    const storageKey = tier === 'everyday' ? 'skippy_disabled_everyday_peers' : 'skippy_disabled_heavy_hitter_peers';
+    this[field] = this[field].includes(label)
+      ? this[field].filter((l) => l !== label)
+      : [...this[field], label];
+    localStorage.setItem(storageKey, JSON.stringify(this[field]));
     this.#render();
   };
 
@@ -3631,10 +3637,13 @@ class App {
           // mode/brain/evolution weights.
           emergencyActive: this.emergencyActive,
           // "If a brain technically works but isn't running at its normal speed today, let me
-          // skip it" — user request 2026-07-09. Everyday-tier only (server.js ignores this for
-          // every other brain); sticky client-side state, sent fresh each turn since /respond
-          // has no session memory of its own.
-          disabledPeers: brain === 'everyday' ? this.disabledEverydayPeers : [],
+          // skip it" — user request 2026-07-09, extended to Heavy Hitter 2026-07-16. Sent as
+          // both tiers' lists together (server.js ignores whichever tier isn't relevant for a
+          // given brain/mode) rather than just the currently-requested tier's list, since an
+          // everyday-tier request can escalate into running Heavy Hitter peers server-side and
+          // those should respect Heavy Hitter's own deselections too. Sticky client-side state,
+          // sent fresh each turn since /respond has no session memory of its own.
+          disabledPeers: { everyday: this.disabledEverydayPeers, heavy_hitter: this.disabledHeavyHitterPeers },
         }),
         signal,
       });
@@ -3672,7 +3681,15 @@ class App {
       this.lastBrain = data.brain || '';
       this.lastModel = data.model || '';
       this.onPaidTier = !!data.paidTier;
-      if (data.brainTiers) this.brainTiers = data.brainTiers;
+      // The grid always displays whichever peer list actually answered, which on a
+      // brainDowngrade (everyday -> Heavy Hitter escalation) is Heavy Hitter's peers even
+      // though data.brain still literally says 'everyday' (the tier originally requested, not
+      // the one that ended up serving the reply). Tracked separately from lastBrain so the
+      // Skip/Enable column and #togglePeer target the tier that's genuinely on screen.
+      if (data.brainTiers) {
+        this.brainTiers = data.brainTiers;
+        this.brainTiersTier = data.brainDowngrade ? 'heavy_hitter' : this.lastBrain;
+      }
       if (data.tierIndex !== undefined) this.tierIndex = data.tierIndex;
       this.statusMessage = '';
 
@@ -5419,7 +5436,7 @@ class App {
                           <th style="text-align:left;padding:4px 8px;opacity:0.6;font-weight:500;">Tier</th>
                           <th style="text-align:left;padding:4px 8px;opacity:0.6;font-weight:500;">AI Brain</th>
                           <th style="text-align:right;padding:4px 8px;opacity:0.6;font-weight:500;">Status</th>
-                          ${this.lastBrain === 'everyday' ? html`<th style="padding:4px 8px;"></th>` : ''}
+                          ${this.brainTiersTier === 'everyday' || this.brainTiersTier === 'heavy_hitter' ? html`<th style="padding:4px 8px;"></th>` : ''}
                         </tr>
                       </thead>
                       <tbody>
@@ -5436,13 +5453,13 @@ class App {
                                     ? html`<span style="opacity:0.35;">Disabled</span>`
                                     : html`<span style="opacity:0.35;">Standby</span>`}
                             </td>
-                            ${this.lastBrain === 'everyday'
+                            ${this.brainTiersTier === 'everyday' || this.brainTiersTier === 'heavy_hitter'
                               ? html`
                                   <td style="padding:6px 8px;text-align:right;">
                                     <button
                                       style="font-size:0.85em;padding:2px 8px;"
                                       title="${t.status === 'disabled' ? 'Re-enable this brain' : 'Skip this brain for now'}"
-                                      @click=${() => this.#toggleEverydayPeer(t.label)}
+                                      @click=${() => this.#togglePeer(this.brainTiersTier, t.label)}
                                     >${t.status === 'disabled' ? 'Enable' : 'Skip'}</button>
                                   </td>
                                 `
