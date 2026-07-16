@@ -3762,20 +3762,22 @@ class App {
   // queued since the last check, injected as Skippy's own turn, then
   // cleared (pop_pending_courier_messages is atomic on the backend side).
   // No LLM call — this is the sender's literal content, not something to
-  // paraphrase or react to. `announce` is false for the silent login-time
-  // call (no TTS context yet) and true for live polling mid-session, where
-  // a render + spoken alert make sense since the user is already here.
-  #deliverPendingCourierMessages = async (announce = false) => {
+  // paraphrase or react to. Always renders + speaks it through the normal
+  // #speak pipeline, same as any other Skippy turn — a real message from
+  // the other Principal deserves the standard voice treatment regardless of
+  // whether it arrived at login or mid-session (live-tested 2026-07-16: an
+  // earlier version stayed silent-text-only on the login path specifically,
+  // which read as an inconsistency once polling made mid-session delivery
+  // speak — unified to always announce).
+  #deliverPendingCourierMessages = async () => {
     const pending = await this.backendActor.pop_pending_courier_messages();
     if (pending.length === 0) return;
     const reply = pending
       .map((m) => `Before I forget — someone wanted me to pass this along: "${m.content}"`)
       .join(' ');
     this.#recordTurn('', reply);
-    if (announce) {
-      this.#render();
-      this.#speak(reply);
-    }
+    this.#render();
+    this.#speak(reply);
   };
 
   // Started post-login (#startCourierPolling), cleared on logout. Fixes the
@@ -3786,7 +3788,7 @@ class App {
   #startCourierPolling = () => {
     if (this.#courierPollHandle || this.guestMode) return;
     this.#courierPollHandle = setInterval(() => {
-      this.#deliverPendingCourierMessages(true).catch((err) => {
+      this.#deliverPendingCourierMessages().catch((err) => {
         console.error('[Skippy] courier poll failed:', err);
       });
     }, 90000);
