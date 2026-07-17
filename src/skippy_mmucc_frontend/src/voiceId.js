@@ -43,6 +43,11 @@ const SAMPLE_RATE = 16000;
 // sidesteps all of that for good — no CDN, no cross-origin fetch, no more
 // chasing jsdelivr-specific CSP gaps.
 env.backends.onnx.wasm.wasmPaths = '/ort/';
+// Explicit rather than relying on onnxruntime-web's own crossOriginIsolated
+// check (which should already force this to 1 here, since this app never
+// sends Cross-Origin-Opener-Policy/Cross-Origin-Embedder-Policy headers) —
+// makes the single-threaded intent visible in code instead of implicit.
+env.backends.onnx.wasm.numThreads = 1;
 
 // Cosine similarity. Set from real live measurements 2026-06-23, not the
 // model card's clean-WAV reference numbers (~0.93-0.96 same-speaker, ~0.71
