@@ -49,6 +49,24 @@ env.backends.onnx.wasm.wasmPaths = '/ort/';
 // makes the single-threaded intent visible in code instead of implicit.
 env.backends.onnx.wasm.numThreads = 1;
 
+// Same reasoning that led to self-hosting the WASM runtime above, applied
+// to the model weights themselves: a live "Service unavailable" (503) from
+// huggingface.co/.../preprocessor_config.json — confirmed via the fetch
+// tracer, and confirmed via curl that HF's own resolve URLs hop through a
+// separate CDN domain (cas-bridge.xethub.hf.co) for the actual binary, a
+// multi-hop chain with more than one failure point — persisted across a
+// retry rather than being a one-off blip. The three files this model
+// actually needs (config.json, preprocessor_config.json,
+// onnx/model_quantized.onnx — confirmed against Hugging Face's own repo
+// file listing, not guessed) are bundled as static same-origin assets
+// under /models/Xenova/wavlm-base-sv/, same directory shape transformers.js
+// expects for a local model. allowRemoteModels is set to false, not just
+// left to fall back opportunistically — the whole point is a hard
+// guarantee this app never depends on huggingface.co's uptime again.
+env.allowLocalModels = true;
+env.localModelPath = '/models/';
+env.allowRemoteModels = false;
+
 // Cosine similarity. Set from real live measurements 2026-06-23, not the
 // model card's clean-WAV reference numbers (~0.93-0.96 same-speaker, ~0.71
 // different-speaker) — real browser-mic conditions in this app turned out
