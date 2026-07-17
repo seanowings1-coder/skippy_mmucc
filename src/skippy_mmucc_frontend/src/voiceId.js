@@ -109,6 +109,34 @@ const STORE_NAME = 'profiles';
 // guests are never enrolled, only ever recognized as "not a match."
 const COMMANDER_KEY = 'commander';
 
+// Debugging aid: transformers.js/onnxruntime-web throw a bare "Failed to
+// fetch" with no URL on any network or CSP failure — useless for
+// diagnosing a mobile device with no devtools access, which is exactly
+// where this kept recurring. Wraps window.fetch for the duration of one
+// loading stage, records every URL attempted, and folds the last one (plus
+// the stage name) into the thrown error's message so it shows up directly
+// in the on-screen voiceEnrollmentError text (see App.js) without needing
+// a console open at all.
+async function withFetchTrace(stage, fn) {
+  const attempted = [];
+  const originalFetch = window.fetch.bind(window);
+  window.fetch = (...args) => {
+    const url = typeof args[0] === 'string' ? args[0] : args[0]?.url;
+    if (url) attempted.push(url);
+    return originalFetch(...args);
+  };
+  try {
+    return await fn();
+  } catch (err) {
+    const lastUrl = attempted[attempted.length - 1] ?? '(no fetch attempted)';
+    const wrapped = new Error(`[${stage}] ${err.message} — last URL: ${lastUrl}`);
+    wrapped.cause = err;
+    throw wrapped;
+  } finally {
+    window.fetch = originalFetch;
+  }
+}
+
 let modelPromise = null;
 // `onDownloadProgress` only ever matters for whichever call actually
 // triggers the real download (the first one, ever, per page load) — once
@@ -125,12 +153,25 @@ function getModel(onDownloadProgress) {
       if (info.status === 'progress') onDownloadProgress?.(Math.round(info.progress));
     };
     modelPromise = (async () => {
-      const processor = await AutoProcessor.from_pretrained(MODEL_ID, { progress_callback });
-      // Explicit dtype rather than relying on transformers.js's own
-      // default (which is version-dependent) — 'q8' is the ~100MB
-      // 8-bit-quantized weight file, not the 400MB+ full-precision one.
-      const model = await AutoModel.from_pretrained(MODEL_ID, { dtype: 'q8', progress_callback });
-      return { processor, model };
+      try {
+        const processor = await withFetchTrace('processor', () =>
+          AutoProcessor.from_pretrained(MODEL_ID, { progress_callback })
+        );
+        // Explicit dtype rather than relying on transformers.js's own
+        // default (which is version-dependent) — 'q8' is the ~100MB
+        // 8-bit-quantized weight file, not the 400MB+ full-precision one.
+        const model = await withFetchTrace('model', () =>
+          AutoModel.from_pretrained(MODEL_ID, { dtype: 'q8', progress_callback })
+        );
+        return { processor, model };
+      } catch (err) {
+        // Don't cache a permanent rejection — without this, one failed
+        // attempt (e.g. a transient network blip) would silently break
+        // every retry for the rest of the page's lifetime, since callers
+        // just return the same already-rejected modelPromise forever.
+        modelPromise = null;
+        throw err;
+      }
     })();
   }
   return modelPromise;
