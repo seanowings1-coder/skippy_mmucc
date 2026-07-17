@@ -27,10 +27,22 @@
 // afterward. That's a real difference from "never touches the network,
 // ever," even though it fully satisfies "no API keys or vendor
 // gatekeeping."
-import { AutoProcessor, AutoModel, load_audio, cos_sim } from '@huggingface/transformers';
+import { AutoProcessor, AutoModel, load_audio, cos_sim, env } from '@huggingface/transformers';
 
 const MODEL_ID = 'Xenova/wavlm-base-sv';
 const SAMPLE_RATE = 16000;
+
+// By default, transformers.js's onnxruntime-web backend dynamically loads
+// its own WASM runtime from cdn.jsdelivr.net at inference time — a
+// completely separate network dependency from the Hugging Face model
+// weights above, and one that ran into repeated CSP + cross-origin-import
+// friction in production (script-src domain, then the blob: scheme its
+// fetch-then-import trick requires, then a bare fetch failure with no CSP
+// signal at all). Self-hosting the one runtime variant this app actually
+// needs (Android Chrome only, no Safari) as a same-origin static asset
+// sidesteps all of that for good — no CDN, no cross-origin fetch, no more
+// chasing jsdelivr-specific CSP gaps.
+env.backends.onnx.wasm.wasmPaths = '/ort/';
 
 // Cosine similarity. Set from real live measurements 2026-06-23, not the
 // model card's clean-WAV reference numbers (~0.93-0.96 same-speaker, ~0.71
