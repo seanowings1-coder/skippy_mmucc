@@ -182,8 +182,13 @@ async function getEmbedding(blob, onDownloadProgress) {
   const objectUrl = URL.createObjectURL(blob);
   try {
     const audio = await load_audio(objectUrl, SAMPLE_RATE);
-    const inputs = await processor(audio);
-    const { embeddings } = await model(inputs);
+    // These two are also wrapped, not just the from_pretrained calls above
+    // — the WASM inference session may not actually instantiate until the
+    // first real call here, deferred past the point where model download
+    // progress already reads 100%. That gap is exactly where an unwrapped
+    // "Failed to fetch" was still slipping through after weights finished.
+    const inputs = await withFetchTrace('processor-inference', () => processor(audio));
+    const { embeddings } = await withFetchTrace('model-inference', () => model(inputs));
     return Float32Array.from(embeddings.data);
   } finally {
     URL.revokeObjectURL(objectUrl);
