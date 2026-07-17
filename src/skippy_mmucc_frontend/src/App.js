@@ -1301,15 +1301,12 @@ class App {
       await this.#deliverPendingCourierMessages();
       this.#startCourierPolling();
       await this.#refreshFuel();
-      // On-device speaker recognition deliberately only ever instantiates
-      // after a successful II login (never before, never while locked) —
-      // confirmed requirement: dormant otherwise, no mic access, no
-      // resources spent. Skipped entirely during Guest Mode, same as every
-      // other owner-only action.
+      // On-device speaker recognition never auto-starts on login — it only
+      // ever runs during an active "Start Listening" session (wired in
+      // #startListening/#stopListening below), same on/off window as the
+      // main mic button. Just checks whether a voiceprint exists here so
+      // the UI (Profile drawer, mic-button behavior) knows it's available.
       this.hasEnrolledVoice = voiceIdAvailable() && Boolean(await loadStoredVoiceprint());
-      if (this.hasEnrolledVoice && !this.guestMode) {
-        this.#startSpeakerRecognition();
-      }
     } catch (err) {
       console.error('[Skippy] post-login setup failed:', err);
       this.statusMessage = `Logged in, but failed to load workspace data: ${err.message}`;
@@ -1343,9 +1340,11 @@ class App {
   };
 
   // On-device speaker recognition (open-source, no API key) — persona/tone
-  // signal only, see voiceId.js. Starts/stops the background recognizer; guarded
-  // so repeated calls (post-login, after enrollment, after Guest Mode
-  // unlock) are all safe no-ops if already running/stopped.
+  // signal only, see voiceId.js. Strictly on-demand: only ever runs while
+  // "Start Listening" is active (wired alongside #startListening/
+  // #stopListening) or during enrollment's own self-contained mic session
+  // — never on login, never idle. Guarded so repeated calls are safe no-ops
+  // if already running/stopped.
   #startSpeakerRecognition = async () => {
     if (this.stopVoiceRecognition || this.guestMode) return;
     try {
@@ -1407,7 +1406,11 @@ class App {
       this.voiceEnrollmentActive = false;
       this.voiceCalibrationModal = false;
       this.#render();
-      if (this.hasEnrolledVoice) {
+      // Only resume if a "Start Listening" session was already active
+      // before enrollment paused it to claim exclusive mic access — a
+      // fresh enrollment on its own should never leave the mic running
+      // afterward.
+      if (this.hasEnrolledVoice && this.state === 'listening') {
         this.#startSpeakerRecognition();
       }
     }
@@ -1855,9 +1858,6 @@ class App {
           await verifyActor.verify_unlock();
           this.guestMode = false;
           localStorage.removeItem('skippy_guest_mode');
-          if (this.hasEnrolledVoice) {
-            this.#startSpeakerRecognition();
-          }
         } catch (err) {
           // Deliberately generic — per Pillar 15, a failed check shouldn't
           // hand a guest a working oracle for probing the whitelist by
@@ -2708,6 +2708,13 @@ class App {
     this.state = 'listening';
     this.statusMessage = '';
     this.#startRecognition();
+    // Speaker-ID's own separate mic stream (needed for raw-audio WavLM
+    // comparison — the Web Speech API above only ever exposes transcripts,
+    // not audio) rides the same on/off window as the main mic button now,
+    // not the whole login session.
+    if (this.hasEnrolledVoice && !this.guestMode) {
+      this.#startSpeakerRecognition();
+    }
     this.#render();
   };
 
@@ -2723,6 +2730,7 @@ class App {
     this.#pendingUtteranceTimer = null;
     this.#pendingUtterance = '';
     this.recognition.stop();
+    this.#stopSpeakerRecognitionFn();
     this.#render();
   };
 
