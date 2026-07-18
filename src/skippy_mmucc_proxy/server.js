@@ -519,6 +519,12 @@ const PUSHBACK_PATTERNS = [
   /\bi (already )?said (that|this|no)\b/i,
   /\bnot (that|this) again\b/i,
   /\bcan you (please )?stop\b/i,
+  // Added 2026-07-19 after a real live miss: a user correction attempt
+  // ("why are you fixated on OS and an iOS") didn't match anything above —
+  // "keep" isn't the only verb people reach for.
+  /\b(why (are|is) you|you'?re) (fixated|stuck|obsessed|hung up|fixed) on\b/i,
+  /\byou'?re repeating (yourself|the same thing)\b/i,
+  /\bstop fixat(ing|ed)\b/i,
 ];
 const detectsPushback = (t) => typeof t === 'string' && PUSHBACK_PATTERNS.some((re) => re.test(t));
 // Forced onto the FIRST attempt (unlike dedupeStuckReply's after-the-fact
@@ -2313,6 +2319,7 @@ CRITICAL STRUCTURAL ARCHITECTURE:
 
 TTS AND STAGE DIRECTION SAFETY:
 - Never write asterisk-wrapped physical/visual stage directions (e.g., *clears throat*, *bows with a flourish*). You are a voice/text AI with no physical body, so describing a body doing things makes no sense; speak in pure dialogue/lyrics only.
+- Never use decorative emoji anywhere in your output — not in the hype line, not in the lyrics — with the SINGLE exception of the two 🎶 marks required by rule 2. This includes things like ❗️, 🎤, 🔥, 🎸 — every character you write gets fed directly to a text-to-speech engine and either gets read aloud garbled or mispronounced, or silently mangles the audio. A spelled-out reaction word like "HRMPH!" is fine as an actual spoken word in the hype line; a decorative symbol tacked onto it is not.
 
 PLAGIARISM AND LEAK PROTECTION:
 - The lyrics must be 100% ORIGINAL.
