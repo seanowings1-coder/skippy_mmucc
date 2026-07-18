@@ -1237,6 +1237,11 @@ class App {
   // is used elsewhere (e.g. deciding where an escalation's Skip clicks
   // should land) — this only controls what the modal is showing right now.
   viewedBrainTier = '';
+  // Live "Test this brain" results (2026-07-19) — keyed by `${tier}::${label}`,
+  // value one of: 'testing' | { ok, latencyMs, error }. Cleared on modal close
+  // isn't needed — stale results from an earlier tier view are harmless since
+  // the key includes the tier, and a re-test just overwrites the entry.
+  brainHealthResults = {};
   tierIndex = -1;
   showLeftDrawer = false;
   showRightDrawer = false;
@@ -1579,6 +1584,39 @@ class App {
       : [...this[field], label];
     localStorage.setItem(storageKey, JSON.stringify(this[field]));
     this.#render();
+  };
+
+  // Fires a real, tiny completion call at one specific peer via the new
+  // /api/brain-health-check proxy route (2026-07-19) — confirms it's
+  // reachable right now, not just configured. `fullLabel` is the display
+  // label including the "(DeepInfra)"/"(OpenRouter)" suffix (what the modal
+  // renders); server.js's peer lists key off the bare label, so it's
+  // stripped before sending. Only proves the model was up at that instant —
+  // not a guarantee it stays up a moment later under real load.
+  #testBrain = async (tier, fullLabel) => {
+    const label = fullLabel.replace(/\s*\((DeepInfra|OpenRouter)\)$/, '');
+    const key = `${tier}::${fullLabel}`;
+    this.brainHealthResults = { ...this.brainHealthResults, [key]: 'testing' };
+    this.#render();
+    try {
+      const response = await fetch(`${PROXY_URL}/api/brain-health-check`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Skippy-Session': this.sessionToken },
+        body: JSON.stringify({ tier, label }),
+      });
+      const data = await response.json();
+      this.brainHealthResults = { ...this.brainHealthResults, [key]: response.ok ? data : { ok: false, error: data.error || `HTTP ${response.status}` } };
+    } catch (err) {
+      this.brainHealthResults = { ...this.brainHealthResults, [key]: { ok: false, error: err.message } };
+    }
+    this.#render();
+  };
+
+  // Tests every peer currently shown for a tier, in parallel — "Test All".
+  // Reuses #testBrain per-row so results render incrementally as each one
+  // finishes rather than waiting for the slowest.
+  #testAllBrains = (tier, fullLabels) => {
+    fullLabels.forEach((label) => this.#testBrain(tier, label));
   };
 
   // Replies locally first (no waiting on the canister write) since the
@@ -5670,6 +5708,33 @@ class App {
                       ...t,
                       status: currentlyDisabled.includes(t.label) ? 'disabled' : (t.status === 'disabled' ? 'standby' : t.status),
                     }));
+                // "Test this brain" (2026-07-19) — real reachability check via
+                // /api/brain-health-check, not just configuration. Steel
+                // Rain's list has intentional duplicate labels across rounds
+                // (same model reused in round2 and last-resort); a shared
+                // result keyed by label alone is correct here, not a bug —
+                // it IS the same model. testAllLabels dedupes for the batch
+                // button so "Test All" doesn't fire the same call twice.
+                const testAllLabels = [...new Set(displayedTiers.map((t) => t.label))];
+                const renderTestCell = (label) => {
+                  const result = this.brainHealthResults[`${this.viewedBrainTier}::${label}`];
+                  return html`
+                    <td style="padding:6px 8px;text-align:right;white-space:nowrap;">
+                      ${result === 'testing'
+                        ? html`<span style="opacity:0.6;font-size:0.85em;">testing…</span>`
+                        : result?.ok
+                          ? html`<span style="color:#22c55e;font-size:0.85em;" title="Reachable just now">✅ ${result.latencyMs}ms</span>`
+                          : result
+                            ? html`<span style="color:#ef4444;font-size:0.85em;" title="${result.error || 'unreachable'}">❌ failed</span>`
+                            : ''}
+                      <button
+                        style="font-size:0.8em;padding:2px 6px;margin-left:6px;"
+                        title="Fire a real, tiny completion call to confirm this brain is reachable right now"
+                        @click=${() => this.#testBrain(this.viewedBrainTier, label)}
+                      >Test</button>
+                    </td>
+                  `;
+                };
                 return html`
                 <div style="position:fixed;inset:0;background:rgba(0,0,0,0.75);display:flex;align-items:center;justify-content:center;z-index:2000;"
                      @click=${(e) => { if (e.target === e.currentTarget) { this.showBrainGrid = false; this.#render(); } }}>
@@ -5682,15 +5747,22 @@ class App {
                         @click=${() => { this.viewedBrainTier = 'steel_rain'; this.#render(); }}
                       >⛨ Fallback</button>
                     </div>
-                    <div style="display:flex;gap:0.5em;margin-bottom:1em;">
+                    <div style="display:flex;align-items:center;justify-content:space-between;gap:0.5em;margin-bottom:1em;">
+                      <div style="display:flex;gap:0.5em;">
+                        <button
+                          style="${this.viewedBrainTier === 'everyday' ? 'font-weight:600;text-decoration:underline;' : 'opacity:0.6;'}"
+                          @click=${() => { this.viewedBrainTier = 'everyday'; this.#render(); }}
+                        >Everyday</button>
+                        <button
+                          style="${this.viewedBrainTier === 'heavy_hitter' ? 'font-weight:600;text-decoration:underline;' : 'opacity:0.6;'}"
+                          @click=${() => { this.viewedBrainTier = 'heavy_hitter'; this.#render(); }}
+                        >Heavy Hitter</button>
+                      </div>
                       <button
-                        style="${this.viewedBrainTier === 'everyday' ? 'font-weight:600;text-decoration:underline;' : 'opacity:0.6;'}"
-                        @click=${() => { this.viewedBrainTier = 'everyday'; this.#render(); }}
-                      >Everyday</button>
-                      <button
-                        style="${this.viewedBrainTier === 'heavy_hitter' ? 'font-weight:600;text-decoration:underline;' : 'opacity:0.6;'}"
-                        @click=${() => { this.viewedBrainTier = 'heavy_hitter'; this.#render(); }}
-                      >Heavy Hitter</button>
+                        style="font-size:0.8em;padding:3px 8px;"
+                        title="Test every brain shown below right now"
+                        @click=${() => this.#testAllBrains(this.viewedBrainTier, testAllLabels)}
+                      >Test All</button>
                     </div>
                     ${isSteelRain
                       ? html`<p style="margin:0 0 0.8em;font-size:0.8em;opacity:0.6;">Tactical/focus mode's emergency fallback brains (Steel Rain) — informational only, nothing here can be individually skipped/enabled.</p>`
@@ -5704,6 +5776,7 @@ class App {
                           <th style="text-align:left;padding:4px 8px;opacity:0.6;font-weight:500;">AI Brain</th>
                           ${isSteelRain ? '' : html`<th style="text-align:right;padding:4px 8px;opacity:0.6;font-weight:500;">Status</th>`}
                           ${isSteelRain ? '' : html`<th style="padding:4px 8px;"></th>`}
+                          <th style="padding:4px 8px;"></th>
                         </tr>
                       </thead>
                       <tbody>
@@ -5712,6 +5785,7 @@ class App {
                               <tr style="border-bottom:1px solid rgba(55,65,81,0.4);">
                                 <td style="padding:6px 8px;opacity:0.5;font-size:0.85em;">${t.round}</td>
                                 <td style="padding:6px 8px;">${t.label}</td>
+                                ${renderTestCell(t.label)}
                               </tr>
                             `
                           : html`
@@ -5734,11 +5808,13 @@ class App {
                                 @click=${() => this.#togglePeer(this.viewedBrainTier, t.label)}
                               >${t.status === 'disabled' ? 'Enable' : 'Skip'}</button>
                             </td>
+                            ${renderTestCell(t.label)}
                           </tr>
                         `)}
                       </tbody>
                     </table>
-                    <div style="margin-top:1.25em;text-align:right;">
+                    <p style="margin:0.8em 0 0;font-size:0.72em;opacity:0.45;">Test = reachable right now, not a guarantee it stays up a moment later under real load.</p>
+                    <div style="margin-top:0.75em;text-align:right;">
                       <button @click=${() => { this.showBrainGrid = false; this.#render(); }}>Close</button>
                     </div>
                   </div>

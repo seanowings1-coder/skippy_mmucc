@@ -162,6 +162,43 @@ const BRAIN_GENERATION_PARAMS = {
   focus: {},
 };
 
+// Peer ladders, hoisted to module scope (2026-07-19) so both /respond and
+// /api/brain-health-check read the exact same hardcoded lists — previously
+// these lived only inside /respond's handler, which would have meant a
+// second, easy-to-drift copy for the health-check route. See CLAUDE.md's
+// "Brain -> DeepInfra" migration section for the full peer-fall-forward
+// design these implement.
+const EVERYDAY_PEERS = [
+  // Primary intentionally unchanged — already dialed in, don't touch.
+  { label: 'Euryale 70B', provider: 'deepinfra', model: DEEPINFRA_MODEL_SNAPPY },
+  { label: 'Hermes 3 70B', provider: 'deepinfra', model: 'NousResearch/Hermes-3-Llama-3.1-70B' },
+  { label: 'DeepSeek V4 Flash', provider: 'deepinfra', model: DEEPINFRA_MODEL_SNAPPY_FALLBACK },
+];
+const HEAVY_HITTER_PEERS = [
+  // Claude Sonnet moved to primary and upgraded 4.6 -> 5 (also cheaper: $2/$10 per M vs
+  // 4.6's $3/$15) now that DeepInfra hosts Anthropic models directly at official pricing —
+  // guardrails still deliberately intact, same reasoning as before ("you are going to be my
+  // 800 pound monster for coding... I don't need to be diving off the bridge").
+  { label: 'Claude Sonnet 5', provider: 'deepinfra', model: 'anthropic/claude-sonnet-5' },
+  { label: 'Kimi K2.7 Code', provider: 'deepinfra', model: 'moonshotai/Kimi-K2.7-Code' },
+  // 1.6T MoE heavy lifter, now the final catch instead of primary.
+  { label: 'DeepSeek V4 Pro', provider: 'deepinfra', model: DEEPINFRA_MODEL_SUPERBRAIN },
+];
+// Steel Rain's own entrants, grouped by round for the health-check route and
+// the frontend's read-only "⛨ Fallback" tab — mirrors the actual race/cascade
+// logic in /respond exactly (see "Steel Rain / tactical race" below); keep in
+// sync if that logic's models ever change.
+const STEEL_RAIN_PEERS = [
+  { round: 'round1', label: 'DeepSeek V4 Flash', provider: 'deepinfra', model: DEEPINFRA_MODEL_TACTICAL },
+  { round: 'round1', label: 'Claude Haiku 4.5', provider: 'openrouter', model: OPENROUTER_MODEL_TACTICAL_PAID },
+  { round: 'round2', label: 'Euryale 70B', provider: 'deepinfra', model: DEEPINFRA_MODEL_SNAPPY },
+  { round: 'round2', label: 'DeepSeek V4 Pro', provider: 'deepinfra', model: DEEPINFRA_MODEL_SUPERBRAIN },
+  { round: 'round2', label: 'Claude Sonnet 4.6', provider: 'openrouter', model: OPENROUTER_MODEL_TACTICAL },
+  { round: 'last_resort', label: 'Claude Sonnet 4.6', provider: 'openrouter', model: OPENROUTER_MODEL_TACTICAL },
+  { round: 'last_resort', label: 'Claude Haiku 4.5', provider: 'openrouter', model: OPENROUTER_MODEL_TACTICAL_PAID },
+  { round: 'last_resort', label: 'Llama 3.3 70B, paid', provider: 'openrouter', model: OPENROUTER_MODEL_TACTICAL_FALLBACK_PAID },
+];
+
 // RAG (Pillar 6) — OpenRouter added a unified /embeddings endpoint covering
 // OpenAI/Mistral/Qwen/etc. embedding models, so this reuses OPENROUTER_API_KEY
 // rather than needing a separate OpenAI key. 512 dims (via the request's
@@ -1419,22 +1456,8 @@ app.post('/respond', requireSession, async (req, res) => {
   // stays 100% DeepInfra; OpenRouter is reserved exclusively for the Steel Rain Haiku racer
   // (see below), not used as a fall-forward peer in either tier anymore. Dolphin Venice and
   // Hermes 4 405B (both OpenRouter) were dropped for this reason, not replaced 1:1.
-  const EVERYDAY_PEERS = [
-    // Primary intentionally unchanged — already dialed in, don't touch.
-    { label: 'Euryale 70B', provider: 'deepinfra', model: DEEPINFRA_MODEL_SNAPPY },
-    { label: 'Hermes 3 70B', provider: 'deepinfra', model: 'NousResearch/Hermes-3-Llama-3.1-70B' },
-    { label: 'DeepSeek V4 Flash', provider: 'deepinfra', model: DEEPINFRA_MODEL_SNAPPY_FALLBACK },
-  ];
-  const HEAVY_HITTER_PEERS = [
-    // Claude Sonnet moved to primary and upgraded 4.6 -> 5 (also cheaper: $2/$10 per M vs
-    // 4.6's $3/$15) now that DeepInfra hosts Anthropic models directly at official pricing —
-    // guardrails still deliberately intact, same reasoning as before ("you are going to be my
-    // 800 pound monster for coding... I don't need to be diving off the bridge").
-    { label: 'Claude Sonnet 5', provider: 'deepinfra', model: 'anthropic/claude-sonnet-5' },
-    { label: 'Kimi K2.7 Code', provider: 'deepinfra', model: 'moonshotai/Kimi-K2.7-Code' },
-    // 1.6T MoE heavy lifter, now the final catch instead of primary.
-    { label: 'DeepSeek V4 Pro', provider: 'deepinfra', model: DEEPINFRA_MODEL_SUPERBRAIN },
-  ];
+  // EVERYDAY_PEERS/HEAVY_HITTER_PEERS: now module-level (hoisted 2026-07-19,
+  // see above) so /api/brain-health-check can reuse the exact same lists.
 
   // overrideMessages/overrideGenParams let the dedupe retry (see
   // dedupeStuckReply below) reuse this same function with one corrective
@@ -3009,6 +3032,75 @@ app.get('/api/deepinfra-topup', requireSession, async (req, res) => {
     res.json({ url: diData.url });
   } catch (err) {
     res.status(502).json({ error: err.message });
+  }
+});
+
+// Live "Test this brain" check (2026-07-19) — there's no free health-check/ping
+// endpoint on either DeepInfra or OpenRouter for a specific chat model, so the
+// only way to know one is actually reachable right now (not just configured)
+// is a real, tiny completion call. Takes { tier, label } identifying a peer
+// from EVERYDAY_PEERS/HEAVY_HITTER_PEERS/STEEL_RAIN_PEERS (the same source of
+// truth /respond itself uses, not a second hardcoded copy) so the frontend
+// never has to send a raw provider/model pair itself. A successful check only
+// proves the model was up at that exact instant — not a guarantee under real
+// load a moment later, especially mid-emergency; the frontend should say so.
+const ALL_TESTABLE_PEERS = {
+  everyday: EVERYDAY_PEERS,
+  heavy_hitter: HEAVY_HITTER_PEERS,
+  steel_rain: STEEL_RAIN_PEERS,
+};
+app.post('/api/brain-health-check', requireSession, async (req, res) => {
+  const { tier, label } = req.body || {};
+  const peers = ALL_TESTABLE_PEERS[tier];
+  if (!peers) {
+    return res.status(400).json({ error: `Unknown tier "${tier}".` });
+  }
+  const peer = peers.find((p) => p.label === label);
+  if (!peer) {
+    return res.status(400).json({ error: `Unknown peer "${label}" for tier "${tier}".` });
+  }
+  if (peer.provider === 'deepinfra' && !DEEPINFRA_API_KEY) {
+    return res.json({ ok: false, error: 'DEEPINFRA_API_KEY is not set.' });
+  }
+  if (peer.provider === 'openrouter' && !OPENROUTER_API_KEY) {
+    return res.json({ ok: false, error: 'OPENROUTER_API_KEY is not set.' });
+  }
+
+  const url = peer.provider === 'deepinfra'
+    ? 'https://api.deepinfra.com/v1/openai/chat/completions'
+    : 'https://openrouter.ai/api/v1/chat/completions';
+  const apiKey = peer.provider === 'deepinfra' ? DEEPINFRA_API_KEY : OPENROUTER_API_KEY;
+
+  const timeoutAbort = new AbortController();
+  const timeout = setTimeout(() => timeoutAbort.abort(), 10_000);
+  const startedAt = Date.now();
+  try {
+    const r = await fetch(url, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: peer.model,
+        messages: [{ role: 'user', content: 'Reply with only the word OK.' }],
+        max_tokens: 5,
+      }),
+      signal: timeoutAbort.signal,
+    });
+    const latencyMs = Date.now() - startedAt;
+    if (!r.ok) {
+      const errText = await r.text().catch(() => '');
+      return res.json({ ok: false, latencyMs, error: `${r.status} ${errText}`.trim().slice(0, 200) });
+    }
+    const data = await r.json();
+    if (!data.choices?.[0]?.message?.content) {
+      return res.json({ ok: false, latencyMs, error: 'Empty response.' });
+    }
+    res.json({ ok: true, latencyMs });
+  } catch (err) {
+    const latencyMs = Date.now() - startedAt;
+    const timedOut = err.name === 'AbortError';
+    res.json({ ok: false, latencyMs, error: timedOut ? 'Timed out after 10s.' : err.message });
+  } finally {
+    clearTimeout(timeout);
   }
 });
 
