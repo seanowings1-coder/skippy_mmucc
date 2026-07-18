@@ -1190,16 +1190,35 @@ fn manual_category_map() -> Vec<(String, String)> {
     map.into_iter().collect()
 }
 
+// Defensive cap, not yet a live problem at current manual sizes — but this
+// query has no limit at all today, and a large enough manual (or the
+// continuously-growing Notes pseudo-manual) could eventually push a single
+// response past ICP's ~2MB query response ceiling, breaking the "view this
+// manual" screen outright. Does NOT affect uploads, storage, or RAG search
+// (search_similar_chunks/search_manuals_by_keyword are untouched and still
+// scan every section) — this only limits what one browse/view call returns.
+const MAX_SECTIONS_PER_MANUAL_QUERY: usize = 200;
+
 #[query]
 fn list_sections_by_manual(manual_name: String) -> Vec<DocumentSection> {
     assert_whitelisted();
-    MANUAL_SECTIONS.with(|s| {
+    let mut sections: Vec<DocumentSection> = MANUAL_SECTIONS.with(|s| {
         s.borrow()
             .iter()
             .map(|entry| entry.value().clone())
             .filter(|doc| doc.manual_name == manual_name)
             .collect()
-    })
+    });
+    // MANUAL_SECTIONS.iter() walks the StableBTreeMap in ascending key (id)
+    // order, i.e. the order sections were originally added — keep the most
+    // recently added ones (drop from the front) rather than an arbitrary
+    // truncation, so a continuously-growing Notes list still shows your
+    // latest entries instead of getting stuck showing only the oldest ones.
+    if sections.len() > MAX_SECTIONS_PER_MANUAL_QUERY {
+        let skip = sections.len() - MAX_SECTIONS_PER_MANUAL_QUERY;
+        sections.drain(0..skip);
+    }
+    sections
 }
 
 /// Called by the frontend right after an Internet Identity sign-in. Mints a
