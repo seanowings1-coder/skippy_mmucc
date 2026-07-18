@@ -1713,7 +1713,102 @@ app.post('/respond', requireSession, async (req, res) => {
       });
     } catch (aggErr) {
       if (upstreamAbort.signal.aborted) return; // client already gone
-      console.warn(`[Skippy] Steel Rain race: both racers failed (${brain}) — falling through to full cascade`);
+      console.warn(`[Skippy] Steel Rain race: round 1 both racers failed (${brain}) — firing round 2`);
+    }
+
+    // Round 2 — 2026-07-18, user's explicit call after round 1 failing twice
+    // in the same conversation: "when the shit hits the fan we need to
+    // eliminate as many failure points as possible... cost goes out the
+    // door, it is an emergency." The old behavior here was the untouched
+    // pre-DeepInfra sequential cascade (Sonnet -> Haiku -> free Llama ->
+    // paid Llama) — one model at a time, waiting out each failure before
+    // trying the next, including a FREE OpenRouter step ("DeepInfra's free
+    // ones are always overloaded" — the equivalent free-tier risk on the
+    // OpenRouter side, in a path that's supposed to be the fast/reliable
+    // emergency one). Replaced with a second, wider parallel race — same
+    // Promise.any pattern as round 1, three fresh paid entrants (not the
+    // same two that just failed) fired simultaneously: two different
+    // DeepInfra models (in case DeepSeek V4 Flash specifically had an
+    // issue rather than DeepInfra as a whole) and a different OpenRouter
+    // model. All three peer names are already verified real elsewhere in
+    // this codebase (EVERYDAY_PEERS/HEAVY_HITTER_PEERS, this project's
+    // standing "confirm via the provider's own /models listing before
+    // hardcoding" discipline), not newly guessed here.
+    if (DEEPINFRA_API_KEY) {
+      const round2Abort = {
+        euryale: new AbortController(),
+        deepseekPro: new AbortController(),
+        sonnet46: new AbortController(),
+      };
+      req.on('close', () => {
+        process.nextTick(() => {
+          Object.values(round2Abort).forEach((c) => { try { c.abort(); } catch {} });
+        });
+      });
+      const abortOthers = (won) => Object.entries(round2Abort).forEach(([k, c]) => { if (k !== won) try { c.abort(); } catch {} });
+
+      const euryaleRacer = fetch('https://api.deepinfra.com/v1/openai/chat/completions', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${DEEPINFRA_API_KEY}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model: DEEPINFRA_MODEL_SNAPPY, ...BRAIN_GENERATION_PARAMS[brain], messages }),
+        signal: round2Abort.euryale.signal,
+      }).then(async (r) => {
+        if (!r.ok) throw new Error(`Round 2 Euryale racer failed: ${r.status}`);
+        const d = await r.json();
+        const reply = d.choices?.[0]?.message?.content;
+        if (!reply) throw new Error('Round 2 Euryale racer: empty reply');
+        abortOthers('euryale');
+        return { source: 'euryale', label: 'Euryale 70B (DeepInfra)', model: DEEPINFRA_MODEL_SNAPPY, reply };
+      });
+
+      const deepseekProRacer = fetch('https://api.deepinfra.com/v1/openai/chat/completions', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${DEEPINFRA_API_KEY}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model: DEEPINFRA_MODEL_SUPERBRAIN, ...BRAIN_GENERATION_PARAMS[brain], messages }),
+        signal: round2Abort.deepseekPro.signal,
+      }).then(async (r) => {
+        if (!r.ok) throw new Error(`Round 2 DeepSeek V4 Pro racer failed: ${r.status}`);
+        const d = await r.json();
+        const reply = d.choices?.[0]?.message?.content;
+        if (!reply) throw new Error('Round 2 DeepSeek V4 Pro racer: empty reply');
+        abortOthers('deepseekPro');
+        return { source: 'deepseekPro', label: 'DeepSeek V4 Pro (DeepInfra)', model: DEEPINFRA_MODEL_SUPERBRAIN, reply };
+      });
+
+      const sonnet46Racer = fetch('https://openrouter.ai/api/v1/chat/completions', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${OPENROUTER_API_KEY}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model: OPENROUTER_MODEL_TACTICAL, ...BRAIN_GENERATION_PARAMS[brain], messages }),
+        signal: round2Abort.sonnet46.signal,
+      }).then(async (r) => {
+        if (!r.ok) throw new Error(`Round 2 Sonnet 4.6 racer failed: ${r.status}`);
+        const d = await r.json();
+        const reply = d.choices?.[0]?.message?.content;
+        if (!reply) throw new Error('Round 2 Sonnet 4.6 racer: empty reply');
+        abortOthers('sonnet46');
+        return { source: 'sonnet46', label: 'Claude Sonnet 4.6 (OpenRouter)', model: OPENROUTER_MODEL_TACTICAL, reply };
+      });
+
+      try {
+        const winner = await Promise.any([euryaleRacer, deepseekProRacer, sonnet46Racer]);
+        console.log(`[Skippy] Steel Rain round 2 won by ${winner.label} (${brain})`);
+        return res.json({
+          reply: stripLeakedFormatting(winner.reply),
+          brain,
+          model: winner.model,
+          paidTier: true,
+          brainDowngrade: false,
+          brainTiers: [
+            { label: 'Euryale 70B (DeepInfra)', status: winner.source === 'euryale' ? 'active' : 'standby' },
+            { label: 'DeepSeek V4 Pro (DeepInfra)', status: winner.source === 'deepseekPro' ? 'active' : 'standby' },
+            { label: 'Claude Sonnet 4.6 (OpenRouter)', status: winner.source === 'sonnet46' ? 'active' : 'standby' },
+          ],
+          tierIndex: ['euryale', 'deepseekPro', 'sonnet46'].indexOf(winner.source),
+        });
+      } catch (aggErr2) {
+        if (upstreamAbort.signal.aborted) return; // client already gone
+        console.warn(`[Skippy] Steel Rain round 2 also failed entirely (${brain}) — falling through to last-resort paid cascade`);
+      }
     }
   }
 
@@ -1729,13 +1824,17 @@ app.post('/respond', requireSession, async (req, res) => {
     const reasonLabel = (r, text) =>
       r.status === 429 ? 'rate-limited (429)' : (text.includes('No endpoints found') ? 'offline (404)' : `error ${r.status}`);
 
-    // 4-tier cascade: primary → paid primary → Claude Haiku → free fallback → paid fallback.
-    // T1→T2: primary paid (strip :free — same model for Claude, so skip if identical).
+    // 3-tier cascade: primary → paid primary → Claude Haiku → paid fallback. Only reached if
+    // BOTH Steel Rain rounds above (round 1: DeepSeek V4 Flash vs Claude Haiku; round 2: Euryale
+    // 70B vs DeepSeek V4 Pro vs Claude Sonnet 4.6) already failed entirely, or DEEPINFRA_API_KEY
+    // isn't set at all — the true last resort. Free-tier step removed 2026-07-18 per the user's
+    // explicit call: "when steel rain is executed cost goes out the door — it is an emergency,"
+    // don't wait through a free/overloaded tier on the one path tied to the Emergency Panic
+    // button. Used to be Sonnet → paid primary → Haiku → free Llama → paid Llama; now skips
+    // straight from Haiku to paid Llama, never touching fbFree at all.
     if (isTransientFailure(response)) {
       const genParams = BRAIN_GENERATION_PARAMS[brain];
-      const [fbFree, fbPaid] = brain === 'focus'
-        ? [OPENROUTER_MODEL_FOCUS_FALLBACK, OPENROUTER_MODEL_FOCUS_FALLBACK_PAID]
-        : [OPENROUTER_MODEL_TACTICAL_FALLBACK, OPENROUTER_MODEL_TACTICAL_FALLBACK_PAID];
+      const fbPaid = brain === 'focus' ? OPENROUTER_MODEL_FOCUS_FALLBACK_PAID : OPENROUTER_MODEL_TACTICAL_FALLBACK_PAID;
 
       // T1 → T2: paid primary (skip if :free wasn't in the model ID — already paid)
       const primaryPaid = activeModel.replace(/:free$/, '');
@@ -1753,14 +1852,7 @@ app.post('/respond', requireSession, async (req, res) => {
         response = await callOpenRouter(OPENROUTER_MODEL_TACTICAL_PAID, genParams);
         activeModel = OPENROUTER_MODEL_TACTICAL_PAID;
       }
-      // T2/T2.5 → T3: free fallback
-      if (isTransientFailure(response)) {
-        const errText = await response.text();
-        console.warn(`[Skippy] ${activeModel} ${reasonLabel(response, errText)} — trying free fallback (${brain})`);
-        response = await callOpenRouter(fbFree, genParams);
-        activeModel = fbFree;
-      }
-      // T3 → T4: paid fallback
+      // T2.5 → T3: paid fallback — no free-tier step anymore, straight to paid.
       if (isTransientFailure(response)) {
         const errText = await response.text();
         console.warn(`[Skippy] ${activeModel} ${reasonLabel(response, errText)} — trying paid fallback (${brain})`);
