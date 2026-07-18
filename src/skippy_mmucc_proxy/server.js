@@ -2340,46 +2340,47 @@ WRONG VS. RIGHT EXAMPLES:
 WRONG (Multi-fragment / Plagiarism Leak / Text Labels / Stage Directions):
 *clears throat dramatically* Check it out, let's rock!
 🎶 [Verse 1] 🎶
-Here I go again on my Web3 road
+Here I go again down a lonely road
 🎶 [Chorus] 🎶
-Nightwish singing about the Rust code
+Someone singing about a heavy load
 
 RIGHT (Single block / Pure Original / Zero Labels / Clean Line Breaks / Verse=ABCB / Pre-Chorus+Chorus=AABB / Chorus repeats verbatim / Bridge breaks the pattern):
 🎶
-The lightning cracked the night I found the door
-A digital road with no end and no name
-I walked in the dark past a thousand closed gates
-Just me and the static that whispered my name
+The mountain pass was steep and lined with pine
+We climbed it slow beneath a fading sky
+The wind kept pulling secrets from the trees
+And every step we took, we learned to fly
 
-I'm climbing the wire, I'm feeding the fire
-I won't stop chasing what I most desire
+Boots worn thin but hearts still beating strong
+We've got the fire, we've got the song
 
-Stacking the tokens higher than the sky
-Watch the legacy engines fade and die
-Stacking the tokens higher than the sky
-Nothing can touch us when we learn to fly
+Rising with the dawn light, we won't fall behind
+Every mile we're chasing, leaving fear behind
+Rising with the dawn light, we won't fall behind
+Nothing's gonna stop us, watch us learn to fly
 
-The iron bunker braved the winter chill
-I wrote out the logic with a sovereign will
-A thousand canisters spinning in the dark
-The terminal glowing with a cosmic spark
+The rivers carved a path we'd never seen
+We followed where the current showed the way
+Old stories lived inside the canyon walls
+And every echo had something to say
 
-I'm climbing the wire, I'm feeding the fire
-I won't stop chasing what I most desire
+Boots worn thin but hearts still beating strong
+We've got the fire, we've got the song
 
-Stacking the tokens higher than the sky
-Watch the legacy engines fade and die
-Stacking the tokens higher than the sky
-Nothing can touch us when we learn to fly
+Rising with the dawn light, we won't fall behind
+Every mile we're chasing, leaving fear behind
+Rising with the dawn light, we won't fall behind
+Nothing's gonna stop us, watch us learn to fly
 
-No more masters, no more chains, just the code and the fight
+Maybe we get lost before we find the truth
+Maybe every scar becomes the proof
 
-Stacking the tokens higher than the sky
-Watch the legacy engines fade and die
-Stacking the tokens higher than the sky
-Nothing can touch us when we learn to fly
+Rising with the dawn light, we won't fall behind
+Every mile we're chasing, leaving fear behind
+Rising with the dawn light, we won't fall behind
+Nothing's gonna stop us, watch us learn to fly
 
-We'll run the world on-chain forevermore!
+We'll keep on chasing every sunrise till the sky runs dry!
 🎶
 
 FINAL REMINDER, THE #1 WAY SONGS RUN TOO LONG: every time you reach a spot where the chorus should recur, you MUST paste the EXACT SAME chorus lines you already wrote — character for character, not new lines that merely feel chorus-like. If you notice yourself composing fresh lyrics for what should be a chorus repeat, stop and go back and copy the original chorus verbatim instead. A song with real verbatim repeats is naturally shorter to sing than one where every section is unique content — this is not just a rhyme-scheme detail, it is how the song stays a reasonable length.`;
@@ -2475,6 +2476,25 @@ app.post('/karaoke', requireSession, async (req, res) => {
     // (mine shared history) applies, which is what produced the "rain, ICP,
     // fire, all over the place" complaint this was added to fix 2026-07-09.
     const topic = typeof req.body?.topic === 'string' ? req.body.topic.trim() : '';
+    // Real conversation grounding (2026-07-19) — added after confirming
+    // /karaoke previously sent NO conversation history at all (just the
+    // system prompt + "Hit it."), so "mine your shared history" in
+    // KARAOKE_SYSTEM_PROMPT was a pure instruction with nothing real behind
+    // it. The model free-associated instead, and — confirmed the same
+    // night — leaned on the prompt's own worked example for content
+    // (verbatim lines lifted from it into a real performance), which is why
+    // songs skewed tech/crypto-themed regardless of what was actually being
+    // discussed. This still only fires when there's no explicit topic pin —
+    // an "about X" request always wins outright, unchanged.
+    // Capped at the last 6 turns / 200 chars each: this is meant to hand the
+    // model a real SUBJECT to riff on, not a transcript to summarize — a
+    // long dump would eat into the 600-token song budget for no benefit.
+    const recentContext = Array.isArray(req.body?.recentContext)
+      ? req.body.recentContext
+          .filter((m) => m && typeof m.role === 'string' && typeof m.content === 'string')
+          .slice(-6)
+          .map((m) => `${m.role === 'user' ? 'Commander' : 'Skippy'}: ${m.content.slice(0, 200)}`)
+      : [];
     // Confirmed live 2026-07-09, direct A/B test: a bare short/ambiguous topic
     // ("ICP") got misread as the real band Insane Clown Posse — the model
     // wrote real member names (Violent J, Shaggy) and real product names
@@ -2482,14 +2502,14 @@ app.post('/karaoke', requireSession, async (req, res) => {
     // forbids in general but didn't survive a strong topic prime without a
     // matching reminder right next to it. The explicit disambiguation clause
     // below closed this on retest.
+    const karaokeUserMessage = topic
+      ? `Hit it. Make the entire song about: ${topic}. If that word or phrase happens to also be the name of a real band, artist, or public figure, IGNORE that association completely — do not name-drop them, their members, or their merchandise/branding, and do not write in their style. Example: given the topic "ICP," do NOT write about Insane Clown Posse, Violent J, Shaggy, Faygo, or Juggalos — instead write about ICP as its OTHER, more literal meaning (a technology, place, or concept), or if genuinely unclear what it means, treat it as an abstract word and build an original theme around it. Stay 100% original per the rules above no matter what.`
+      : recentContext.length > 0
+        ? `Hit it. Here's the recent conversation between you and the Commander, for INSPIRATION ONLY — pick whatever real subject or feeling from it is most singable, and build a 100% ORIGINAL song around that theme. Do NOT quote, paraphrase closely, or summarize any specific line from this conversation in the lyrics — treat it only as a source of a TOPIC, exactly like you would treat an explicitly given one, never as text to lift from:\n${recentContext.join('\n')}`
+        : 'Hit it.';
     const karaokeMessages = [
       { role: 'system', content: KARAOKE_SYSTEM_PROMPT },
-      {
-        role: 'user',
-        content: topic
-          ? `Hit it. Make the entire song about: ${topic}. If that word or phrase happens to also be the name of a real band, artist, or public figure, IGNORE that association completely — do not name-drop them, their members, or their merchandise/branding, and do not write in their style. Example: given the topic "ICP," do NOT write about Insane Clown Posse, Violent J, Shaggy, Faygo, or Juggalos — instead write about ICP as its OTHER, more literal meaning (a technology, place, or concept), or if genuinely unclear what it means, treat it as an abstract word and build an original theme around it. Stay 100% original per the rules above no matter what.`
-          : 'Hit it.',
-      },
+      { role: 'user', content: karaokeUserMessage },
     ];
     const callKaraoke = (model) =>
       fetch('https://openrouter.ai/api/v1/chat/completions', {

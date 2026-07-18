@@ -1680,10 +1680,18 @@ class App {
     this.statusMessage = 'Skippy is warming up...';
     this.#render();
     try {
+      // recentContext (2026-07-19): lets the server ground the song in what
+      // was actually just discussed instead of free-associating from
+      // nothing — see /karaoke's own comment for why this was added. Only
+      // matters server-side when there's no explicit topic; sent either way
+      // since it's cheap and the server already handles the precedence.
       const response = await fetch(`${PROXY_URL}/karaoke`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'X-Skippy-Session': this.sessionToken },
-        body: JSON.stringify({ topic }),
+        body: JSON.stringify({
+          topic,
+          recentContext: this.history.slice(-6).map(({ role, content }) => ({ role, content })),
+        }),
       });
       const data = await response.json();
       if (!response.ok) throw new Error(data.error || 'Karaoke request failed.');
