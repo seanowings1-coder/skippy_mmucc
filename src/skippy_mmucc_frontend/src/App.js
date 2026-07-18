@@ -4927,14 +4927,17 @@ class App {
                 const c = TIER_COLORS[this.tierIndex] || '';
                 return c
                   ? `background:${c};border-color:${c};box-shadow:0 0 6px ${c}b3;cursor:pointer`
-                  : `cursor:${this.brainTiers ? 'pointer' : 'default'}`;
+                  : 'cursor:pointer';
               })()}"
               @click=${() => {
-                if (this.brainTiers) {
-                  this.viewedBrainTier = this.brainTiersTier;
-                  this.showBrainGrid = true;
-                  this.#render();
-                }
+                // 2026-07-18: no longer gated on this.brainTiers existing —
+                // the modal now has a full "cold" placeholder view (see
+                // below) for a tier that hasn't answered yet this session,
+                // so there's no real reason to make the user wait for
+                // Skippy's first reply just to open this at all.
+                this.viewedBrainTier = this.brainTiersTier || 'everyday';
+                this.showBrainGrid = true;
+                this.#render();
               }}
             ></span>
             ${this.lastKaraokeAudio
@@ -5590,7 +5593,7 @@ class App {
                 </div>
               `
             : ''}
-          ${this.showBrainGrid && this.brainTiers
+          ${this.showBrainGrid
             ? (() => {
                 // 2026-07-18 — the modal used to only ever show whichever
                 // tier most recently actually answered (this.brainTiers,
@@ -5598,27 +5601,40 @@ class App {
                 // Heavy Hitter's peers were invisible unless a Heavy Hitter
                 // response happened to fire first. Now independently
                 // switchable via viewedBrainTier: if it matches
-                // brainTiersTier, show the real live status (in
-                // use/standby/unavailable) from the last response; otherwise
-                // build a "cold" placeholder from the static label list
-                // above — accurate for standby/disabled (nothing's run yet,
-                // so nothing can be "in use" or "unavailable"), just without
-                // real usage data for a tier that hasn't answered this
-                // session. Steel Rain (tactical/focus) never sets
-                // brainTiersTier to either value at all and has no peer-skip
-                // system of its own, so the switcher only ever toggles
-                // between these two known tiers.
-                const isLiveTier = this.viewedBrainTier === this.brainTiersTier;
-                const displayedTiers = isLiveTier
+                // brainTiersTier AND a real response exists, show the real
+                // live status (in use/standby/unavailable) from the last
+                // response; otherwise build a "cold" base from the static
+                // label list above (accurate for standby — nothing's run
+                // yet, so nothing can be "in use"/"unavailable"), just
+                // without real usage data for a tier that hasn't answered
+                // this session. This no longer requires this.brainTiers to
+                // exist at all — the cold view works from a fresh restart,
+                // before Skippy has answered anything.
+                const isLiveTier = this.brainTiers && this.viewedBrainTier === this.brainTiersTier;
+                const baseTiers = isLiveTier
                   ? this.brainTiers
-                  : (this.viewedBrainTier === 'everyday' ? EVERYDAY_PEER_LABELS : HEAVY_HITTER_PEER_LABELS).map(
-                      (label) => ({
-                        label,
-                        status: (this.viewedBrainTier === 'everyday' ? this.disabledEverydayPeers : this.disabledHeavyHitterPeers).includes(label)
-                          ? 'disabled'
-                          : 'standby',
-                      }),
+                  : (this.viewedBrainTier === 'heavy_hitter' ? HEAVY_HITTER_PEER_LABELS : EVERYDAY_PEER_LABELS).map(
+                      (label) => ({ label, status: 'standby' }),
                     );
+                // Found 2026-07-18: the live branch above used to render
+                // straight from the frozen brainTiers snapshot, so clicking
+                // Skip/Enable genuinely toggled the underlying localStorage
+                // state (confirmed working) but the row's displayed status
+                // never visually updated, since brainTiers itself is never
+                // touched by a toggle — only overwritten wholesale by the
+                // next real /respond call. Made disabled/enabled status
+                // ALWAYS recompute fresh from the current disabled-peers
+                // list on every render, live tier or not, so a click is
+                // visible immediately. Falls back to 'standby' rather than
+                // trusting a stale 'disabled' from the snapshot once a peer
+                // has just been re-enabled — the snapshot has no way to know
+                // the peer's true current active/unavailable state without
+                // a fresh response, so standby is the honest best guess.
+                const currentlyDisabled = this.viewedBrainTier === 'heavy_hitter' ? this.disabledHeavyHitterPeers : this.disabledEverydayPeers;
+                const displayedTiers = baseTiers.map((t) => ({
+                  ...t,
+                  status: currentlyDisabled.includes(t.label) ? 'disabled' : (t.status === 'disabled' ? 'standby' : t.status),
+                }));
                 return html`
                 <div style="position:fixed;inset:0;background:rgba(0,0,0,0.75);display:flex;align-items:center;justify-content:center;z-index:2000;"
                      @click=${(e) => { if (e.target === e.currentTarget) { this.showBrainGrid = false; this.#render(); } }}>
