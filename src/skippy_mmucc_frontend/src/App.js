@@ -1288,29 +1288,51 @@ class App {
     // (unrelated to the whitelist) was thrown here and the old single
     // try/catch mislabeled it as "not authorized," showing the correct,
     // working Principal on a misleading rejection screen.
+    //
+    // Workspaces + manuals are genuine prerequisites (the rest of the app
+    // assumes an active workspace exists) and stay blocking. Everything
+    // after them is independent of each other and of workspaces — found
+    // 2026-07-18 that they used to share ONE try/catch with everything
+    // above, so a single transient failure anywhere early in the sequence
+    // (a network blip, a cold canister call right after a fresh deploy)
+    // silently skipped every call after it, leaving contacts/evolutionProfile
+    // etc. at their empty defaults — indistinguishable from real data loss
+    // even though nothing on the backend had actually changed. Each one now
+    // fails on its own, in parallel, without blanking its siblings.
     try {
       await this.#loadWorkspaces();
       await this.#refreshManualOptions();
-      this.savedArtifacts = await this.backendActor.list_my_artifacts();
-      this.contacts = await this.backendActor.list_my_contacts();
-      const profileOpt = await this.backendActor.get_my_persona_profile();
-      const profile = profileOpt[0];
-      this.profileName = profile?.name?.[0] || '';
-      this.profileVoiceId = profile?.voice_id?.[0] || '';
-      this.evolutionProfile = await this.backendActor.get_my_evolution_profile();
-      await this.#deliverPendingCourierMessages();
-      this.#startCourierPolling();
-      await this.#refreshFuel();
+    } catch (err) {
+      console.error('[Skippy] post-login workspace/manual setup failed:', err);
+      this.statusMessage = `Logged in, but failed to load workspace data: ${err.message}`;
+      this.#render();
+      return;
+    }
+    const results = await Promise.allSettled([
+      this.backendActor.list_my_artifacts().then((r) => (this.savedArtifacts = r)),
+      this.backendActor.list_my_contacts().then((r) => (this.contacts = r)),
+      this.backendActor.get_my_persona_profile().then((profileOpt) => {
+        const profile = profileOpt[0];
+        this.profileName = profile?.name?.[0] || '';
+        this.profileVoiceId = profile?.voice_id?.[0] || '';
+      }),
+      this.backendActor.get_my_evolution_profile().then((r) => (this.evolutionProfile = r)),
+      this.#deliverPendingCourierMessages().then(() => this.#startCourierPolling()),
+      this.#refreshFuel(),
       // On-device speaker recognition never auto-starts on login — it only
       // ever runs during an active "Start Listening" session (wired in
       // #startListening/#stopListening below), same on/off window as the
       // main mic button. Just checks whether a voiceprint exists here so
       // the UI (Profile drawer, mic-button behavior) knows it's available.
-      this.hasEnrolledVoice = voiceIdAvailable() && Boolean(await loadStoredVoiceprint());
-    } catch (err) {
-      console.error('[Skippy] post-login setup failed:', err);
-      this.statusMessage = `Logged in, but failed to load workspace data: ${err.message}`;
-    }
+      voiceIdAvailable()
+        ? loadStoredVoiceprint().then((v) => (this.hasEnrolledVoice = Boolean(v)))
+        : Promise.resolve(),
+    ]);
+    results.forEach((r, i) => {
+      if (r.status === 'rejected') {
+        console.error(`[Skippy] post-login setup: item ${i} failed independently:`, r.reason);
+      }
+    });
     this.#render();
   };
 
