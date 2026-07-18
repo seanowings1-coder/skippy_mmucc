@@ -41,6 +41,12 @@ const ARTIFACT_CHUNKS_MEMORY_ID: MemoryId = MemoryId::new(14);
 // "email the plumber" to a real address without ever having to dictate one.
 // 15 is the next free slot; never renumber/reuse.
 const CONTACTS_MEMORY_ID: MemoryId = MemoryId::new(15);
+// Pillar 16 (Tactical Roster) migration off localStorage, 2026-07-18 — was
+// browser-local only (survived nothing: PWA reinstalls, site-data clears,
+// device switches all lost it). Owner-only, no sharing (unlike Contacts) —
+// this was never designed with cross-Principal visibility in mind and
+// nothing asked for it. 16 is the next free slot; never renumber/reuse.
+const ROSTER_PROFILES_MEMORY_ID: MemoryId = MemoryId::new(16);
 
 // Pillar 19 (Self-Evolution & Metacognitive Matrix) — hard caps on every
 // personality weight, confirmed 2026-06-22: growth should be natural and
@@ -560,6 +566,41 @@ impl Storable for Contact {
     };
 }
 
+/// Pillar 16 (Tactical Roster) — "who Skippy is currently addressing," a
+/// persona/tone signal only, same non-security caveat as speaker recognition
+/// and everything else under this pillar. No `shared` field, unlike Contact
+/// — this was never designed for cross-Principal visibility, so
+/// `list_my_roster_profiles` returns the caller's own entries only.
+#[derive(CandidType, Deserialize, Clone, Debug)]
+pub struct RosterProfile {
+    pub id: u64,
+    pub owner: Principal,
+    pub name: String,
+    pub trigger_phrase: String,
+    pub role: Option<String>,
+    pub notes: Option<String>,
+    pub created_at: u64,
+}
+
+impl Storable for RosterProfile {
+    fn to_bytes(&self) -> Cow<'_, [u8]> {
+        Cow::Owned(Encode!(self).unwrap())
+    }
+
+    fn into_bytes(self) -> Vec<u8> {
+        Encode!(&self).unwrap()
+    }
+
+    fn from_bytes(bytes: Cow<[u8]>) -> Self {
+        Decode!(bytes.as_ref(), Self).unwrap()
+    }
+
+    const BOUND: Bound = Bound::Bounded {
+        max_size: 2_000,
+        is_fixed_size: false,
+    };
+}
+
 /// A Principal's self-set display name and ElevenLabs voice ID (Pillar 3's
 /// dual-voice routing). Not secret, unlike the whitelist — settable at
 /// runtime by each user for themselves, no redeploy needed.
@@ -782,6 +823,11 @@ thread_local! {
     static CONTACTS: RefCell<StableBTreeMap<u64, Contact, Memory>> =
         RefCell::new(StableBTreeMap::init(
             MEMORY_MANAGER.with(|m| m.borrow().get(CONTACTS_MEMORY_ID)),
+        ));
+
+    static ROSTER_PROFILES: RefCell<StableBTreeMap<u64, RosterProfile, Memory>> =
+        RefCell::new(StableBTreeMap::init(
+            MEMORY_MANAGER.with(|m| m.borrow().get(ROSTER_PROFILES_MEMORY_ID)),
         ));
 
     // TOCTOU guard: the canister suspends at every .await, allowing a concurrent
@@ -1830,4 +1876,73 @@ fn delete_contact(id: u64) {
     let caller = assert_whitelisted();
     assert_contact_owner(caller, id);
     CONTACTS.with(|c| c.borrow_mut().remove(&id));
+}
+
+/// Same non-leaking trap shape as `assert_contact_owner` — no sharing here,
+/// so ownership is a hard requirement, not a fallback check.
+fn assert_roster_owner(caller: Principal, id: u64) -> RosterProfile {
+    match ROSTER_PROFILES.with(|r| r.borrow().get(&id)) {
+        Some(profile) if profile.owner == caller => profile,
+        _ => ic_cdk::trap("Roster profile not found or not owned by caller."),
+    }
+}
+
+#[update]
+fn add_roster_profile(
+    name: String,
+    trigger_phrase: String,
+    role: Option<String>,
+    notes: Option<String>,
+) -> u64 {
+    let caller = assert_whitelisted();
+    let id = take_next_id();
+    let profile = RosterProfile {
+        id,
+        owner: caller,
+        name,
+        trigger_phrase,
+        role,
+        notes,
+        created_at: ic_cdk::api::time(),
+    };
+    ROSTER_PROFILES.with(|r| r.borrow_mut().insert(id, profile));
+    id
+}
+
+/// Owner-only, no sharing (unlike list_my_contacts) — Tactical Roster was
+/// never designed with cross-Principal visibility in mind.
+#[query]
+fn list_my_roster_profiles() -> Vec<RosterProfile> {
+    let caller = assert_whitelisted();
+    ROSTER_PROFILES.with(|r| {
+        r.borrow()
+            .iter()
+            .map(|entry| entry.value().clone())
+            .filter(|profile| profile.owner == caller)
+            .collect()
+    })
+}
+
+#[update]
+fn update_roster_profile(
+    id: u64,
+    name: String,
+    trigger_phrase: String,
+    role: Option<String>,
+    notes: Option<String>,
+) {
+    let caller = assert_whitelisted();
+    let mut profile = assert_roster_owner(caller, id);
+    profile.name = name;
+    profile.trigger_phrase = trigger_phrase;
+    profile.role = role;
+    profile.notes = notes;
+    ROSTER_PROFILES.with(|r| r.borrow_mut().insert(id, profile));
+}
+
+#[update]
+fn delete_roster_profile(id: u64) {
+    let caller = assert_whitelisted();
+    assert_roster_owner(caller, id);
+    ROSTER_PROFILES.with(|r| r.borrow_mut().remove(&id));
 }

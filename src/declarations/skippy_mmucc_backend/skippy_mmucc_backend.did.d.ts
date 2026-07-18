@@ -97,6 +97,15 @@ export interface PersonaProfile {
   'name' : [] | [string],
   'voice_id' : [] | [string],
 }
+export interface RosterProfile {
+  'id' : bigint,
+  'owner' : Principal,
+  'name' : string,
+  'role' : [] | [string],
+  'created_at' : bigint,
+  'trigger_phrase' : string,
+  'notes' : [] | [string],
+}
 export interface ScoredSection { 'section' : DocumentSection, 'score' : number }
 export interface SessionInfo {
   'principal' : Principal,
@@ -131,6 +140,10 @@ export interface _SERVICE {
     BigUint64Array | bigint[]
   >,
   'add_manual_section' : ActorMethod<[string, string, string, string], bigint>,
+  'add_roster_profile' : ActorMethod<
+    [string, string, [] | [string], [] | [string]],
+    bigint
+  >,
   'append_artifact_chunk' : ActorMethod<
     [bigint, Uint8Array | number[]],
     undefined
@@ -146,6 +159,7 @@ export interface _SERVICE {
   'delete_contact' : ActorMethod<[bigint], undefined>,
   'delete_manual' : ActorMethod<[string], bigint>,
   'delete_manual_section' : ActorMethod<[bigint], boolean>,
+  'delete_roster_profile' : ActorMethod<[bigint], undefined>,
   'delete_workspace' : ActorMethod<[bigint], undefined>,
   'get_artifact' : ActorMethod<[bigint], [] | [GeneratedArtifact]>,
   'get_artifact_chunk' : ActorMethod<
@@ -168,6 +182,7 @@ export interface _SERVICE {
   'list_my_contacts' : ActorMethod<[], Array<Contact>>,
   'list_my_emergencies' : ActorMethod<[], Array<EmergencyEvent>>,
   'list_my_evolution_log' : ActorMethod<[number], Array<EvolutionLogEntry>>,
+  'list_my_roster_profiles' : ActorMethod<[], Array<RosterProfile>>,
   'list_my_workspaces' : ActorMethod<[], Array<Workspace>>,
   'list_sections_by_manual' : ActorMethod<[string], Array<DocumentSection>>,
   'login' : ActorMethod<[], { 'Ok' : string } | { 'Err' : string }>,
@@ -204,6 +219,10 @@ export interface _SERVICE {
       [] | [Array<string>],
       boolean,
     ],
+    undefined
+  >,
+  'update_roster_profile' : ActorMethod<
+    [bigint, string, string, [] | [string], [] | [string]],
     undefined
   >,
   'update_scratchpad' : ActorMethod<[bigint, string], undefined>,

@@ -81,6 +81,15 @@ export const idlFactory = ({ IDL }) => {
     'summary' : IDL.Text,
     'timestamp' : IDL.Nat64,
   });
+  const RosterProfile = IDL.Record({
+    'id' : IDL.Nat64,
+    'owner' : IDL.Principal,
+    'name' : IDL.Text,
+    'role' : IDL.Opt(IDL.Text),
+    'created_at' : IDL.Nat64,
+    'trigger_phrase' : IDL.Text,
+    'notes' : IDL.Opt(IDL.Text),
+  });
   const WorkspaceStatus = IDL.Variant({
     'Active' : IDL.Null,
     'Archived' : IDL.Null,
@@ -139,6 +148,11 @@ export const idlFactory = ({ IDL }) => {
         [IDL.Nat64],
         [],
       ),
+    'add_roster_profile' : IDL.Func(
+        [IDL.Text, IDL.Text, IDL.Opt(IDL.Text), IDL.Opt(IDL.Text)],
+        [IDL.Nat64],
+        [],
+      ),
     'append_artifact_chunk' : IDL.Func([IDL.Nat64, IDL.Vec(IDL.Nat8)], [], []),
     'append_emergency_audio_chunk' : IDL.Func(
         [IDL.Nat64, IDL.Vec(IDL.Nat8)],
@@ -152,6 +166,7 @@ export const idlFactory = ({ IDL }) => {
     'delete_contact' : IDL.Func([IDL.Nat64], [], []),
     'delete_manual' : IDL.Func([IDL.Text], [IDL.Nat64], []),
     'delete_manual_section' : IDL.Func([IDL.Nat64], [IDL.Bool], []),
+    'delete_roster_profile' : IDL.Func([IDL.Nat64], [], []),
     'delete_workspace' : IDL.Func([IDL.Nat64], [], []),
     'get_artifact' : IDL.Func(
         [IDL.Nat64],
@@ -194,6 +209,11 @@ export const idlFactory = ({ IDL }) => {
     'list_my_evolution_log' : IDL.Func(
         [IDL.Nat32],
         [IDL.Vec(EvolutionLogEntry)],
+        ['query'],
+      ),
+    'list_my_roster_profiles' : IDL.Func(
+        [],
+        [IDL.Vec(RosterProfile)],
         ['query'],
       ),
     'list_my_workspaces' : IDL.Func([], [IDL.Vec(Workspace)], ['query']),
@@ -263,6 +283,11 @@ export const idlFactory = ({ IDL }) => {
           IDL.Opt(IDL.Vec(IDL.Text)),
           IDL.Bool,
         ],
+        [],
+        [],
+      ),
+    'update_roster_profile' : IDL.Func(
+        [IDL.Nat64, IDL.Text, IDL.Text, IDL.Opt(IDL.Text), IDL.Opt(IDL.Text)],
         [],
         [],
       ),

@@ -1000,8 +1000,9 @@ class App {
   // the owner's regardless of who's physically holding the device.
   guestMode = localStorage.getItem('skippy_guest_mode') === 'true';
   guestUnlockError = '';
-  // Sticky Heavy Hitter override — device-local preference, not security-
-  // sensitive, same persistence rationale as rosterProfiles below.
+  // Sticky Heavy Hitter override — genuinely a device-local preference (which
+  // brain a specific device defaults to), not something that needs to
+  // survive a reinstall or sync across devices the way Roster/voiceprint did.
   superBrainLocked = localStorage.getItem('skippy_super_brain_locked') === 'true';
   // Everyday-peer deselection (2026-07-09), extended to Heavy Hitter (2026-07-16) — sticky like
   // superBrainLocked above, same persistence rationale. Each stores the peer's full `brainTiers`
@@ -1012,14 +1013,17 @@ class App {
   // "Tactical Roster" — persona/addressing context only, deliberately with
   // no permission concept of its own (see CLAUDE.md's Pillar 16 note): the
   // only real access boundary in this app is Guest Mode above, which a
-  // Roster match never touches. Persisted in localStorage (device-local
-  // convenience config, not security-sensitive, not per-Principal canister
-  // data). `activeRosterProfile` itself is in-memory only — it resets on
-  // refresh, since "who's currently talking" isn't a state worth surviving
-  // a reload the way guestMode's lock is.
-  rosterProfiles = JSON.parse(localStorage.getItem('skippy_roster_profiles') || '[]');
+  // Roster match never touches. Moved off localStorage 2026-07-18 (was
+  // device-local only — lost on every PWA reinstall/site-data clear/device
+  // switch) onto real owner-scoped canister storage, same pattern as
+  // Contacts but with no sharing concept (never designed for cross-Principal
+  // visibility). Populated from list_my_roster_profiles() at login, not
+  // localStorage. `activeRosterProfile` itself is still in-memory only — it
+  // resets on refresh, since "who's currently talking" isn't state worth
+  // surviving a reload the way guestMode's lock is.
+  rosterProfiles = [];
   activeRosterProfile = null;
-  editingRosterIndex = null;
+  editingRosterId = null;
   // Pillar 23 (Contacts) — unlike Roster above, this IS real canister data
   // (owner-scoped, optionally shared with the other whitelisted Principal),
   // populated from list_my_contacts() at login, not localStorage.
@@ -1311,6 +1315,7 @@ class App {
     const results = await Promise.allSettled([
       this.backendActor.list_my_artifacts().then((r) => (this.savedArtifacts = r)),
       this.backendActor.list_my_contacts().then((r) => (this.contacts = r)),
+      this.backendActor.list_my_roster_profiles().then((r) => (this.rosterProfiles = r)),
       this.backendActor.get_my_persona_profile().then((profileOpt) => {
         const profile = profileOpt[0];
         this.profileName = profile?.name?.[0] || '';
@@ -1896,7 +1901,7 @@ class App {
     });
   };
 
-  #saveRosterProfile = (e) => {
+  #saveRosterProfile = async (e) => {
     e.preventDefault();
     const form = e.target;
     const name = form.elements.rosterName.value.trim();
@@ -1904,43 +1909,57 @@ class App {
     const role = form.elements.rosterRole.value.trim();
     const notes = form.elements.rosterNotes.value.trim();
     if (!name || !triggerPhrase) return;
-    const profile = { name, triggerPhrase, role, notes };
-    if (this.editingRosterIndex !== null) {
-      const updated = [...this.rosterProfiles];
-      const old = updated[this.editingRosterIndex];
-      updated[this.editingRosterIndex] = profile;
-      if (this.activeRosterProfile?.triggerPhrase === old.triggerPhrase) {
-        this.activeRosterProfile = profile;
+    const roleArg = role ? [role] : [];
+    const notesArg = notes ? [notes] : [];
+    try {
+      if (this.editingRosterId !== null) {
+        await this.backendActor.update_roster_profile(this.editingRosterId, name, triggerPhrase, roleArg, notesArg);
+        if (this.activeRosterProfile?.id === this.editingRosterId) {
+          // Same shape list_my_roster_profiles() returns — trigger_phrase +
+          // opt-wrapped role/notes — not the old plain-string localStorage shape.
+          this.activeRosterProfile = {
+            ...this.activeRosterProfile,
+            name,
+            trigger_phrase: triggerPhrase,
+            role: roleArg,
+            notes: notesArg,
+          };
+        }
+        this.editingRosterId = null;
+      } else {
+        await this.backendActor.add_roster_profile(name, triggerPhrase, roleArg, notesArg);
       }
-      this.rosterProfiles = updated;
-      this.editingRosterIndex = null;
-    } else {
-      this.rosterProfiles = [...this.rosterProfiles, profile];
+      this.rosterProfiles = await this.backendActor.list_my_roster_profiles();
+      form.reset();
+    } catch (err) {
+      this.statusMessage = `Couldn't save roster profile: ${extractCanisterTrapMessage(err)}`;
     }
-    localStorage.setItem('skippy_roster_profiles', JSON.stringify(this.rosterProfiles));
-    form.reset();
     this.#render();
   };
 
-  #editRosterProfile = (index) => {
-    this.editingRosterIndex = index;
+  #editRosterProfile = (id) => {
+    this.editingRosterId = id;
     this.#render();
   };
 
   #cancelEditRoster = () => {
-    this.editingRosterIndex = null;
+    this.editingRosterId = null;
     this.#render();
   };
 
-  #deleteRosterProfile = (triggerPhrase) => {
-    this.rosterProfiles = this.rosterProfiles.filter((p) => p.triggerPhrase !== triggerPhrase);
-    if (this.activeRosterProfile?.triggerPhrase === triggerPhrase) {
-      this.activeRosterProfile = null;
+  #deleteRosterProfile = async (id) => {
+    try {
+      await this.backendActor.delete_roster_profile(id);
+      this.rosterProfiles = this.rosterProfiles.filter((p) => p.id !== id);
+      if (this.activeRosterProfile?.id === id) {
+        this.activeRosterProfile = null;
+      }
+      if (this.editingRosterId === id) {
+        this.editingRosterId = null;
+      }
+    } catch (err) {
+      this.statusMessage = `Couldn't delete roster profile: ${extractCanisterTrapMessage(err)}`;
     }
-    if (this.editingRosterIndex !== null) {
-      this.editingRosterIndex = null;
-    }
-    localStorage.setItem('skippy_roster_profiles', JSON.stringify(this.rosterProfiles));
     this.#render();
   };
 
@@ -3053,10 +3072,14 @@ class App {
       const triggerPhrase = text.trim().toLowerCase();
       this.pendingRosterStep = null;
       this.pendingRosterName = null;
-      const profile = { name, triggerPhrase, role: '', notes: '' };
-      this.rosterProfiles = [...this.rosterProfiles, profile];
-      localStorage.setItem('skippy_roster_profiles', JSON.stringify(this.rosterProfiles));
-      const ack = `${name} is on the roster. Trigger: "${triggerPhrase}". Add role and notes in the panel if needed.`;
+      let ack;
+      try {
+        await this.backendActor.add_roster_profile(name, triggerPhrase, [], []);
+        this.rosterProfiles = await this.backendActor.list_my_roster_profiles();
+        ack = `${name} is on the roster. Trigger: "${triggerPhrase}". Add role and notes in the panel if needed.`;
+      } catch (err) {
+        ack = `Couldn't save that to the roster: ${extractCanisterTrapMessage(err)}`;
+      }
       this.#recordTurn(text, ack);
       this.#render();
       this.#speak(ack);
@@ -3068,7 +3091,6 @@ class App {
     if (!this.guestMode && this.activeRosterProfile && ROSTER_CLEAR_PHRASES.some((p) => lowerText.includes(p))) {
       const name = this.activeRosterProfile.name;
       this.activeRosterProfile = null;
-      localStorage.setItem('skippy_roster_profiles', JSON.stringify(this.rosterProfiles));
       const ack = `Copy — ${name} is off deck. Back to just you, Commander.`;
       this.#recordTurn(text, ack);
       this.#render();
@@ -3402,10 +3424,10 @@ class App {
     // addressing never touches this.guestMode or anything it gates; a
     // matched profile only ever changes prompt framing (see rosterContext
     // in the /respond call below).
-    const matchedRoster = this.rosterProfiles.find((p) => lowerText.includes(p.triggerPhrase));
+    const matchedRoster = this.rosterProfiles.find((p) => lowerText.includes(p.trigger_phrase));
     if (matchedRoster) {
       this.activeRosterProfile = matchedRoster;
-      const remainder = lowerText.replace(matchedRoster.triggerPhrase, '');
+      const remainder = lowerText.replace(matchedRoster.trigger_phrase, '');
       if (isTrivialRemainder(remainder)) {
         const ack = `Noted. I'm now speaking with ${matchedRoster.name}.`;
         this.#recordTurn(text, ack);
@@ -3646,9 +3668,11 @@ class App {
                 // Always pull the current profile from rosterProfiles so edits
                 // made after activation are reflected without re-triggering the phrase.
                 const fresh = this.rosterProfiles.find(
-                  (p) => p.triggerPhrase === this.activeRosterProfile.triggerPhrase,
+                  (p) => p.trigger_phrase === this.activeRosterProfile.trigger_phrase,
                 ) ?? this.activeRosterProfile;
-                return { name: fresh.name, role: fresh.role, notes: fresh.notes };
+                // server.js expects plain strings here, not Candid opt arrays —
+                // unwrap role/notes from [] / [value] before sending.
+                return { name: fresh.name, role: fresh.role?.[0] ?? '', notes: fresh.notes?.[0] ?? '' };
               })()
             : null,
           // Pillar 19 — calibrated personality weights, evolved over time by
@@ -5184,27 +5208,29 @@ class App {
             ? html`
                 <p class="status">
                   Currently speaking with: <strong>${this.activeRosterProfile.name}</strong>
-                  ${this.activeRosterProfile.role ? ` (${this.activeRosterProfile.role})` : ''}
+                  ${this.activeRosterProfile.role?.[0] ? ` (${this.activeRosterProfile.role[0]})` : ''}
                   <button @click=${this.#clearActiveRosterProfile}>Clear</button>
                 </p>
               `
             : ''}
           ${(() => {
-            const editing = this.editingRosterIndex !== null ? this.rosterProfiles[this.editingRosterIndex] : null;
+            const editing = this.editingRosterId !== null
+              ? this.rosterProfiles.find((p) => p.id === this.editingRosterId)
+              : null;
             return html`
               <form @submit=${this.#saveRosterProfile}>
                 <label>Name/Callsign
                   <input name="rosterName" type="text" placeholder="Lisa" required .value=${editing?.name ?? ''} />
                 </label>
                 <label>Voice Trigger Phrase
-                  <input name="rosterTrigger" type="text" placeholder="it's lisa" required .value=${editing?.triggerPhrase ?? ''} />
+                  <input name="rosterTrigger" type="text" placeholder="it's lisa" required .value=${editing?.trigger_phrase ?? ''} />
                 </label>
                 <label>Role/Significance
-                  <input name="rosterRole" type="text" placeholder="Insurance adjuster" .value=${editing?.role ?? ''} />
+                  <input name="rosterRole" type="text" placeholder="Insurance adjuster" .value=${editing?.role?.[0] ?? ''} />
                 </label>
                 <label>Notes for Skippy
                   <textarea name="rosterNotes" rows="3" placeholder="Likes the color blue, hates stormy weather, prefers direct answers..."
-                    style="width:100%;margin-top:0.3em;">${editing?.notes ?? ''}</textarea>
+                    style="width:100%;margin-top:0.3em;">${editing?.notes?.[0] ?? ''}</textarea>
                 </label>
                 <div style="display:flex;gap:0.5em;margin-top:0.4em;">
                   <button type="submit">${editing ? 'Save changes' : '+ Add profile'}</button>
@@ -5215,13 +5241,13 @@ class App {
           })()}
           <ul>
             ${this.rosterProfiles.map(
-              (p, i) => html`
+              (p) => html`
                 <li style="margin:0.5em 0;">
-                  <div><strong>${p.name}</strong> — "${p.triggerPhrase}"${p.role ? ` · ${p.role}` : ''}</div>
-                  ${p.notes ? html`<div class="status" style="margin:0.2em 0 0.3em;">${p.notes}</div>` : ''}
+                  <div><strong>${p.name}</strong> — "${p.trigger_phrase}"${p.role?.[0] ? ` · ${p.role[0]}` : ''}</div>
+                  ${p.notes?.[0] ? html`<div class="status" style="margin:0.2em 0 0.3em;">${p.notes[0]}</div>` : ''}
                   <div style="display:flex;gap:0.4em;">
-                    <button @click=${() => this.#editRosterProfile(i)}>Edit</button>
-                    <button @click=${() => this.#deleteRosterProfile(p.triggerPhrase)}>Delete</button>
+                    <button @click=${() => this.#editRosterProfile(p.id)}>Edit</button>
+                    <button @click=${() => this.#deleteRosterProfile(p.id)}>Delete</button>
                   </div>
                 </li>
               `,

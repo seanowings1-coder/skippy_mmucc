@@ -129,6 +129,16 @@ type Contact = record {
     created_at : nat64;
 };
 
+type RosterProfile = record {
+    id : nat64;
+    owner : principal;
+    name : text;
+    trigger_phrase : text;
+    role : opt text;
+    notes : opt text;
+    created_at : nat64;
+};
+
 service : (principal, principal, principal) -> {
     "greet": (text) -> (text) query;
 
@@ -203,4 +213,9 @@ service : (principal, principal, principal) -> {
     "list_my_contacts": () -> (vec Contact) query;
     "update_contact": (nat64, text, text, opt text, opt text, opt vec text, bool) -> ();
     "delete_contact": (nat64) -> ();
+
+    "add_roster_profile": (text, text, opt text, opt text) -> (nat64);
+    "list_my_roster_profiles": () -> (vec RosterProfile) query;
+    "update_roster_profile": (nat64, text, text, opt text, opt text) -> ();
+    "delete_roster_profile": (nat64) -> ();
 }
