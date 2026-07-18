@@ -1267,6 +1267,11 @@ class App {
   // conversation continuation — a real user follow-up said immediately
   // after Skippy finishes got silently dropped too, confirmed live 2026-07-11).
   lastSpokenText = '';
+  // What's actually playing RIGHT NOW, kept live (set as soon as audio/
+  // utterance playback genuinely starts) so #stopSpeaking can copy it into
+  // lastSpokenText/lastSpeakEndTime on a barge-in interruption — see
+  // #stopSpeaking's comment for the gap this closes (2026-07-19).
+  currentSpeakingText = '';
   // Debounce/merge buffer for #handleFinalChunk — accumulates final chunks
   // that arrive in quick succession (Chrome ending/restarting recognition
   // mid-sentence) before dispatching as one utterance. See the dispatch
@@ -2755,9 +2760,24 @@ class App {
   // arrived reasonably soon after he stopped talking. See lastSpokenText's
   // declaration for the two confirmed-live incidents this targets.
   #isLikelySelfEcho(chunk) {
-    if (!this.lastSpokenText) return false;
-    if (Date.now() - this.lastSpeakEndTime > 8000) return false; // stale, don't compare far-apart text
-    return wordOverlapRatio(chunk, this.lastSpokenText) >= 0.6;
+    if (!this.lastSpokenText) {
+      console.log('[Skippy self-echo] no lastSpokenText to compare against — treating as genuine:', chunk);
+      return false;
+    }
+    const msSinceSpeak = Date.now() - this.lastSpeakEndTime;
+    if (msSinceSpeak > 8000) {
+      console.log(`[Skippy self-echo] ${msSinceSpeak}ms since last speak — too stale to compare, treating as genuine:`, chunk);
+      return false;
+    }
+    const ratio = wordOverlapRatio(chunk, this.lastSpokenText);
+    // Logged unconditionally (not just on match) — added 2026-07-19 after a
+    // real live incident where short, garbled mic-echo fragments ("otherwise",
+    // "you") slipped past this check and got treated as genuine new turns.
+    // Whether that was a barge-in stale-reference race (see #stopSpeaking's
+    // fix, same date) or a different gap, this makes the NEXT occurrence
+    // provable from the console instead of guessed at.
+    console.log(`[Skippy self-echo] chunk="${chunk}" ratio=${ratio.toFixed(2)} (need >=0.6) msSinceSpeak=${msSinceSpeak} lastSpokenText="${this.lastSpokenText.slice(0, 80)}"`);
+    return ratio >= 0.6;
   }
 
   // The double-dong/audio-focus glitch that af78bfe's restart deferral (below,
@@ -4299,6 +4319,21 @@ class App {
     // Economy mid-performance. Bumping this on every stop invalidates any
     // in-flight segment's callbacks (see #speechGen checks below).
     this.#speechGen++;
+    // Self-hearing gap closed 2026-07-19: onended/onstart are the ONLY
+    // places that update lastSpokenText/lastSpeakEndTime, so a reply that
+    // gets barge-in-interrupted (this function, called mid-sentence — see
+    // #askSkippy) never touched either. #isLikelySelfEcho then compared any
+    // leftover echo of the JUST-CUT-OFF reply against whatever the
+    // PREVIOUS, already-completed reply said instead — real mic feedback
+    // with near-zero overlap against a stale reference, so it sailed past
+    // the 0.6 threshold as if it were a genuine new utterance. Only do this
+    // when actually interrupting live audio (this.isSpeaking) — calling
+    // #stopSpeaking as routine cleanup before a reply hasn't even started
+    // yet has nothing worth capturing.
+    if (this.isSpeaking && this.currentSpeakingText) {
+      this.lastSpokenText = this.currentSpeakingText;
+      this.lastSpeakEndTime = Date.now();
+    }
     if (this.#economySpeakTimer !== null) {
       clearTimeout(this.#economySpeakTimer);
       this.#economySpeakTimer = null;
@@ -4306,6 +4341,7 @@ class App {
     window.speechSynthesis?.cancel();
     this.#detachCurrentAudio();
     this.isSpeaking = false;
+    this.currentSpeakingText = '';
     this._restartRecognitionAfterTTS = false;
   };
 
@@ -4430,6 +4466,13 @@ class App {
       settled = true; // prevent load timeout from triggering fallback once audio is actually playing
       clearTimeout(loadTimeout);
       this.isSpeaking = true;
+      // See #stopSpeaking's comment — this is what a barge-in mid-segment
+      // copies into lastSpokenText. The REMAINING segments (not yet played)
+      // could arguably be excluded, but including the full reply is the
+      // safer direction for self-echo detection: worst case it's slightly
+      // too permissive about what counts as "his own words," never too
+      // strict about blocking a genuine new user utterance.
+      this.currentSpeakingText = totalReplyText;
       this.#render();
     };
 
@@ -4524,6 +4567,7 @@ class App {
       const utterance = new SpeechSynthesisUtterance(stripMarkdown(text));
       utterance.onstart = () => {
         this.isSpeaking = true;
+        this.currentSpeakingText = text; // see #stopSpeaking's comment
         this.#render();
       };
       utterance.onend = () => {
