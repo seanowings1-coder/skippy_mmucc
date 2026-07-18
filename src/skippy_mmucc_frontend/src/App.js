@@ -705,6 +705,38 @@ function closeUnterminatedCodeFence(text) {
   return fenceCount % 2 !== 0 ? `${text}\n\`\`\`` : text;
 }
 
+// Maps a fenced code block's language tag to a real file extension so a
+// downloaded file isn't just a generic .txt — covers the languages Skippy
+// actually gets asked for in this project's own history (VB6, Rust, JS/TS,
+// Python, etc.); falls back to .txt for anything unrecognized or untagged.
+const CODE_LANG_EXTENSIONS = {
+  javascript: 'js', js: 'js', typescript: 'ts', ts: 'ts',
+  python: 'py', py: 'py', rust: 'rs', rs: 'rs',
+  vb: 'bas', vba: 'bas', vb6: 'bas', 'visual-basic': 'bas',
+  csharp: 'cs', 'c#': 'cs', cs: 'cs',
+  cpp: 'cpp', 'c++': 'cpp', c: 'c',
+  java: 'java', go: 'go', golang: 'go',
+  html: 'html', css: 'css', scss: 'scss',
+  json: 'json', yaml: 'yaml', yml: 'yaml',
+  sql: 'sql', sh: 'sh', bash: 'sh', shell: 'sh', powershell: 'ps1',
+  ruby: 'rb', php: 'php', swift: 'swift', kotlin: 'kt',
+};
+
+// Plain client-side download, no canister/backend involved at all —
+// separate from onSaveCode below, which persists to Skippy's Memory. Added
+// 2026-07-18 after the user's original ask ("save locally and/or his
+// permanent memory") only got the memory half built the first time.
+function downloadCodeBlock(code, lang) {
+  const ext = CODE_LANG_EXTENSIONS[lang.toLowerCase()] || 'txt';
+  const blob = new Blob([code], { type: 'text/plain' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `skippy-code-${Date.now()}.${ext}`;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
 function renderSkippyMessage(content, onSaveCode) {
   const parts = closeUnterminatedCodeFence(content).split(/(```[\s\S]*?```)/g);
   return parts.map((part) => {
@@ -721,6 +753,7 @@ function renderSkippyMessage(content, onSaveCode) {
               setTimeout(() => { e.target.textContent = 'Copy'; }, 2000);
             }).catch(() => {});
           }}>Copy</button>
+          <button class="save-code-btn" @click=${() => downloadCodeBlock(code, lang)}>Download</button>
           ${onSaveCode
             ? html`<button class="save-code-btn" @click=${() => onSaveCode(code, lang)}>Save</button>`
             : ''}
@@ -4971,10 +5004,12 @@ class App {
               : html`<button style="width:100%;" @click=${() => { this.#enableGuestMode(); this.showLeftDrawer = false; }}>Enable Guest Mode</button>`}
           </div>
         <section class="workspace-switcher">
-          <select @change=${this.#handleWorkspaceChange} .value=${this.activeWorkspaceId?.toString() ?? ''}>
+          <select @change=${this.#handleWorkspaceChange}>
             ${this.workspaces
               .filter((w) => 'Active' in w.status)
-              .map((w) => html`<option value=${w.id.toString()}>${w.name}</option>`)}
+              .map(
+                (w) => html`<option value=${w.id.toString()} ?selected=${w.id.toString() === this.activeWorkspaceId?.toString()}>${w.name}</option>`,
+              )}
           </select>
           <button @click=${this.#createWorkspace}>+ New workspace</button>
 
@@ -5660,9 +5695,17 @@ class App {
         </div>
         <details class="notes-popout">
             <summary>Neo Skin</summary>
-            <select @change=${this.#handleManualChange} .value=${this.selectedManual}>
+            <select @change=${this.#handleManualChange}>
               ${this.manualOptions.map(
-                (name) => html`<option value=${name}>${name}</option>`,
+                // Explicit ?selected per-option rather than .value on the
+                // <select> itself — found 2026-07-18: setting .value on the
+                // parent is a known lit-html gotcha that can silently fail
+                // to force the right option (runs before <option> children
+                // are attached), leaving the dropdown visually showing the
+                // wrong manual while this.selectedManual is actually correct
+                // underneath (confirmed live: the opened manual's real name
+                // and section count were right, only the dropdown lied).
+                (name) => html`<option value=${name} ?selected=${name === this.selectedManual}>${name}</option>`,
               )}
             </select>
             <button @click=${this.#refreshSections}>Open</button>
@@ -5727,11 +5770,13 @@ class App {
             })()}
             <label style="display: block; margin-top: 8px;">
               Category/type
-              <select .value=${this.manualCategoryFilter} @change=${this.#handleManualCategoryFilter}>
-                <option value="">All categories (global search by name)</option>
+              <select @change=${this.#handleManualCategoryFilter}>
+                <option value="" ?selected=${this.manualCategoryFilter === ''}>All categories (global search by name)</option>
                 ${[...new Set(this.manualCategories.values())]
                   .sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' }))
-                  .map((category) => html`<option value=${category}>${category}</option>`)}
+                  .map(
+                    (category) => html`<option value=${category} ?selected=${category === this.manualCategoryFilter}>${category}</option>`,
+                  )}
               </select>
             </label>
             <input
