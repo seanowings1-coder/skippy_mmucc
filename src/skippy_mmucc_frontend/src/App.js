@@ -363,6 +363,17 @@ const ROSTER_TRIGGER_PROMPT_REPLIES = [
   (name) => `${name} logged. Trigger phrase?`,
 ];
 
+// Mirrors server.js's EVERYDAY_PEERS/HEAVY_HITTER_PEERS labels exactly (via
+// its fullPeerLabel() — "<label> (DeepInfra|OpenRouter)") — needed so the AI
+// Brain Cascade modal can show a tier's peer list (and let you Skip/Enable
+// individual ones) even when that tier hasn't actually answered anything
+// yet this session, not just whichever tier happens to be cached in
+// brainTiers from the last real response. Keep in sync if server.js's peer
+// lists ever change — there's no way to fetch this list live, since it's
+// hardcoded server-side and never exposed via its own endpoint.
+const EVERYDAY_PEER_LABELS = ['Euryale 70B (DeepInfra)', 'Hermes 3 70B (DeepInfra)', 'DeepSeek V4 Flash (DeepInfra)'];
+const HEAVY_HITTER_PEER_LABELS = ['Claude Sonnet 5 (DeepInfra)', 'Kimi K2.7 Code (DeepInfra)', 'DeepSeek V4 Pro (DeepInfra)'];
+
 const KARAOKE_TRIGGER_PHRASES = ['karaoke', 'sing a song', 'jam out', 'rock out'];
 // Subset of the above that actually implies a style/theme, unlike the
 // generic 'karaoke'/'sing a song'. 2026-07-14 finding: when the user's
@@ -1200,6 +1211,13 @@ class App {
   brainFamily = 'dolphin'; // 'dolphin' | 'other' — quip only fires on transition
   brainTiers = null;
   showBrainGrid = false;
+  // Which tier the AI Brain Cascade modal is currently displaying — set to
+  // brainTiersTier when the modal opens, but independently switchable via
+  // the tier buttons inside it (2026-07-18). Separate from brainTiersTier
+  // itself, which tracks "which tier most recently actually answered" and
+  // is used elsewhere (e.g. deciding where an escalation's Skip clicks
+  // should land) — this only controls what the modal is showing right now.
+  viewedBrainTier = '';
   tierIndex = -1;
   showLeftDrawer = false;
   showRightDrawer = false;
@@ -4911,7 +4929,13 @@ class App {
                   ? `background:${c};border-color:${c};box-shadow:0 0 6px ${c}b3;cursor:pointer`
                   : `cursor:${this.brainTiers ? 'pointer' : 'default'}`;
               })()}"
-              @click=${() => { if (this.brainTiers) { this.showBrainGrid = true; this.#render(); } }}
+              @click=${() => {
+                if (this.brainTiers) {
+                  this.viewedBrainTier = this.brainTiersTier;
+                  this.showBrainGrid = true;
+                  this.#render();
+                }
+              }}
             ></span>
             ${this.lastKaraokeAudio
               ? html`
@@ -5567,22 +5591,61 @@ class App {
               `
             : ''}
           ${this.showBrainGrid && this.brainTiers
-            ? html`
+            ? (() => {
+                // 2026-07-18 — the modal used to only ever show whichever
+                // tier most recently actually answered (this.brainTiers,
+                // populated as a side effect of the last /respond call), so
+                // Heavy Hitter's peers were invisible unless a Heavy Hitter
+                // response happened to fire first. Now independently
+                // switchable via viewedBrainTier: if it matches
+                // brainTiersTier, show the real live status (in
+                // use/standby/unavailable) from the last response; otherwise
+                // build a "cold" placeholder from the static label list
+                // above — accurate for standby/disabled (nothing's run yet,
+                // so nothing can be "in use" or "unavailable"), just without
+                // real usage data for a tier that hasn't answered this
+                // session. Steel Rain (tactical/focus) never sets
+                // brainTiersTier to either value at all and has no peer-skip
+                // system of its own, so the switcher only ever toggles
+                // between these two known tiers.
+                const isLiveTier = this.viewedBrainTier === this.brainTiersTier;
+                const displayedTiers = isLiveTier
+                  ? this.brainTiers
+                  : (this.viewedBrainTier === 'everyday' ? EVERYDAY_PEER_LABELS : HEAVY_HITTER_PEER_LABELS).map(
+                      (label) => ({
+                        label,
+                        status: (this.viewedBrainTier === 'everyday' ? this.disabledEverydayPeers : this.disabledHeavyHitterPeers).includes(label)
+                          ? 'disabled'
+                          : 'standby',
+                      }),
+                    );
+                return html`
                 <div style="position:fixed;inset:0;background:rgba(0,0,0,0.75);display:flex;align-items:center;justify-content:center;z-index:2000;"
                      @click=${(e) => { if (e.target === e.currentTarget) { this.showBrainGrid = false; this.#render(); } }}>
                   <div style="background:var(--bg-dark-armor,#1a1a2e);color:var(--text-brushed-aluminum,#d1d5db);padding:28px 32px;border-radius:6px;max-width:480px;width:90%;border:1px solid var(--border-strong,#374151);">
                     <h2 style="margin:0 0 1em;font-size:1.1em;letter-spacing:0.05em;">AI Brain Cascade</h2>
+                    <div style="display:flex;gap:0.5em;margin-bottom:1em;">
+                      <button
+                        style="${this.viewedBrainTier === 'everyday' ? 'font-weight:600;text-decoration:underline;' : 'opacity:0.6;'}"
+                        @click=${() => { this.viewedBrainTier = 'everyday'; this.#render(); }}
+                      >Everyday</button>
+                      <button
+                        style="${this.viewedBrainTier === 'heavy_hitter' ? 'font-weight:600;text-decoration:underline;' : 'opacity:0.6;'}"
+                        @click=${() => { this.viewedBrainTier = 'heavy_hitter'; this.#render(); }}
+                      >Heavy Hitter</button>
+                    </div>
+                    ${!isLiveTier ? html`<p style="margin:0 0 0.8em;font-size:0.8em;opacity:0.6;">Hasn't answered yet this session — showing standby/disabled only, no live "in use" status.</p>` : ''}
                     <table style="width:100%;border-collapse:collapse;font-size:0.9em;">
                       <thead>
                         <tr style="border-bottom:1px solid var(--border-strong,#374151);">
                           <th style="text-align:left;padding:4px 8px;opacity:0.6;font-weight:500;">Tier</th>
                           <th style="text-align:left;padding:4px 8px;opacity:0.6;font-weight:500;">AI Brain</th>
                           <th style="text-align:right;padding:4px 8px;opacity:0.6;font-weight:500;">Status</th>
-                          ${this.brainTiersTier === 'everyday' || this.brainTiersTier === 'heavy_hitter' ? html`<th style="padding:4px 8px;"></th>` : ''}
+                          <th style="padding:4px 8px;"></th>
                         </tr>
                       </thead>
                       <tbody>
-                        ${this.brainTiers.map((t, i) => html`
+                        ${displayedTiers.map((t, i) => html`
                           <tr style="border-bottom:1px solid rgba(55,65,81,0.4);${t.status === 'active' ? 'background:rgba(59,130,246,0.1);' : ''}">
                             <td style="padding:6px 8px;opacity:0.5;">T${i + 1}</td>
                             <td style="padding:6px 8px;${t.status === 'unavailable' || t.status === 'disabled' ? 'opacity:0.4;text-decoration:line-through;' : ''}">${t.label}</td>
@@ -5595,17 +5658,13 @@ class App {
                                     ? html`<span style="opacity:0.35;">Disabled</span>`
                                     : html`<span style="opacity:0.35;">Standby</span>`}
                             </td>
-                            ${this.brainTiersTier === 'everyday' || this.brainTiersTier === 'heavy_hitter'
-                              ? html`
-                                  <td style="padding:6px 8px;text-align:right;">
-                                    <button
-                                      style="font-size:0.85em;padding:2px 8px;"
-                                      title="${t.status === 'disabled' ? 'Re-enable this brain' : 'Skip this brain for now'}"
-                                      @click=${() => this.#togglePeer(this.brainTiersTier, t.label)}
-                                    >${t.status === 'disabled' ? 'Enable' : 'Skip'}</button>
-                                  </td>
-                                `
-                              : ''}
+                            <td style="padding:6px 8px;text-align:right;">
+                              <button
+                                style="font-size:0.85em;padding:2px 8px;"
+                                title="${t.status === 'disabled' ? 'Re-enable this brain' : 'Skip this brain for now'}"
+                                @click=${() => this.#togglePeer(this.viewedBrainTier, t.label)}
+                              >${t.status === 'disabled' ? 'Enable' : 'Skip'}</button>
+                            </td>
                           </tr>
                         `)}
                       </tbody>
@@ -5615,7 +5674,8 @@ class App {
                     </div>
                   </div>
                 </div>
-              `
+              `;
+              })()
             : ''}
           ${this.emergencyConfirmOpen
             ? html`
