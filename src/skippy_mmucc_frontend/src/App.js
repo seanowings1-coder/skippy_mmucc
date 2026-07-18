@@ -705,7 +705,7 @@ function closeUnterminatedCodeFence(text) {
   return fenceCount % 2 !== 0 ? `${text}\n\`\`\`` : text;
 }
 
-function renderSkippyMessage(content) {
+function renderSkippyMessage(content, onSaveCode) {
   const parts = closeUnterminatedCodeFence(content).split(/(```[\s\S]*?```)/g);
   return parts.map((part) => {
     const codeMatch = part.match(/^```(\w*)\n?([\s\S]*?)\n?```$/);
@@ -721,6 +721,9 @@ function renderSkippyMessage(content) {
               setTimeout(() => { e.target.textContent = 'Copy'; }, 2000);
             }).catch(() => {});
           }}>Copy</button>
+          ${onSaveCode
+            ? html`<button class="save-code-btn" @click=${() => onSaveCode(code, lang)}>Save</button>`
+            : ''}
         </div>
         <pre><code>${code}</code></pre>
       </div>`;
@@ -1854,6 +1857,24 @@ class App {
       dataUriToBytes(this.lastKaraokeAudio),
       'audio/mpeg',
       `Karaoke — ${new Date().toLocaleString()}`,
+      this.#promptForArtifactNote(),
+    );
+  };
+
+  // 2026-07-18 — user's own ask: code Skippy generates was copy/paste-only,
+  // no way to keep it around. Same #saveArtifact path as karaoke/exports/
+  // briefs, just a new 'kind' tag ('code') — the backend never branches on
+  // kind at all, so this needed zero backend changes. text/plain regardless
+  // of the fenced language (no per-language MIME table exists or is worth
+  // building for this), and the language (if the model tagged the fence
+  // with one) goes in the auto-title so it's visible in the Memory list
+  // without opening the preview.
+  #saveCodeToMemory = (code, lang) => {
+    this.#saveArtifact(
+      'code',
+      new TextEncoder().encode(code),
+      'text/plain',
+      `Code${lang ? ` (${lang})` : ''} — ${new Date().toLocaleString()}`,
       this.#promptForArtifactNote(),
     );
   };
@@ -4428,6 +4449,11 @@ class App {
       this.selectedManual,
     );
     this.manualBrowserOpen = true;
+    // The section list now renders in the center column (2026-07-18), not
+    // this sidebar panel — on mobile the sidebar is a slide-out drawer over
+    // the center column, so it has to close for "Open" to actually show
+    // anything.
+    this.showRightDrawer = false;
     this.#render();
   };
 
@@ -5002,7 +5028,7 @@ class App {
             <details class="saved-artifacts">
               <summary>Skippy's Memory (${this.savedArtifacts.length})</summary>
               ${this.savedArtifacts.length === 0
-                ? html`<p class="status">Nothing saved yet — use a "Save to Memory" button on a karaoke song, export, or brief.</p>`
+                ? html`<p class="status">Nothing saved yet — use a "Save to Memory"/"Save" button on a karaoke song, export, brief, or code block.</p>`
                 : html`
                     <ul>
                       ${this.savedArtifacts
@@ -5327,20 +5353,45 @@ class App {
 
         <section class="col-center">
         <div class="conversation-transcript" id="transcript-scroll">
-          ${this.history.length === 0
-            ? html`<p class="status">No messages yet in this workspace.</p>`
-            : this.history.map(
-                (msg) => html`
-                  <div class="transcript-message ${msg.role}">
-                    <strong>${msg.role === 'user' ? 'You' : 'Skippy'}:</strong>
-                    ${msg.compressed
-                      ? html`<span class="status" style="font-style:italic;">(earlier reply, condensed for memory — original wording not retained)</span>`
-                      : msg.role === 'assistant'
-                        ? renderSkippyMessage(msg.content)
-                        : html`<span>${msg.content}</span>`}
-                  </div>
-                `,
-              )}
+          ${this.manualBrowserOpen
+            ? html`
+                <div class="manual-browser-header">
+                  <strong>${this.selectedManual}</strong> (${this.sections.length} section${this.sections.length === 1 ? '' : 's'})
+                  <button @click=${this.#closeManualBrowser}>← Back to chat</button>
+                </div>
+                ${this.sections.length === 0
+                  ? html`<p class="status">Nothing in this manual yet.</p>`
+                  : html`
+                      <ul class="note-list">
+                        ${this.sections.map(
+                          (section) => html`
+                            <li>
+                              <strong>${section.title}</strong>
+                              <span class="section-id">(${section.section})</span>
+                              ${this.guestMode
+                                ? ''
+                                : html`<button @click=${() => this.#deleteSection(section.id)}>Delete</button>`}
+                              <p>${section.content}</p>
+                            </li>
+                          `,
+                        )}
+                      </ul>
+                    `}
+              `
+            : this.history.length === 0
+              ? html`<p class="status">No messages yet in this workspace.</p>`
+              : this.history.map(
+                  (msg) => html`
+                    <div class="transcript-message ${msg.role}">
+                      <strong>${msg.role === 'user' ? 'You' : 'Skippy'}:</strong>
+                      ${msg.compressed
+                        ? html`<span class="status" style="font-style:italic;">(earlier reply, condensed for memory — original wording not retained)</span>`
+                        : msg.role === 'assistant'
+                          ? renderSkippyMessage(msg.content, (code, lang) => this.#saveCodeToMemory(code, lang))
+                          : html`<span>${msg.content}</span>`}
+                    </div>
+                  `,
+                )}
         </div>
 
         <div class="input-deck">
@@ -5635,25 +5686,9 @@ class App {
                     <button @click=${this.#deleteManual}>Delete entire manual</button>
                   </details>
                 `}
-
-            ${this.manualBrowserOpen
-              ? html`
-                  <ul class="note-list">
-                    ${this.sections.map(
-                      (section) => html`
-                        <li>
-                          <strong>${section.title}</strong>
-                          <span class="section-id">(${section.section})</span>
-                          ${this.guestMode
-                            ? ''
-                            : html`<button @click=${() => this.#deleteSection(section.id)}>Delete</button>`}
-                          <p>${section.content}</p>
-                        </li>
-                      `,
-                    )}
-                  </ul>
-                `
-              : ''}
+            <!-- Section list itself moved into the center column (2026-07-18) —
+                 "Open" now takes over Skippy's main text window for a bigger,
+                 easier-to-read view; this panel just holds the controls. -->
         </details>
 
         <details class="workspace-context">

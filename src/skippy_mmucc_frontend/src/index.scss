@@ -510,6 +510,17 @@ button:disabled {
       color: inherit;
       &:hover { background: rgba(255,255,255,0.2); }
     }
+
+    .save-code-btn {
+      padding: 0.2em 0.6em;
+      font-size: 0.8em;
+      cursor: pointer;
+      background: rgba(255,255,255,0.1);
+      border: 1px solid var(--border-subtle);
+      border-radius: 4px;
+      color: inherit;
+      &:hover { background: rgba(255,255,255,0.2); }
+    }
   }
 
   pre {
@@ -642,6 +653,20 @@ button:disabled {
 .upload-url input[type='url'] {
   flex: 1;
   min-width: 10em;
+}
+
+// 2026-07-18 — the manual browser now renders inside Skippy's main text
+// window (conversation-transcript) instead of the narrow right sidebar, so
+// it needs its own "you're not looking at chat right now" header + a clear
+// way back, rather than relying on the sidebar's own Open/Close buttons.
+.manual-browser-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.6em;
+  margin-bottom: 0.6em;
+  padding-bottom: 0.4em;
+  border-bottom: 1px solid var(--border-subtle);
 }
 
 .note-list {
