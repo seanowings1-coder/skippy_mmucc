@@ -374,6 +374,25 @@ const ROSTER_TRIGGER_PROMPT_REPLIES = [
 const EVERYDAY_PEER_LABELS = ['Euryale 70B (DeepInfra)', 'Hermes 3 70B (DeepInfra)', 'DeepSeek V4 Flash (DeepInfra)'];
 const HEAVY_HITTER_PEER_LABELS = ['Claude Sonnet 5 (DeepInfra)', 'Kimi K2.7 Code (DeepInfra)', 'DeepSeek V4 Pro (DeepInfra)'];
 
+// Read-only "peace of mind" listing for Steel Rain (tactical/focus mode) —
+// a completely separate system from Everyday/Heavy Hitter above, with no
+// per-brain skip/enable of its own (nothing here is individually
+// toggleable the way peer-tier brains are — see server.js's Steel Rain
+// implementation). Mirrors that implementation exactly; keep in sync if it
+// ever changes. 2026-07-18, user's own ask: "a fallback brain button...
+// grey so it doesn't stand out but visible so I can verify the status of
+// the brains."
+const STEEL_RAIN_DISPLAY = [
+  { round: 'Round 1 (race)', label: 'DeepSeek V4 Flash (DeepInfra)' },
+  { round: 'Round 1 (race)', label: 'Claude Haiku 4.5 (OpenRouter)' },
+  { round: 'Round 2 — only if round 1 fails entirely (race)', label: 'Euryale 70B (DeepInfra)' },
+  { round: 'Round 2 — only if round 1 fails entirely (race)', label: 'DeepSeek V4 Pro (DeepInfra)' },
+  { round: 'Round 2 — only if round 1 fails entirely (race)', label: 'Claude Sonnet 4.6 (OpenRouter)' },
+  { round: 'Last resort — only if both rounds fail (sequential)', label: 'Claude Sonnet 4.6 (OpenRouter)' },
+  { round: 'Last resort — only if both rounds fail (sequential)', label: 'Claude Haiku 4.5 (OpenRouter)' },
+  { round: 'Last resort — only if both rounds fail (sequential)', label: 'Llama 3.3 70B, paid (OpenRouter)' },
+];
+
 const KARAOKE_TRIGGER_PHRASES = ['karaoke', 'sing a song', 'jam out', 'rock out'];
 // Subset of the above that actually implies a style/theme, unlike the
 // generic 'karaoke'/'sing a song'. 2026-07-14 finding: when the user's
@@ -1542,7 +1561,20 @@ class App {
   #togglePeer = (tier, label) => {
     const field = tier === 'everyday' ? 'disabledEverydayPeers' : 'disabledHeavyHitterPeers';
     const storageKey = tier === 'everyday' ? 'skippy_disabled_everyday_peers' : 'skippy_disabled_heavy_hitter_peers';
-    this[field] = this[field].includes(label)
+    const isCurrentlyDisabled = this[field].includes(label);
+    // 2026-07-18 — found live: nothing stopped disabling every peer in a
+    // tier, which (for Everyday) forces escalation to Heavy Hitter for
+    // every single message, and (for Heavy Hitter, which has no further
+    // fallback by design) means a hard 502 error on every request. Refuse
+    // to disable the last remaining enabled peer rather than let a tier go
+    // fully dark by accident.
+    const totalPeers = (tier === 'everyday' ? EVERYDAY_PEER_LABELS : HEAVY_HITTER_PEER_LABELS).length;
+    if (!isCurrentlyDisabled && this[field].length >= totalPeers - 1) {
+      this.statusMessage = `Can't disable every brain in the ${tier === 'everyday' ? 'Everyday' : 'Heavy Hitter'} tier — at least one has to stay active.`;
+      this.#render();
+      return;
+    }
+    this[field] = isCurrentlyDisabled
       ? this[field].filter((l) => l !== label)
       : [...this[field], label];
     localStorage.setItem(storageKey, JSON.stringify(this[field]));
@@ -5610,7 +5642,8 @@ class App {
                 // this session. This no longer requires this.brainTiers to
                 // exist at all — the cold view works from a fresh restart,
                 // before Skippy has answered anything.
-                const isLiveTier = this.brainTiers && this.viewedBrainTier === this.brainTiersTier;
+                const isSteelRain = this.viewedBrainTier === 'steel_rain';
+                const isLiveTier = !isSteelRain && this.brainTiers && this.viewedBrainTier === this.brainTiersTier;
                 const baseTiers = isLiveTier
                   ? this.brainTiers
                   : (this.viewedBrainTier === 'heavy_hitter' ? HEAVY_HITTER_PEER_LABELS : EVERYDAY_PEER_LABELS).map(
@@ -5631,15 +5664,24 @@ class App {
                 // the peer's true current active/unavailable state without
                 // a fresh response, so standby is the honest best guess.
                 const currentlyDisabled = this.viewedBrainTier === 'heavy_hitter' ? this.disabledHeavyHitterPeers : this.disabledEverydayPeers;
-                const displayedTiers = baseTiers.map((t) => ({
-                  ...t,
-                  status: currentlyDisabled.includes(t.label) ? 'disabled' : (t.status === 'disabled' ? 'standby' : t.status),
-                }));
+                const displayedTiers = isSteelRain
+                  ? STEEL_RAIN_DISPLAY.map((t) => ({ ...t, status: 'standby' }))
+                  : baseTiers.map((t) => ({
+                      ...t,
+                      status: currentlyDisabled.includes(t.label) ? 'disabled' : (t.status === 'disabled' ? 'standby' : t.status),
+                    }));
                 return html`
                 <div style="position:fixed;inset:0;background:rgba(0,0,0,0.75);display:flex;align-items:center;justify-content:center;z-index:2000;"
                      @click=${(e) => { if (e.target === e.currentTarget) { this.showBrainGrid = false; this.#render(); } }}>
                   <div style="background:var(--bg-dark-armor,#1a1a2e);color:var(--text-brushed-aluminum,#d1d5db);padding:28px 32px;border-radius:6px;max-width:480px;width:90%;border:1px solid var(--border-strong,#374151);">
-                    <h2 style="margin:0 0 1em;font-size:1.1em;letter-spacing:0.05em;">AI Brain Cascade</h2>
+                    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:1em;">
+                      <h2 style="margin:0;font-size:1.1em;letter-spacing:0.05em;">AI Brain Cascade</h2>
+                      <button
+                        title="Steel Rain (tactical/focus) fallback brains — read-only, verify what's configured"
+                        style="font-size:0.75em;padding:3px 8px;opacity:${isSteelRain ? '1' : '0.45'};color:#9ca3af;border-color:#4b5563;"
+                        @click=${() => { this.viewedBrainTier = 'steel_rain'; this.#render(); }}
+                      >⛨ Fallback</button>
+                    </div>
                     <div style="display:flex;gap:0.5em;margin-bottom:1em;">
                       <button
                         style="${this.viewedBrainTier === 'everyday' ? 'font-weight:600;text-decoration:underline;' : 'opacity:0.6;'}"
@@ -5650,18 +5692,29 @@ class App {
                         @click=${() => { this.viewedBrainTier = 'heavy_hitter'; this.#render(); }}
                       >Heavy Hitter</button>
                     </div>
-                    ${!isLiveTier ? html`<p style="margin:0 0 0.8em;font-size:0.8em;opacity:0.6;">Hasn't answered yet this session — showing standby/disabled only, no live "in use" status.</p>` : ''}
+                    ${isSteelRain
+                      ? html`<p style="margin:0 0 0.8em;font-size:0.8em;opacity:0.6;">Tactical/focus mode's emergency fallback brains (Steel Rain) — informational only, nothing here can be individually skipped/enabled.</p>`
+                      : !isLiveTier
+                        ? html`<p style="margin:0 0 0.8em;font-size:0.8em;opacity:0.6;">Hasn't answered yet this session — showing standby/disabled only, no live "in use" status.</p>`
+                        : ''}
                     <table style="width:100%;border-collapse:collapse;font-size:0.9em;">
                       <thead>
                         <tr style="border-bottom:1px solid var(--border-strong,#374151);">
-                          <th style="text-align:left;padding:4px 8px;opacity:0.6;font-weight:500;">Tier</th>
+                          <th style="text-align:left;padding:4px 8px;opacity:0.6;font-weight:500;">${isSteelRain ? 'Round' : 'Tier'}</th>
                           <th style="text-align:left;padding:4px 8px;opacity:0.6;font-weight:500;">AI Brain</th>
-                          <th style="text-align:right;padding:4px 8px;opacity:0.6;font-weight:500;">Status</th>
-                          <th style="padding:4px 8px;"></th>
+                          ${isSteelRain ? '' : html`<th style="text-align:right;padding:4px 8px;opacity:0.6;font-weight:500;">Status</th>`}
+                          ${isSteelRain ? '' : html`<th style="padding:4px 8px;"></th>`}
                         </tr>
                       </thead>
                       <tbody>
-                        ${displayedTiers.map((t, i) => html`
+                        ${displayedTiers.map((t, i) => isSteelRain
+                          ? html`
+                              <tr style="border-bottom:1px solid rgba(55,65,81,0.4);">
+                                <td style="padding:6px 8px;opacity:0.5;font-size:0.85em;">${t.round}</td>
+                                <td style="padding:6px 8px;">${t.label}</td>
+                              </tr>
+                            `
+                          : html`
                           <tr style="border-bottom:1px solid rgba(55,65,81,0.4);${t.status === 'active' ? 'background:rgba(59,130,246,0.1);' : ''}">
                             <td style="padding:6px 8px;opacity:0.5;">T${i + 1}</td>
                             <td style="padding:6px 8px;${t.status === 'unavailable' || t.status === 'disabled' ? 'opacity:0.4;text-decoration:line-through;' : ''}">${t.label}</td>

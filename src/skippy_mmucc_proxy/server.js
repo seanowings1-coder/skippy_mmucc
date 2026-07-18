@@ -1592,12 +1592,19 @@ app.post('/respond', requireSession, async (req, res) => {
       : [];
 
     const disabledLabels = disabledLabelsFor(brain);
-    const primaryPeers = (brain === 'everyday' ? EVERYDAY_PEERS : HEAVY_HITTER_PEERS)
-      .filter((p) => !disabledLabels.includes(fullPeerLabel(p)));
-    // Every peer in a tier deselected == the same "nothing left to try" outcome as every peer
-    // failing — fallForward would just return null anyway on an empty list, this skips straight
-    // there without a pointless zero-iteration call.
-    let won = primaryPeers.length > 0 ? await fallForward(primaryPeers, brain) : null;
+    const allPrimaryPeers = brain === 'everyday' ? EVERYDAY_PEERS : HEAVY_HITTER_PEERS;
+    const filteredPrimaryPeers = allPrimaryPeers.filter((p) => !disabledLabels.includes(fullPeerLabel(p)));
+    // Defense-in-depth (2026-07-18) against disabledLabels — client-supplied,
+    // not read from anything the server itself controls — ever taking a
+    // whole tier fully offline: if honoring it would leave zero peers to
+    // try, ignore it for this call and use the full list instead, rather
+    // than hard-erroring (Heavy Hitter) or forcing every message to
+    // escalate (Everyday) over what's almost certainly stale/accidental
+    // state. The frontend's #togglePeer also now refuses to let the UI
+    // disable every peer in a tier in the first place — this is the
+    // second layer, not the only one.
+    const primaryPeers = filteredPrimaryPeers.length > 0 ? filteredPrimaryPeers : allPrimaryPeers;
+    let won = await fallForward(primaryPeers, brain);
     // Only a genuine cross-tier escalation earns the in-character "left my usual brain" quip —
     // falling from peer 1 to peer 2 within the SAME tier is not, by design (they're meant to be
     // comparably good, not a quality ladder).
@@ -1607,13 +1614,14 @@ app.post('/respond', requireSession, async (req, res) => {
 
     if (!won && brain === 'everyday') {
       const hhDisabled = disabledLabelsFor('heavy_hitter');
-      const hhPeers = HEAVY_HITTER_PEERS.filter((p) => !hhDisabled.includes(fullPeerLabel(p)));
+      const filteredHhPeers = HEAVY_HITTER_PEERS.filter((p) => !hhDisabled.includes(fullPeerLabel(p)));
+      const hhPeers = filteredHhPeers.length > 0 ? filteredHhPeers : HEAVY_HITTER_PEERS; // same defense-in-depth as primaryPeers above
       console.warn(
-        primaryPeers.length === 0
+        filteredPrimaryPeers.length === 0
           ? '[Skippy] All everyday peers deselected — escalating to Heavy Hitter'
           : '[Skippy] All everyday peers exhausted — escalating to Heavy Hitter',
       );
-      won = hhPeers.length > 0 ? await fallForward(hhPeers, 'heavy_hitter') : null;
+      won = await fallForward(hhPeers, 'heavy_hitter');
       brainDowngrade = true;
       wonPeers = HEAVY_HITTER_PEERS;
       wonDisabledLabels = hhDisabled;
