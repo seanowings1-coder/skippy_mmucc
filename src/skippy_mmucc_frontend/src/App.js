@@ -5105,10 +5105,6 @@ class App {
                   reasons.push(`🤖 OpenRouter: $${remaining.toFixed(2)} left of $${or.totalCredits.toFixed(2)}`);
                 }
               }
-              const el = this.fuelData.elevenlabs;
-              if (el && !el.error && el.characterCount >= el.characterLimit * 0.8) {
-                reasons.push(`🔊 ElevenLabs: ${el.characterCount.toLocaleString()} / ${el.characterLimit.toLocaleString()} chars used`);
-              }
               const tw = this.fuelData.twilio;
               if (tw && !tw.error && parseFloat(tw.balance) < 5) {
                 reasons.push(`📡 Twilio: ${tw.currency} ${tw.balance} remaining`);
@@ -5273,14 +5269,6 @@ class App {
                       ? `$${Math.max(0, this.fuelData.openrouter.totalCredits - this.fuelData.openrouter.totalUsage).toFixed(2)} remaining`
                       : '...'}
                   <a href="https://openrouter.ai/credits" target="_blank" rel="noopener">Top Up</a>
-                </p>
-                <p>
-                  ElevenLabs: ${this.fuelData?.elevenlabs?.error
-                    ? `error: ${this.fuelData.elevenlabs.error}`
-                    : this.fuelData?.elevenlabs
-                      ? `${this.fuelData.elevenlabs.characterCount}/${this.fuelData.elevenlabs.characterLimit} characters`
-                      : '...'}
-                  <a href="https://elevenlabs.io/app/subscription" target="_blank" rel="noopener">Top Up</a>
                 </p>
                 ${this.fuelData?.deepinfra
                   ? html`<p>

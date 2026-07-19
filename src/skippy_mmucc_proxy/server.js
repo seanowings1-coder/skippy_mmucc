@@ -3033,23 +3033,6 @@ app.get('/api/fuel', requireSession, async (req, res) => {
     result.openrouter = { error: err.message };
   }
 
-  try {
-    const elResponse = await fetch('https://api.elevenlabs.io/v1/user/subscription', {
-      headers: { 'xi-api-key': ELEVENLABS_API_KEY },
-    });
-    if (elResponse.ok) {
-      const elData = await elResponse.json();
-      result.elevenlabs = {
-        characterCount: elData.character_count ?? null,
-        characterLimit: elData.character_limit ?? null,
-      };
-    } else {
-      result.elevenlabs = { error: `ElevenLabs ${elResponse.status}` };
-    }
-  } catch (err) {
-    result.elevenlabs = { error: err.message };
-  }
-
   // DeepInfra balance — found 2026-07-09 via direct reverse-engineering of docs.deepinfra.com's
   // per-endpoint OpenAPI fragments (this isn't in DeepInfra's public inference API docs, but the
   // same bearer key that authenticates chat completions also authenticates this dashboard-
