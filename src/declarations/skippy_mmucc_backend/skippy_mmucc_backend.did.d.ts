@@ -118,6 +118,7 @@ export interface Workspace {
   'owner' : Principal,
   'name' : string,
   'created_at' : bigint,
+  'critic_loop_resolved' : [] | [boolean],
   'associated_manuals' : [] | [Array<string>],
   'scratchpad' : [] | [string],
 }
@@ -187,6 +188,7 @@ export interface _SERVICE {
   'list_sections_by_manual' : ActorMethod<[string], Array<DocumentSection>>,
   'login' : ActorMethod<[], { 'Ok' : string } | { 'Err' : string }>,
   'manual_category_map' : ActorMethod<[], Array<[string, string]>>,
+  'mark_critic_loop_resolved' : ActorMethod<[bigint], undefined>,
   'overwrite_turn_content' : ActorMethod<[bigint, bigint, string], undefined>,
   'pop_pending_courier_messages' : ActorMethod<[], Array<CourierMessage>>,
   'purge_history' : ActorMethod<[bigint], undefined>,

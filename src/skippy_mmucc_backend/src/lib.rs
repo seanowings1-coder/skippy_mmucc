@@ -268,6 +268,12 @@ pub struct Workspace {
     pub created_at: u64,
     pub scratchpad: Option<String>,
     pub associated_manuals: Option<Vec<String>>,
+    // Set once the Critic Loop (Pillar 19) has either run OR been explicitly
+    // skipped (opt-out) for this workspace's closing history — checked by
+    // BOTH archive_workspace and delete_workspace before firing it again, so
+    // a workspace that gets archived then later restored-and-deleted can't
+    // double-apply personality deltas for the same conversation (2026-07-19).
+    pub critic_loop_resolved: Option<bool>,
 }
 
 impl Storable for Workspace {
@@ -1294,6 +1300,7 @@ fn create_workspace(name: String) -> u64 {
         created_at: ic_cdk::api::time(),
         scratchpad: None,
         associated_manuals: None,
+        critic_loop_resolved: None,
     };
     WORKSPACES.with(|w| w.borrow_mut().insert(id, workspace));
     id
@@ -1338,6 +1345,18 @@ fn archive_workspace(workspace_id: u64) {
     let caller = assert_whitelisted();
     let mut workspace = assert_workspace_owner(caller, workspace_id);
     workspace.status = WorkspaceStatus::Archived;
+    WORKSPACES.with(|w| w.borrow_mut().insert(workspace_id, workspace));
+}
+
+// Called by the frontend right before archive_workspace/delete_workspace
+// fires (or skips) the Critic Loop for a workspace's closing history — see
+// Workspace.critic_loop_resolved's comment for why this exists. Idempotent:
+// calling it twice is harmless, it just re-sets the same flag.
+#[update]
+fn mark_critic_loop_resolved(workspace_id: u64) {
+    let caller = assert_whitelisted();
+    let mut workspace = assert_workspace_owner(caller, workspace_id);
+    workspace.critic_loop_resolved = Some(true);
     WORKSPACES.with(|w| w.borrow_mut().insert(workspace_id, workspace));
 }
 

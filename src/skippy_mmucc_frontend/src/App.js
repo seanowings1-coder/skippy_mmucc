@@ -1229,6 +1229,12 @@ class App {
   onPaidTier = false;
   brainFamily = 'dolphin'; // 'dolphin' | 'other' — quip only fires on transition
   brainTiers = null;
+  // Opt-out for the Critic Loop (Pillar 19) — checked (feed personality) by
+  // default, read at the moment Archive/Delete is actually clicked (not
+  // stored per-workspace, just a UI toggle for "this next close doesn't
+  // count"). See #resolveCriticLoop for how this interacts with
+  // Workspace.critic_loop_resolved.
+  feedSkippyPersonality = true;
   showBrainGrid = false;
   // Which tier the AI Brain Cascade modal is currently displaying — set to
   // brainTiersTier when the modal opens, but independently switchable via
@@ -2477,21 +2483,44 @@ class App {
     // this.history with the next active workspace's, so the Critic Loop
     // (Pillar 19) needs its own copy of what's actually closing.
     const closingHistory = this.history;
-    await this.backendActor.archive_workspace(this.activeWorkspaceId);
+    const workspaceId = this.activeWorkspaceId;
+    await this.backendActor.archive_workspace(workspaceId);
     this.workspaces = await this.backendActor.list_my_workspaces();
     const nextActive = this.workspaces.find((w) => 'Active' in w.status);
     await this.#switchWorkspace(nextActive.id);
-    // Fire-and-forget: a failed self-critique is a missed reflection, not a
-    // broken archive — it must never block or error the action the user
-    // actually asked for.
-    this.#runCriticLoop(closingHistory);
+    this.#resolveCriticLoop(workspaceId, closingHistory);
+  };
+
+  // Shared by archive AND delete (2026-07-19) — both are real "this
+  // conversation is genuinely closed" moments (confirmed live: the user's
+  // actual habit is deleting a finished session directly, not archiving
+  // first, which previously meant that data silently never reached the
+  // Critic Loop at all). Workspace.critic_loop_resolved guards against the
+  // one real double-processing path this creates: archive (resolves it) ->
+  // restore -> delete (would otherwise resolve it AGAIN on identical
+  // history) — whichever action happens first wins, the second is a no-op.
+  // Fire-and-forget throughout: a failed/skipped self-critique is a missed
+  // reflection, never something that should block or error the actual
+  // archive/delete the user asked for.
+  #resolveCriticLoop = async (workspaceId, closingHistory) => {
+    const workspace = this.workspaces.find((w) => w.id === workspaceId);
+    if (workspace?.critic_loop_resolved?.[0]) return; // already resolved via the other path
+    try {
+      await this.backendActor.mark_critic_loop_resolved(workspaceId);
+    } catch (err) {
+      console.error('[Skippy] mark_critic_loop_resolved failed:', err);
+    }
+    if (this.feedSkippyPersonality) {
+      this.#runCriticLoop(closingHistory);
+    }
   };
 
   // Pillar 19 — the "Critic Loop." Stand-in trigger for "post-mission
   // debrief" until that's a real dedicated feature (confirmed 2026-06-22):
-  // fires whenever a workspace is archived, i.e. whenever a chat is
-  // genuinely closed. Skipped entirely for an empty/unused workspace — no
-  // point self-critiquing a conversation that never happened.
+  // fires whenever a workspace is archived OR deleted, i.e. whenever a chat
+  // is genuinely closed (extended to delete 2026-07-19, see
+  // #resolveCriticLoop). Skipped entirely for an empty/unused workspace —
+  // no point self-critiquing a conversation that never happened.
   #runCriticLoop = async (history) => {
     if (history.length === 0) return;
     try {
@@ -2524,7 +2553,14 @@ class App {
     ) {
       return;
     }
-    await this.backendActor.delete_workspace(this.activeWorkspaceId);
+    // Captured/resolved BEFORE delete_workspace, which removes the record
+    // outright — mark_critic_loop_resolved needs the workspace to still
+    // exist, and #loadWorkspaces below switches away and overwrites
+    // this.history same as #archiveActiveWorkspace's closingHistory capture.
+    const closingHistory = this.history;
+    const workspaceId = this.activeWorkspaceId;
+    await this.#resolveCriticLoop(workspaceId, closingHistory);
+    await this.backendActor.delete_workspace(workspaceId);
     await this.#loadWorkspaces();
   };
 
@@ -5203,6 +5239,14 @@ class App {
                 🗂 Save Brief to Memory
               </button>
               <button @click=${this.#deleteActiveWorkspaceForever}>Delete forever</button>
+              <label style="display:block;margin-top:0.5em;font-size:0.85em;opacity:0.8;" title="Applies to the next Archive or Delete forever click on this workspace, whichever happens first">
+                <input
+                  type="checkbox"
+                  ?checked=${this.feedSkippyPersonality}
+                  @change=${(e) => { this.feedSkippyPersonality = e.target.checked; }}
+                />
+                Let this conversation shape Skippy's personality (Critic Loop)
+              </label>
             </details>
 
             <details class="saved-artifacts">

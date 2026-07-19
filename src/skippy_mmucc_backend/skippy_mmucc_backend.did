@@ -48,6 +48,7 @@ type Workspace = record {
     created_at : nat64;
     scratchpad : opt text;
     associated_manuals : opt vec text;
+    critic_loop_resolved : opt bool;
 };
 
 type CourierMessage = record {
@@ -160,6 +161,7 @@ service : (principal, principal, principal) -> {
     "list_my_workspaces": () -> (vec Workspace) query;
     "archive_workspace": (nat64) -> ();
     "restore_workspace": (nat64) -> ();
+    "mark_critic_loop_resolved": (nat64) -> ();
     "delete_workspace": (nat64) -> ();
     "update_scratchpad": (nat64, text) -> ();
     "update_associated_manuals": (nat64, vec text) -> ();

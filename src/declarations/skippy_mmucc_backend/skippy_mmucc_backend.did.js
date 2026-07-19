@@ -100,6 +100,7 @@ export const idlFactory = ({ IDL }) => {
     'owner' : IDL.Principal,
     'name' : IDL.Text,
     'created_at' : IDL.Nat64,
+    'critic_loop_resolved' : IDL.Opt(IDL.Bool),
     'associated_manuals' : IDL.Opt(IDL.Vec(IDL.Text)),
     'scratchpad' : IDL.Opt(IDL.Text),
   });
@@ -232,6 +233,7 @@ export const idlFactory = ({ IDL }) => {
         [IDL.Vec(IDL.Tuple(IDL.Text, IDL.Text))],
         ['query'],
       ),
+    'mark_critic_loop_resolved' : IDL.Func([IDL.Nat64], [], []),
     'overwrite_turn_content' : IDL.Func(
         [IDL.Nat64, IDL.Nat64, IDL.Text],
         [],
