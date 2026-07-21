@@ -5409,50 +5409,6 @@ class App {
                 Let this conversation shape Skippy's personality (Critic Loop)
               </label>
             </details>
-
-            <details class="saved-artifacts">
-              <summary>Skippy's Memory (${this.savedArtifacts.length})</summary>
-              ${this.savedArtifacts.length === 0
-                ? html`<p class="status">Nothing saved yet — use a "Save to Memory"/"Save" button on a karaoke song, export, brief, or code block.</p>`
-                : html`
-                    <ul>
-                      ${this.savedArtifacts
-                        .slice()
-                        .sort((a, b) => Number(b.created_at) - Number(a.created_at))
-                        .map((art) => {
-                          const mime = art.mime?.[0] || '';
-                          const isPreviewable = mime.startsWith('audio/') || mime.startsWith('text/');
-                          const isOpen = this.previewArtifact?.id === art.id;
-                          return html`
-                            <li>
-                              <strong>${art.title?.[0] || art.kind}</strong>
-                              <span class="section-id">(${art.kind})</span>
-                              <br />
-                              <span class="status">
-                                ${new Date(Number(art.created_at / 1_000_000n)).toLocaleString()}
-                              </span>
-                              ${art.notes?.[0]
-                                ? html`<br /><span class="artifact-note">${art.notes[0]}</span>`
-                                : ''}
-                              ${isPreviewable
-                                ? html`<button @click=${() => this.#previewSavedArtifact(art.id)}>
-                                    ${isOpen ? 'Hide' : 'Preview'}
-                                  </button>`
-                                : ''}
-                              <button @click=${() => this.#downloadSavedArtifact(art.id)}>Download</button>
-                              <button @click=${() => this.#deleteSavedArtifact(art.id)}>Delete</button>
-                              ${isOpen && this.previewArtifact.kind === 'audio'
-                                ? html`<audio controls src=${this.previewArtifact.url} class="artifact-preview-audio"></audio>`
-                                : ''}
-                              ${isOpen && this.previewArtifact.kind === 'text'
-                                ? html`<pre class="artifact-preview-text">${this.previewArtifact.content}</pre>`
-                                : ''}
-                            </li>
-                          `;
-                        })}
-                    </ul>
-                  `}
-            </details>
           ` : ''}
         </section>
 
@@ -5595,6 +5551,116 @@ class App {
                       `
                     : ''}
                 </details>
+
+                <details class="saved-artifacts">
+                  <summary>Skippy's Memory (${this.savedArtifacts.length})</summary>
+                  ${this.savedArtifacts.length === 0
+                    ? html`<p class="status">Nothing saved yet — use a "Save to Memory"/"Save" button on a karaoke song, export, brief, or code block.</p>`
+                    : html`
+                        <ul>
+                          ${this.savedArtifacts
+                            .slice()
+                            .sort((a, b) => Number(b.created_at) - Number(a.created_at))
+                            .map((art) => {
+                              const mime = art.mime?.[0] || '';
+                              const isPreviewable = mime.startsWith('audio/') || mime.startsWith('text/');
+                              const isOpen = this.previewArtifact?.id === art.id;
+                              return html`
+                                <li>
+                                  <strong>${art.title?.[0] || art.kind}</strong>
+                                  <span class="section-id">(${art.kind})</span>
+                                  <br />
+                                  <span class="status">
+                                    ${new Date(Number(art.created_at / 1_000_000n)).toLocaleString()}
+                                  </span>
+                                  ${art.notes?.[0]
+                                    ? html`<br /><span class="artifact-note">${art.notes[0]}</span>`
+                                    : ''}
+                                  ${isPreviewable
+                                    ? html`<button @click=${() => this.#previewSavedArtifact(art.id)}>
+                                        ${isOpen ? 'Hide' : 'Preview'}
+                                      </button>`
+                                    : ''}
+                                  <button @click=${() => this.#downloadSavedArtifact(art.id)}>Download</button>
+                                  <button @click=${() => this.#deleteSavedArtifact(art.id)}>Delete</button>
+                                  ${isOpen && this.previewArtifact.kind === 'audio'
+                                    ? html`<audio controls src=${this.previewArtifact.url} class="artifact-preview-audio"></audio>`
+                                    : ''}
+                                  ${isOpen && this.previewArtifact.kind === 'text'
+                                    ? html`<pre class="artifact-preview-text">${this.previewArtifact.content}</pre>`
+                                    : ''}
+                                </li>
+                              `;
+                            })}
+                        </ul>
+                      `}
+                </details>
+
+                <details class="known-facts">
+                  <summary>What Skippy Knows (${this.knownFacts.length})</summary>
+                  <p class="status">
+                    Standing facts Skippy naturally weaves into conversation — pets, family, ongoing
+                    projects, likes/dislikes, recurring events. Extracted automatically from conversation
+                    every few turns, or add one yourself below. Delete anything you don't want remembered.
+                    This is separate from the Evolution Matrix above — that's personality, this is facts.
+                  </p>
+                  ${(() => {
+                    const editing = this.editingKnownFactId !== null
+                      ? this.knownFacts.find((f) => f.id === this.editingKnownFactId)
+                      : null;
+                    const editingFollowUpDate = editing?.follow_up_at?.[0]
+                      ? new Date(Number(editing.follow_up_at[0] / 1_000_000n)).toISOString().slice(0, 10)
+                      : '';
+                    return html`
+                      <form @submit=${this.#saveKnownFact}>
+                        <label>Fact
+                          <input name="factText" type="text" placeholder="Got a new dog, a beagle named Scout" required .value=${editing?.fact ?? ''} />
+                        </label>
+                        <label>Category
+                          ${(() => {
+                            const currentCategory = editing?.category?.[0] ?? '';
+                            return html`
+                              <select name="factCategory">
+                                <option value="" ?selected=${currentCategory === ''}>(none)</option>
+                                <option value="pets" ?selected=${currentCategory === 'pets'}>Pets</option>
+                                <option value="family" ?selected=${currentCategory === 'family'}>Family/relationships</option>
+                                <option value="project" ?selected=${currentCategory === 'project'}>Ongoing project</option>
+                                <option value="preference" ?selected=${currentCategory === 'preference'}>Like/dislike</option>
+                                <option value="recurring_event" ?selected=${currentCategory === 'recurring_event'}>Recurring event</option>
+                              </select>
+                            `;
+                          })()}
+                        </label>
+                        <label>Follow up on (optional)
+                          <input name="factFollowUp" type="date" .value=${editingFollowUpDate} />
+                        </label>
+                        <div style="display:flex;gap:0.5em;margin-top:0.4em;">
+                          <button type="submit">${editing ? 'Save changes' : '+ Add fact'}</button>
+                          ${editing ? html`<button type="button" @click=${this.#cancelEditKnownFact}>Cancel</button>` : ''}
+                        </div>
+                      </form>
+                    `;
+                  })()}
+                  <ul>
+                    ${this.knownFacts.map(
+                      (f) => html`
+                        <li style="margin:0.5em 0;">
+                          <div>
+                            ${f.fact}
+                            ${f.category?.[0] ? html`<span class="status"> · ${f.category[0]}</span>` : ''}
+                            ${f.follow_up_at?.[0]
+                              ? html`<span class="status"> · follow up ${new Date(Number(f.follow_up_at[0] / 1_000_000n)).toLocaleDateString()}</span>`
+                              : ''}
+                          </div>
+                          <div style="display:flex;gap:0.4em;">
+                            <button @click=${() => this.#editKnownFact(f.id)}>Edit</button>
+                            <button @click=${() => this.#deleteKnownFact(f.id)}>Delete</button>
+                          </div>
+                        </li>
+                      `,
+                    )}
+                  </ul>
+                </details>
               `}
         </details>
 
@@ -5651,72 +5717,6 @@ class App {
                   <div style="display:flex;gap:0.4em;">
                     <button @click=${() => this.#editRosterProfile(p.id)}>Edit</button>
                     <button @click=${() => this.#deleteRosterProfile(p.id)}>Delete</button>
-                  </div>
-                </li>
-              `,
-            )}
-          </ul>
-        </details>
-
-        <details class="tactical-roster">
-          <summary>What Skippy Knows (${this.knownFacts.length})</summary>
-          <p class="status">
-            Standing facts Skippy naturally weaves into conversation — pets, family, ongoing
-            projects, likes/dislikes, recurring events. Extracted automatically from conversation
-            every few turns, or add one yourself below. Delete anything you don't want remembered.
-            This is separate from the Evolution Matrix above — that's personality, this is facts.
-          </p>
-          ${(() => {
-            const editing = this.editingKnownFactId !== null
-              ? this.knownFacts.find((f) => f.id === this.editingKnownFactId)
-              : null;
-            const editingFollowUpDate = editing?.follow_up_at?.[0]
-              ? new Date(Number(editing.follow_up_at[0] / 1_000_000n)).toISOString().slice(0, 10)
-              : '';
-            return html`
-              <form @submit=${this.#saveKnownFact}>
-                <label>Fact
-                  <input name="factText" type="text" placeholder="Got a new dog, a beagle named Scout" required .value=${editing?.fact ?? ''} />
-                </label>
-                <label>Category
-                  ${(() => {
-                    const currentCategory = editing?.category?.[0] ?? '';
-                    return html`
-                      <select name="factCategory">
-                        <option value="" ?selected=${currentCategory === ''}>(none)</option>
-                        <option value="pets" ?selected=${currentCategory === 'pets'}>Pets</option>
-                        <option value="family" ?selected=${currentCategory === 'family'}>Family/relationships</option>
-                        <option value="project" ?selected=${currentCategory === 'project'}>Ongoing project</option>
-                        <option value="preference" ?selected=${currentCategory === 'preference'}>Like/dislike</option>
-                        <option value="recurring_event" ?selected=${currentCategory === 'recurring_event'}>Recurring event</option>
-                      </select>
-                    `;
-                  })()}
-                </label>
-                <label>Follow up on (optional)
-                  <input name="factFollowUp" type="date" .value=${editingFollowUpDate} />
-                </label>
-                <div style="display:flex;gap:0.5em;margin-top:0.4em;">
-                  <button type="submit">${editing ? 'Save changes' : '+ Add fact'}</button>
-                  ${editing ? html`<button type="button" @click=${this.#cancelEditKnownFact}>Cancel</button>` : ''}
-                </div>
-              </form>
-            `;
-          })()}
-          <ul>
-            ${this.knownFacts.map(
-              (f) => html`
-                <li style="margin:0.5em 0;">
-                  <div>
-                    ${f.fact}
-                    ${f.category?.[0] ? html`<span class="status"> · ${f.category[0]}</span>` : ''}
-                    ${f.follow_up_at?.[0]
-                      ? html`<span class="status"> · follow up ${new Date(Number(f.follow_up_at[0] / 1_000_000n)).toLocaleDateString()}</span>`
-                      : ''}
-                  </div>
-                  <div style="display:flex;gap:0.4em;">
-                    <button @click=${() => this.#editKnownFact(f.id)}>Edit</button>
-                    <button @click=${() => this.#deleteKnownFact(f.id)}>Delete</button>
                   </div>
                 </li>
               `,
