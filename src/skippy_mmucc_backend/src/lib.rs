@@ -54,6 +54,15 @@ const ROSTER_PROFILES_MEMORY_ID: MemoryId = MemoryId::new(16);
 // those messages instead of dropping them. 17 is the next free slot; never
 // renumber/reuse.
 const LONG_TERM_LOG_MEMORY_ID: MemoryId = MemoryId::new(17);
+// Pillar 25 (What Skippy Knows), 2026-07-20 — the "I know Sean/Commander"
+// relational-continuity axis, deliberately separate from Pillar 19's
+// Evolution Matrix (that's personality; this is facts). User's explicit
+// call: visible and editable, never autonomous/opaque — see the rejected
+// "Troll Protocol" design note in the originating memory file for the
+// categories this deliberately does NOT do (no Leverage tags, no covert
+// emotional-intensity harvesting). 18 is the next free slot; never
+// renumber/reuse.
+const KNOWN_FACTS_MEMORY_ID: MemoryId = MemoryId::new(18);
 
 // Pillar 19 (Self-Evolution & Metacognitive Matrix) — hard caps on every
 // personality weight, confirmed 2026-06-22: growth should be natural and
@@ -655,6 +664,48 @@ impl Storable for RosterProfile {
     };
 }
 
+/// Pillar 25 (What Skippy Knows) — one durable, user-visible fact about the
+/// owner, either extracted by the proxy's tight-whitelist fact-extraction
+/// pass (pets, family/relationships, ongoing projects, stated likes/
+/// dislikes, recurring life events — nothing resembling Pillar 19's
+/// Evolution Matrix, which is personality, not facts) or entered directly by
+/// the user. Owner-only, no sharing — same reasoning as RosterProfile, this
+/// was never designed for cross-Principal visibility.
+///
+/// `follow_up_at` is optional: most facts are just standing context (always
+/// injected into /respond); a fact with a value here is instead surfaced as
+/// a one-time gentle nudge once that time has passed, then should be cleared
+/// by the caller (set back to `None` via update_known_fact) so it doesn't
+/// nudge on every single turn forever.
+#[derive(CandidType, Deserialize, Clone, Debug)]
+pub struct KnownFact {
+    pub id: u64,
+    pub owner: Principal,
+    pub fact: String,
+    pub category: Option<String>,
+    pub follow_up_at: Option<u64>,
+    pub created_at: u64,
+}
+
+impl Storable for KnownFact {
+    fn to_bytes(&self) -> Cow<'_, [u8]> {
+        Cow::Owned(Encode!(self).unwrap())
+    }
+
+    fn into_bytes(self) -> Vec<u8> {
+        Encode!(&self).unwrap()
+    }
+
+    fn from_bytes(bytes: Cow<[u8]>) -> Self {
+        Decode!(bytes.as_ref(), Self).unwrap()
+    }
+
+    const BOUND: Bound = Bound::Bounded {
+        max_size: 2_000,
+        is_fixed_size: false,
+    };
+}
+
 /// A Principal's self-set display name and ElevenLabs voice ID (Pillar 3's
 /// dual-voice routing). Not secret, unlike the whitelist — settable at
 /// runtime by each user for themselves, no redeploy needed.
@@ -887,6 +938,11 @@ thread_local! {
     static LONG_TERM_LOG: RefCell<StableBTreeMap<u64, LongTermLogEntry, Memory>> =
         RefCell::new(StableBTreeMap::init(
             MEMORY_MANAGER.with(|m| m.borrow().get(LONG_TERM_LOG_MEMORY_ID)),
+        ));
+
+    static KNOWN_FACTS: RefCell<StableBTreeMap<u64, KnownFact, Memory>> =
+        RefCell::new(StableBTreeMap::init(
+            MEMORY_MANAGER.with(|m| m.borrow().get(KNOWN_FACTS_MEMORY_ID)),
         ));
 
     // TOCTOU guard: the canister suspends at every .await, allowing a concurrent
@@ -2088,4 +2144,63 @@ fn delete_roster_profile(id: u64) {
     let caller = assert_whitelisted();
     assert_roster_owner(caller, id);
     ROSTER_PROFILES.with(|r| r.borrow_mut().remove(&id));
+}
+
+/// Same non-leaking trap shape as `assert_roster_owner` — owner-only, no
+/// sharing.
+fn assert_known_fact_owner(caller: Principal, id: u64) -> KnownFact {
+    match KNOWN_FACTS.with(|f| f.borrow().get(&id)) {
+        Some(fact) if fact.owner == caller => fact,
+        _ => ic_cdk::trap("Known fact not found or not owned by caller."),
+    }
+}
+
+/// Pillar 25 — called either by the proxy's fact-extraction pass (via the
+/// frontend, which owns all canister writes — same "proxy can't act as a
+/// specific end user" constraint as append_turn) or directly by the user
+/// adding a fact themselves through the What Skippy Knows panel.
+#[update]
+fn add_known_fact(fact: String, category: Option<String>, follow_up_at: Option<u64>) -> u64 {
+    let caller = assert_whitelisted();
+    let id = take_next_id();
+    let entry = KnownFact {
+        id,
+        owner: caller,
+        fact,
+        category,
+        follow_up_at,
+        created_at: ic_cdk::api::time(),
+    };
+    KNOWN_FACTS.with(|f| f.borrow_mut().insert(id, entry));
+    id
+}
+
+/// Owner-only, no sharing — same as list_my_roster_profiles.
+#[query]
+fn list_my_known_facts() -> Vec<KnownFact> {
+    let caller = assert_whitelisted();
+    KNOWN_FACTS.with(|f| {
+        f.borrow()
+            .iter()
+            .map(|entry| entry.value().clone())
+            .filter(|fact| fact.owner == caller)
+            .collect()
+    })
+}
+
+#[update]
+fn update_known_fact(id: u64, fact: String, category: Option<String>, follow_up_at: Option<u64>) {
+    let caller = assert_whitelisted();
+    let mut entry = assert_known_fact_owner(caller, id);
+    entry.fact = fact;
+    entry.category = category;
+    entry.follow_up_at = follow_up_at;
+    KNOWN_FACTS.with(|f| f.borrow_mut().insert(id, entry));
+}
+
+#[update]
+fn delete_known_fact(id: u64) {
+    let caller = assert_whitelisted();
+    assert_known_fact_owner(caller, id);
+    KNOWN_FACTS.with(|f| f.borrow_mut().remove(&id));
 }

@@ -149,6 +149,15 @@ type LongTermLogEntry = record {
     timestamp : nat64;
 };
 
+type KnownFact = record {
+    id : nat64;
+    owner : principal;
+    fact : text;
+    category : opt text;
+    follow_up_at : opt nat64;
+    created_at : nat64;
+};
+
 service : (principal, principal, principal) -> {
     "greet": (text) -> (text) query;
 
@@ -233,4 +242,12 @@ service : (principal, principal, principal) -> {
     "list_my_roster_profiles": () -> (vec RosterProfile) query;
     "update_roster_profile": (nat64, text, text, opt text, opt text) -> ();
     "delete_roster_profile": (nat64) -> ();
+
+    // Pillar 25 (What Skippy Knows), 2026-07-20 — visible/editable
+    // relational-continuity facts, separate from Pillar 19's personality
+    // Evolution Matrix.
+    "add_known_fact": (text, opt text, opt nat64) -> (nat64);
+    "list_my_known_facts": () -> (vec KnownFact) query;
+    "update_known_fact": (nat64, text, opt text, opt nat64) -> ();
+    "delete_known_fact": (nat64) -> ();
 }

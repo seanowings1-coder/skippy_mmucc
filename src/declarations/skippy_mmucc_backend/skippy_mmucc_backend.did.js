@@ -89,6 +89,14 @@ export const idlFactory = ({ IDL }) => {
     'summary' : IDL.Text,
     'timestamp' : IDL.Nat64,
   });
+  const KnownFact = IDL.Record({
+    'id' : IDL.Nat64,
+    'owner' : IDL.Principal,
+    'fact' : IDL.Text,
+    'created_at' : IDL.Nat64,
+    'category' : IDL.Opt(IDL.Text),
+    'follow_up_at' : IDL.Opt(IDL.Nat64),
+  });
   const RosterProfile = IDL.Record({
     'id' : IDL.Nat64,
     'owner' : IDL.Principal,
@@ -147,6 +155,11 @@ export const idlFactory = ({ IDL }) => {
         [IDL.Nat64],
         [],
       ),
+    'add_known_fact' : IDL.Func(
+        [IDL.Text, IDL.Opt(IDL.Text), IDL.Opt(IDL.Nat64)],
+        [IDL.Nat64],
+        [],
+      ),
     'add_manual_chunks' : IDL.Func(
         [IDL.Text, IDL.Opt(IDL.Text), IDL.Vec(NewChunk)],
         [IDL.Vec(IDL.Nat64)],
@@ -173,6 +186,7 @@ export const idlFactory = ({ IDL }) => {
     'create_workspace' : IDL.Func([IDL.Text], [IDL.Nat64], []),
     'delete_artifact' : IDL.Func([IDL.Nat64], [], []),
     'delete_contact' : IDL.Func([IDL.Nat64], [], []),
+    'delete_known_fact' : IDL.Func([IDL.Nat64], [], []),
     'delete_manual' : IDL.Func([IDL.Text], [IDL.Nat64], []),
     'delete_manual_section' : IDL.Func([IDL.Nat64], [IDL.Bool], []),
     'delete_roster_profile' : IDL.Func([IDL.Nat64], [], []),
@@ -225,6 +239,7 @@ export const idlFactory = ({ IDL }) => {
         [IDL.Vec(EvolutionLogEntry)],
         ['query'],
       ),
+    'list_my_known_facts' : IDL.Func([], [IDL.Vec(KnownFact)], ['query']),
     'list_my_roster_profiles' : IDL.Func(
         [],
         [IDL.Vec(RosterProfile)],
@@ -298,6 +313,11 @@ export const idlFactory = ({ IDL }) => {
           IDL.Opt(IDL.Vec(IDL.Text)),
           IDL.Bool,
         ],
+        [],
+        [],
+      ),
+    'update_known_fact' : IDL.Func(
+        [IDL.Nat64, IDL.Text, IDL.Opt(IDL.Text), IDL.Opt(IDL.Nat64)],
         [],
         [],
       ),

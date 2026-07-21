@@ -1197,6 +1197,29 @@ app.post('/respond', requireSession, async (req, res) => {
       `answers), proactive_interruption=${evolution.proactive_interruption} (higher = more willing ` +
       `to interject a correction or caveat unprompted).`;
   }
+  // Pillar 25 (What Skippy Knows) — visible/editable relational-continuity
+  // facts, distinct from Pillar 19's personality Evolution Matrix above.
+  // `dueFollowUp` facts (follow_up_at has passed) are framed as a gentle,
+  // optional nudge, never a forced interrogation — the whole point is
+  // natural continuity ("how's the new dog?"), not Skippy interrogating the
+  // Commander about his own tracked data.
+  const knownFactsContext = Array.isArray(req.body?.knownFactsContext)
+    ? req.body.knownFactsContext.filter((f) => f && typeof f.fact === 'string' && f.fact.trim())
+    : [];
+  if (knownFactsContext.length > 0) {
+    const standing = knownFactsContext.filter((f) => !f.dueFollowUp).map((f) => `- ${f.fact.trim()}`);
+    const due = knownFactsContext.filter((f) => f.dueFollowUp).map((f) => `- ${f.fact.trim()}`);
+    if (standing.length > 0) {
+      systemPrompt +=
+        `\n\nThings you already know about the Commander (background context — use naturally if ` +
+        `relevant, never recite this list or announce that you "have a file" on him):\n${standing.join('\n')}`;
+    }
+    if (due.length > 0) {
+      systemPrompt +=
+        `\n\nIf it feels natural in this reply, gently check in on one of these — but only if it ` +
+        `actually fits the conversation, never force it or make it the whole reply:\n${due.join('\n')}`;
+    }
+  }
   // Without this, any "what's the date/today" question is hallucinated by
   // construction — the model has no other source of ground truth for the
   // real current date/time. Confirmed live 2026-06-21: asked "what's the
@@ -2875,6 +2898,119 @@ app.post('/compress-turn', requireSession, async (req, res) => {
     res.json({ compressed });
   } catch (err) {
     console.error('[Skippy] /compress-turn failed — caller keeps the raw text:', err.message);
+    res.status(502).json({ error: err.message });
+  }
+});
+
+// Pillar 25 (What Skippy Knows), 2026-07-20 — a deliberately narrow
+// fact-extraction pass, the safe alternative built after reviewing (and
+// rejecting) a Gemini-authored "Troll Protocol" autonomous memory-harvesting
+// spec. That spec's real problems, all explicitly avoided here: it tagged
+// mistakes/frustration with a "[Leverage]" marker to weaponize later (this
+// prompt has no concept of leverage at all — it either finds a safe-category
+// fact or it doesn't); it ran fully opaque/autonomous with zero user
+// visibility (every fact this produces is user-visible and user-deletable in
+// the What Skippy Knows panel, added via the same add_known_fact call a
+// manual entry uses); and it covertly scored emotional reactions as data
+// (this prompt is instructed to ignore tone/mood entirely — it only looks
+// for plain factual continuity, the "got a new dog, ask about it next week"
+// kind of thing the user actually asked for).
+//
+// Whitelist is intentionally tight: pets, family/relationships, ongoing
+// projects, stated likes/dislikes, recurring life events. Nothing else
+// qualifies, no matter how notable it seems in the moment — conservative by
+// design, since an empty result is harmless and a wrongly-invented or
+// out-of-scope "fact" sitting permanently in the panel is not.
+const FACT_EXTRACTION_SYSTEM_PROMPT = `You are a silent internal fact-extraction utility inside a larger AI system. You are never shown to the end user. You will be given a short slice of a real conversation between "Commander" (the user) and an AI character named "Skippy," plus a list of facts already known about the Commander.
+
+Your ONLY job: look for NEW standing facts about the Commander that belong to one of these categories, and ONLY these:
+- pets (a pet's name, species, a new pet being planned/adopted)
+- family or relationships (names, relationships, notable events involving them)
+- ongoing projects (something the Commander is actively working on outside of this app)
+- stated likes or dislikes (things the Commander has explicitly said they like or hate — not things merely mentioned in passing)
+- recurring life events (something that happens on a schedule or is expected at a specific future time)
+
+Do NOT extract anything else, no matter how interesting it seems — no opinions about the Commander's mood, no mistakes they made, no frustration or reactions, no technical details about their code or work content, no inferred personality traits, nothing that isn't one of the five categories above stated as a plain fact.
+
+Be conservative. If nothing in the conversation slice is a genuinely new fact in one of these categories (or it's already covered by the "already known" list), return an empty array — that is the expected, common result, not a failure.
+
+If a fact implies a natural future check-in point (e.g. "getting a new dog next week," "surgery scheduled in 10 days"), include "follow_up_days" as an integer number of days from now. Otherwise omit it or set it to null.
+
+Respond with ONLY a single JSON object, no markdown fences, no other text, in exactly this shape:
+{"facts": [{"fact": "short plain-English statement", "category": "pets|family|project|preference|recurring_event", "follow_up_days": number or null}]}
+
+If there is nothing new to extract: {"facts": []}`;
+
+app.post('/extract-facts', requireSession, async (req, res) => {
+  const history = Array.isArray(req.body?.history)
+    ? req.body.history
+        .filter((m) => m && typeof m.role === 'string' && typeof m.content === 'string')
+        .map(({ role, content }) => ({ role, content }))
+    : [];
+  const knownFacts = Array.isArray(req.body?.knownFacts)
+    ? req.body.knownFacts.filter((f) => typeof f === 'string')
+    : [];
+  if (history.length === 0) {
+    return res.status(400).json({ error: 'No conversation slice to evaluate.' });
+  }
+  if (!DEEPINFRA_API_KEY) {
+    return res.status(502).json({ error: 'DEEPINFRA_API_KEY is not set.' });
+  }
+
+  const transcript = history.map((m) => `${m.role === 'user' ? 'Commander' : 'Skippy'}: ${m.content}`).join('\n\n');
+  const knownBlock =
+    knownFacts.length > 0
+      ? `Already known about the Commander (do not re-extract these):\n${knownFacts.map((f) => `- ${f}`).join('\n')}\n\n`
+      : '';
+
+  try {
+    const r = await fetch('https://api.deepinfra.com/v1/openai/chat/completions', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${DEEPINFRA_API_KEY}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: DEEPINFRA_MODEL_SNAPPY_FALLBACK,
+        temperature: 0.1,
+        max_tokens: 400,
+        messages: [
+          { role: 'system', content: FACT_EXTRACTION_SYSTEM_PROMPT },
+          { role: 'user', content: `${knownBlock}Conversation slice:\n${transcript}` },
+        ],
+      }),
+    });
+    if (!r.ok) {
+      const errText = await r.text().catch(() => '');
+      throw new Error(`DeepInfra ${r.status}: ${errText}`);
+    }
+    const data = await r.json();
+    const raw = data.choices?.[0]?.message?.content?.trim();
+    if (!raw) throw new Error('Fact extraction returned no content.');
+    const cleaned = raw.replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/i, '').trim();
+    let parsed;
+    try {
+      parsed = JSON.parse(cleaned);
+    } catch (parseErr) {
+      throw new Error(`Fact extraction was not valid JSON: ${parseErr.message}`);
+    }
+    // Defense in depth, same reasoning as this app's other LLM-output
+    // whitelists (e.g. the pushback regex backstopping instruction-following
+    // elsewhere): don't trust the category string just because the model
+    // produced one — only accept it if it's actually in the allowed set.
+    const ALLOWED_CATEGORIES = new Set(['pets', 'family', 'project', 'preference', 'recurring_event']);
+    const facts = Array.isArray(parsed.facts)
+      ? parsed.facts
+          .filter((f) => f && typeof f.fact === 'string' && f.fact.trim() && ALLOWED_CATEGORIES.has(f.category))
+          .map((f) => ({
+            fact: f.fact.trim(),
+            category: f.category,
+            followUpDays:
+              typeof f.follow_up_days === 'number' && Number.isFinite(f.follow_up_days) && f.follow_up_days > 0
+                ? Math.round(f.follow_up_days)
+                : null,
+          }))
+      : [];
+    res.json({ facts });
+  } catch (err) {
+    console.error('[Skippy] /extract-facts failed:', err.message);
     res.status(502).json({ error: err.message });
   }
 });

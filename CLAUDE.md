@@ -99,6 +99,8 @@ Any new field added to a stored struct (`Workspace`, `DocumentSection`, etc.) **
 - **Emergency audio is append-only**: `EMERGENCY_AUDIO` has no delete method — it's potential evidence.
 - **Evolution has no factory reset**: `record_evolution_event` applies signed deltas, clamped to [0.2, 0.95]. The Course Correction feedback loop (in-chat reprimand) and the Critic Loop (archive-time proxy self-critique) are the only correction paths.
 - **Keyword search uses AND logic**: `search_manuals_by_keyword` requires all stems to co-occur in a section, not just one. OR matching produced false "hits" that wrongly suppressed web-search prompts.
+- **Long-term memory (Pillar 24, 2026-07-20)**: `append_turn` used to permanently discard anything trimmed off the 40-message window. It now archives drained messages into `LONG_TERM_LOG` (`MemoryId` 17) instead, via `archive_to_long_term_log`. The Critic Loop's closing-history capture (`#resolveCriticLoop` in App.js) prepends a workspace's long-term log before self-critiquing, so a session that runs past 40 messages isn't invisible to personality evolution.
+- **What Skippy Knows (Pillar 25, 2026-07-20)**: visible/editable relational-continuity facts (`KnownFact`, `MemoryId` 18) — pets, family, ongoing projects, likes/dislikes, recurring events — deliberately separate from Pillar 19's Evolution Matrix (that's personality; this is facts). Populated by the proxy's tight-whitelist `/extract-facts` pass (fire-and-forget, every 4 real turns) or direct manual entry in the frontend panel. Standing facts are always injected into `/respond`'s system prompt; a fact with a `follow_up_at` in the past surfaces once as a gentle nudge, then gets cleared. This is the safe alternative built after reviewing and rejecting a "Troll Protocol" autonomous memory-harvesting spec — no leverage-tagging, no covert emotional-intensity scoring, everything user-visible and user-deletable.
 
 ## Proxy Server (`src/skippy_mmucc_proxy/server.js`)
 
@@ -110,6 +112,7 @@ Express.js server. All routes require the `requireSession` middleware (validates
 | `POST /respond` | Main LLM response — peer fall-forward + cross-tier escalation (everyday/heavy_hitter) or Steel Rain race (tactical/focus) |
 | `POST /project-brief` | Generates a project brief from workspace history |
 | `POST /critic-loop` | Archive-time Critic Loop (self-critique → Evolution Matrix deltas) |
+| `POST /extract-facts` | Tight-whitelist fact extraction for What Skippy Knows (Pillar 25) |
 | `POST /karaoke-offer` | In-character excited ask before performing (one-step before `/karaoke`) |
 | `POST /karaoke` | Full karaoke performance (original lyrics only, no max_tokens cap) |
 | `GET /speak` | Fish Audio TTS synthesis (migrated from ElevenLabs 2026-07-12 — see Planned Migrations) |

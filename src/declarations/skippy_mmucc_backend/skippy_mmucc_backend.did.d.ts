@@ -81,6 +81,14 @@ export interface GeneratedArtifact {
   'chunk_count' : [] | [number],
   'notes' : [] | [string],
 }
+export interface KnownFact {
+  'id' : bigint,
+  'owner' : Principal,
+  'fact' : string,
+  'created_at' : bigint,
+  'category' : [] | [string],
+  'follow_up_at' : [] | [bigint],
+}
 export interface LongTermLogEntry {
   'id' : bigint,
   'content' : string,
@@ -144,6 +152,10 @@ export interface _SERVICE {
     ],
     bigint
   >,
+  'add_known_fact' : ActorMethod<
+    [string, [] | [string], [] | [bigint]],
+    bigint
+  >,
   'add_manual_chunks' : ActorMethod<
     [string, [] | [string], Array<NewChunk>],
     BigUint64Array | bigint[]
@@ -166,6 +178,7 @@ export interface _SERVICE {
   'create_workspace' : ActorMethod<[string], bigint>,
   'delete_artifact' : ActorMethod<[bigint], undefined>,
   'delete_contact' : ActorMethod<[bigint], undefined>,
+  'delete_known_fact' : ActorMethod<[bigint], undefined>,
   'delete_manual' : ActorMethod<[string], bigint>,
   'delete_manual_section' : ActorMethod<[bigint], boolean>,
   'delete_roster_profile' : ActorMethod<[bigint], undefined>,
@@ -192,6 +205,7 @@ export interface _SERVICE {
   'list_my_contacts' : ActorMethod<[], Array<Contact>>,
   'list_my_emergencies' : ActorMethod<[], Array<EmergencyEvent>>,
   'list_my_evolution_log' : ActorMethod<[number], Array<EvolutionLogEntry>>,
+  'list_my_known_facts' : ActorMethod<[], Array<KnownFact>>,
   'list_my_roster_profiles' : ActorMethod<[], Array<RosterProfile>>,
   'list_my_workspaces' : ActorMethod<[], Array<Workspace>>,
   'list_sections_by_manual' : ActorMethod<[string], Array<DocumentSection>>,
@@ -230,6 +244,10 @@ export interface _SERVICE {
       [] | [Array<string>],
       boolean,
     ],
+    undefined
+  >,
+  'update_known_fact' : ActorMethod<
+    [bigint, string, [] | [string], [] | [bigint]],
     undefined
   >,
   'update_roster_profile' : ActorMethod<

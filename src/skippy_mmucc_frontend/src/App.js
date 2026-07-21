@@ -56,6 +56,14 @@ const IDENTITY_PROVIDER =
 // page refresh doesn't keep growing the history payload sent to the proxy.
 const MAX_LOCAL_HISTORY = 40;
 
+// Pillar 25 (What Skippy Knows) — how many real turns pass between
+// fact-extraction attempts (see #recordTurn/#extractFactsInBackground).
+// Deliberately much coarser than the Async Janitor's every-turn compression:
+// this is a deliberate look for new standing facts, not per-turn upkeep, and
+// firing an extra LLM call every single turn would be needless cost for
+// something that changes far less often than reply verbosity does.
+const FACT_EXTRACTION_INTERVAL = 4;
+
 // Safety net for history compressed by the Async Janitor *before* the
 // `compressed` field existed on the backend Message struct (fixed
 // 2026-07-11 — see overwrite_turn_content in lib.rs). Those old turns are
@@ -1090,6 +1098,21 @@ class App {
   rosterProfiles = [];
   activeRosterProfile = null;
   editingRosterId = null;
+  // Pillar 25 (What Skippy Knows), 2026-07-20 — visible/editable relational-
+  // continuity facts (pets, family, ongoing projects, likes/dislikes,
+  // recurring events), separate from the Evolution Matrix's personality
+  // weights above. Populated by both the proxy's tight-whitelist
+  // fact-extraction pass (fire-and-forget, every FACT_EXTRACTION_INTERVAL
+  // turns — see #recordTurn) and direct manual entry through this panel.
+  // Real canister storage from day one, same as Roster/Contacts — no
+  // localStorage phase for this one.
+  knownFacts = [];
+  editingKnownFactId = null;
+  // Counts real turns since the last fact-extraction pass — reset to 0 after
+  // each attempt (success or failure). Deliberately less frequent than the
+  // Async Janitor's every-turn compression: fact extraction is a heavier,
+  // more deliberate look for new standing facts, not per-turn housekeeping.
+  turnsSinceFactExtraction = 0;
   // Pillar 23 (Contacts) — unlike Roster above, this IS real canister data
   // (owner-scoped, optionally shared with the other whitelisted Principal),
   // populated from list_my_contacts() at login, not localStorage.
@@ -1405,6 +1428,7 @@ class App {
       this.backendActor.list_my_artifacts().then((r) => (this.savedArtifacts = r)),
       this.backendActor.list_my_contacts().then((r) => (this.contacts = r)),
       this.backendActor.list_my_roster_profiles().then((r) => (this.rosterProfiles = r)),
+      this.backendActor.list_my_known_facts().then((r) => (this.knownFacts = r)),
       this.backendActor.get_my_persona_profile().then((profileOpt) => {
         const profile = profileOpt[0];
         this.profileName = profile?.name?.[0] || '';
@@ -2127,6 +2151,95 @@ class App {
   #clearActiveRosterProfile = () => {
     this.activeRosterProfile = null;
     this.#render();
+  };
+
+  // Pillar 25 (What Skippy Knows) — manual entry through this panel, same
+  // full-replace-on-edit convention as #saveRosterProfile. `followUpDate`
+  // input is a plain <input type="date">; converted to a nanosecond
+  // timestamp at that date's local midnight, or omitted entirely.
+  #saveKnownFact = async (e) => {
+    e.preventDefault();
+    const form = e.target;
+    const fact = form.elements.factText.value.trim();
+    const category = form.elements.factCategory.value;
+    const followUpDate = form.elements.factFollowUp.value;
+    if (!fact) return;
+    const categoryArg = category ? [category] : [];
+    const followUpArg = followUpDate ? [BigInt(new Date(followUpDate).getTime()) * 1_000_000n] : [];
+    try {
+      if (this.editingKnownFactId !== null) {
+        await this.backendActor.update_known_fact(this.editingKnownFactId, fact, categoryArg, followUpArg);
+        this.editingKnownFactId = null;
+      } else {
+        await this.backendActor.add_known_fact(fact, categoryArg, followUpArg);
+      }
+      this.knownFacts = await this.backendActor.list_my_known_facts();
+      form.reset();
+    } catch (err) {
+      this.statusMessage = `Couldn't save fact: ${extractCanisterTrapMessage(err)}`;
+    }
+    this.#render();
+  };
+
+  #editKnownFact = (id) => {
+    this.editingKnownFactId = id;
+    this.#render();
+  };
+
+  #cancelEditKnownFact = () => {
+    this.editingKnownFactId = null;
+    this.#render();
+  };
+
+  #deleteKnownFact = async (id) => {
+    try {
+      await this.backendActor.delete_known_fact(id);
+      this.knownFacts = this.knownFacts.filter((f) => f.id !== id);
+      if (this.editingKnownFactId === id) {
+        this.editingKnownFactId = null;
+      }
+    } catch (err) {
+      this.statusMessage = `Couldn't delete fact: ${extractCanisterTrapMessage(err)}`;
+    }
+    this.#render();
+  };
+
+  // Fire-and-forget, called from #recordTurn every FACT_EXTRACTION_INTERVAL
+  // turns — a much lighter cadence than the Async Janitor's every-turn
+  // compression, since this is a deliberate look for new standing facts, not
+  // per-turn housekeeping. Sends the last few exchanges plus the current
+  // known-facts list (for dedup) to the proxy's tight-whitelist extractor,
+  // then persists any genuinely new facts via the same add_known_fact call a
+  // manual entry uses. A failure here is silent — never blocks or interrupts
+  // the actual conversation.
+  #extractFactsInBackground = async () => {
+    const recentSlice = this.contextHistory.slice(-8).map(({ role, content }) => ({ role, content }));
+    if (recentSlice.length === 0) return;
+    try {
+      const response = await fetch(`${PROXY_URL}/extract-facts`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Skippy-Session': this.sessionToken },
+        body: JSON.stringify({
+          history: recentSlice,
+          knownFacts: this.knownFacts.map((f) => f.fact),
+        }),
+      });
+      if (!response.ok) return;
+      const { facts } = await response.json();
+      if (!Array.isArray(facts) || facts.length === 0) return;
+      for (const f of facts) {
+        const categoryArg = f.category ? [f.category] : [];
+        const followUpArg =
+          typeof f.followUpDays === 'number' && f.followUpDays > 0
+            ? [BigInt(Date.now() + f.followUpDays * 86_400_000) * 1_000_000n]
+            : [];
+        await this.backendActor.add_known_fact(f.fact, categoryArg, followUpArg);
+      }
+      this.knownFacts = await this.backendActor.list_my_known_facts();
+      this.#render();
+    } catch (err) {
+      console.error('[Skippy] fact extraction failed:', err);
+    }
   };
 
   // Pillar 23 (Contacts) — real canister data, unlike Roster above, so every
@@ -3144,6 +3257,15 @@ class App {
       .catch((err) => {
         console.error('[Skippy] failed to persist conversation turn:', err);
       });
+
+    // Pillar 25 (What Skippy Knows) — much lighter cadence than the Janitor's
+    // every-turn compression above; a deliberate look for new standing facts
+    // every FACT_EXTRACTION_INTERVAL turns, not per-turn housekeeping.
+    this.turnsSinceFactExtraction += 1;
+    if (this.turnsSinceFactExtraction >= FACT_EXTRACTION_INTERVAL) {
+      this.turnsSinceFactExtraction = 0;
+      this.#extractFactsInBackground();
+    }
   }
 
   // Async Janitor (2026-07-10) — kills the conversation-history verbosity
@@ -3848,6 +3970,27 @@ class App {
       }
     }
 
+    // Pillar 25 (What Skippy Knows) — split into standing context (always
+    // sent) vs. due follow-ups (past their follow_up_at). A due follow-up is
+    // cleared right after this turn (fire-and-forget, not awaited — the
+    // reply shouldn't wait on it) so it surfaces as a one-time nudge instead
+    // of nagging on every subsequent turn.
+    const nowNs = BigInt(Date.now()) * 1_000_000n;
+    const knownFactsContext = this.knownFacts.map((f) => ({
+      fact: f.fact,
+      dueFollowUp: Boolean(f.follow_up_at?.[0]) && f.follow_up_at[0] <= nowNs,
+    }));
+    const dueFacts = this.knownFacts.filter((f) => Boolean(f.follow_up_at?.[0]) && f.follow_up_at[0] <= nowNs);
+    for (const f of dueFacts) {
+      this.backendActor
+        .update_known_fact(f.id, f.fact, f.category, [])
+        .then(() => {
+          const local = this.knownFacts.find((k) => k.id === f.id);
+          if (local) local.follow_up_at = [];
+        })
+        .catch((err) => console.error('[Skippy] failed to clear surfaced follow-up:', err));
+    }
+
     try {
       const response = await fetch(`${PROXY_URL}/respond`, {
         method: 'POST',
@@ -3920,6 +4063,8 @@ class App {
           // those should respect Heavy Hitter's own deselections too. Sticky client-side state,
           // sent fresh each turn since /respond has no session memory of its own.
           disabledPeers: { everyday: this.disabledEverydayPeers, heavy_hitter: this.disabledHeavyHitterPeers },
+          // Pillar 25 (What Skippy Knows) — see computation above.
+          knownFactsContext,
         }),
         signal,
       });
@@ -5506,6 +5651,72 @@ class App {
                   <div style="display:flex;gap:0.4em;">
                     <button @click=${() => this.#editRosterProfile(p.id)}>Edit</button>
                     <button @click=${() => this.#deleteRosterProfile(p.id)}>Delete</button>
+                  </div>
+                </li>
+              `,
+            )}
+          </ul>
+        </details>
+
+        <details class="tactical-roster">
+          <summary>What Skippy Knows (${this.knownFacts.length})</summary>
+          <p class="status">
+            Standing facts Skippy naturally weaves into conversation — pets, family, ongoing
+            projects, likes/dislikes, recurring events. Extracted automatically from conversation
+            every few turns, or add one yourself below. Delete anything you don't want remembered.
+            This is separate from the Evolution Matrix above — that's personality, this is facts.
+          </p>
+          ${(() => {
+            const editing = this.editingKnownFactId !== null
+              ? this.knownFacts.find((f) => f.id === this.editingKnownFactId)
+              : null;
+            const editingFollowUpDate = editing?.follow_up_at?.[0]
+              ? new Date(Number(editing.follow_up_at[0] / 1_000_000n)).toISOString().slice(0, 10)
+              : '';
+            return html`
+              <form @submit=${this.#saveKnownFact}>
+                <label>Fact
+                  <input name="factText" type="text" placeholder="Got a new dog, a beagle named Scout" required .value=${editing?.fact ?? ''} />
+                </label>
+                <label>Category
+                  ${(() => {
+                    const currentCategory = editing?.category?.[0] ?? '';
+                    return html`
+                      <select name="factCategory">
+                        <option value="" ?selected=${currentCategory === ''}>(none)</option>
+                        <option value="pets" ?selected=${currentCategory === 'pets'}>Pets</option>
+                        <option value="family" ?selected=${currentCategory === 'family'}>Family/relationships</option>
+                        <option value="project" ?selected=${currentCategory === 'project'}>Ongoing project</option>
+                        <option value="preference" ?selected=${currentCategory === 'preference'}>Like/dislike</option>
+                        <option value="recurring_event" ?selected=${currentCategory === 'recurring_event'}>Recurring event</option>
+                      </select>
+                    `;
+                  })()}
+                </label>
+                <label>Follow up on (optional)
+                  <input name="factFollowUp" type="date" .value=${editingFollowUpDate} />
+                </label>
+                <div style="display:flex;gap:0.5em;margin-top:0.4em;">
+                  <button type="submit">${editing ? 'Save changes' : '+ Add fact'}</button>
+                  ${editing ? html`<button type="button" @click=${this.#cancelEditKnownFact}>Cancel</button>` : ''}
+                </div>
+              </form>
+            `;
+          })()}
+          <ul>
+            ${this.knownFacts.map(
+              (f) => html`
+                <li style="margin:0.5em 0;">
+                  <div>
+                    ${f.fact}
+                    ${f.category?.[0] ? html`<span class="status"> · ${f.category[0]}</span>` : ''}
+                    ${f.follow_up_at?.[0]
+                      ? html`<span class="status"> · follow up ${new Date(Number(f.follow_up_at[0] / 1_000_000n)).toLocaleDateString()}</span>`
+                      : ''}
+                  </div>
+                  <div style="display:flex;gap:0.4em;">
+                    <button @click=${() => this.#editKnownFact(f.id)}>Edit</button>
+                    <button @click=${() => this.#deleteKnownFact(f.id)}>Delete</button>
                   </div>
                 </li>
               `,
