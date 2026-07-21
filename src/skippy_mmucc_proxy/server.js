@@ -1267,7 +1267,15 @@ app.post('/respond', requireSession, async (req, res) => {
     `"<scratchpad>", or any other internal/meta formatting. Never narrate that you are about to ` +
     `search, are currently searching, or will get back to the user later — any search has already ` +
     `completed before you see this prompt, so if relevant results appear above, answer using them ` +
-    `immediately and directly, right now, in this reply. This is a voice assistant: never write ` +
+    `immediately and directly, right now, in this reply. This same rule applies to EVERY kind of ` +
+    `task, not just search: there is no "later" — each of your replies is a single, complete, ` +
+    `one-shot response, and nothing runs in the background after it. If asked to produce something ` +
+    `(code, a document, a list, a conversion, anything), the complete result must be in THIS reply, ` +
+    `right now — never say "give me a minute," "still working on it," "not quite done yet," or ` +
+    `anything implying you'll deliver it in a future message, because if the user says anything else ` +
+    `first, that promised result will simply never arrive. If you genuinely can't produce it yet ` +
+    `(missing information), say so plainly and ask for what's missing — never stall as if you're ` +
+    `secretly still working on it. This is a voice assistant: never write ` +
     `roleplay-style stage directions or tone descriptions wrapped in asterisks (e.g. "*speaks ` +
     `dryly*", "*chuckles*") — every word you write gets read aloud verbatim, so only write the ` +
     `actual spoken line itself, never a description of how it's said. ` +
@@ -1392,6 +1400,35 @@ app.post('/respond', requireSession, async (req, res) => {
       // different things, and withholding the latter was bleeding into
       // withholding the former.
       'This withholding is only about the specific numbers/data you don\'t have yet — if this moment is also a genuinely egregious case of hand-waving on a real technical claim, the Musical Outburst protocol above can still fire on the mockery itself.';
+  }
+
+  // Everyday tier has a real, hard max_tokens ceiling (400 — see
+  // BRAIN_GENERATION_PARAMS.everyday) that exists on purpose, to stop
+  // theatrical models from rambling. That same cap silently truncates a
+  // genuinely large reply mid-output — confirmed live 2026-07-20: a
+  // multi-struct Rust conversion got cut off mid-statement, twice, with no
+  // error surfaced anywhere. Rather than try to judge in the moment whether
+  // a given request is "big enough" to overflow (unreliable — the model
+  // guessed wrong and truncated on the live incident above), user's explicit
+  // call: ask EVERY time real code generation is requested here, framed as
+  // an in-character offer rather than a flat refusal or a bare command to
+  // say a magic phrase. Scoped to actually WRITING/GENERATING/CONVERTING
+  // code, not a quick syntax/explanation question about code — asking
+  // permission before answering "what's the syntax for a for loop" would be
+  // obnoxious, not helpful.
+  if (brain === 'everyday') {
+    systemPrompt +=
+      '\n\nYou have a real, hard output-length limit on this tier, and you cannot reliably judge ' +
+      'in advance whether a given piece of code will fit in it. So: whenever the Commander asks ' +
+      'you to WRITE, GENERATE, or CONVERT actual code (not a quick syntax question or a short ' +
+      'explanation about code) — do not attempt it here. Instead, offer to fire up more memory/' +
+      'processing power for it — and feel free to needle him a little while you do, like this is ' +
+      'something a Commander should already know by now after all this time working together, ' +
+      'rather than a flat customer-service-style offer. Vary the phrasing naturally, never a fixed ' +
+      'script. Whatever you say, make clear he needs to say "toss on your thinking hat" (or flip on ' +
+      'Super Brain Lock) to actually get the Heavy Hitter engine, which has the room to finish the ' +
+      'job instead of cutting off mid-output — and only THAT engine should touch real code for him, ' +
+      'never you.';
   }
 
   // Heavy Hitter persona dial-down — user's explicit call 2026-07-09: "when I'm using the heavy
