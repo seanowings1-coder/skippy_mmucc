@@ -47,6 +47,13 @@ const CONTACTS_MEMORY_ID: MemoryId = MemoryId::new(15);
 // this was never designed with cross-Principal visibility in mind and
 // nothing asked for it. 16 is the next free slot; never renumber/reuse.
 const ROSTER_PROFILES_MEMORY_ID: MemoryId = MemoryId::new(16);
+// Pillar 24 (Long-Term Memory), 2026-07-20 — before this, append_turn's
+// drain() past MAX_HISTORY_MESSAGES silently discarded anything that aged
+// out of the rolling window, with no recovery path (confirmed 2026-07-19:
+// archive_workspace preserves nothing beyond it either). This store catches
+// those messages instead of dropping them. 17 is the next free slot; never
+// renumber/reuse.
+const LONG_TERM_LOG_MEMORY_ID: MemoryId = MemoryId::new(17);
 
 // Pillar 19 (Self-Evolution & Metacognitive Matrix) — hard caps on every
 // personality weight, confirmed 2026-06-22: growth should be natural and
@@ -197,6 +204,47 @@ impl Storable for ConversationHistory {
 
     const BOUND: Bound = Bound::Bounded {
         max_size: MAX_HISTORY_SIZE,
+        is_fixed_size: false,
+    };
+}
+
+/// Pillar 24 (Long-Term Memory) — one message that aged out of a workspace's
+/// 40-message rolling window, preserved instead of discarded. `content` is
+/// whatever the message held at drain time: almost always the Async
+/// Janitor's compressed one-liner (it runs per-turn, well ahead of a message
+/// reaching the back of a 40-deep window), but occasionally the original raw
+/// text if compression hadn't landed yet — either way nothing is lost.
+/// `id` comes from the same global NEXT_ID counter as every other entity
+/// here, so entries read back in insertion (chronological) order via a plain
+/// BTreeMap scan, same pattern as EvolutionLogEntry.
+#[derive(CandidType, Deserialize, Clone, Debug)]
+pub struct LongTermLogEntry {
+    pub id: u64,
+    pub owner: Principal,
+    pub workspace_id: u64,
+    pub role: String,
+    pub content: String,
+    pub timestamp: u64,
+}
+
+impl Storable for LongTermLogEntry {
+    fn to_bytes(&self) -> Cow<'_, [u8]> {
+        Cow::Owned(Encode!(self).unwrap())
+    }
+
+    fn into_bytes(self) -> Vec<u8> {
+        Encode!(&self).unwrap()
+    }
+
+    fn from_bytes(bytes: Cow<[u8]>) -> Self {
+        Decode!(bytes.as_ref(), Self).unwrap()
+    }
+
+    const BOUND: Bound = Bound::Bounded {
+        // Generous enough for a raw uncompressed turn (the occasional case
+        // where the Janitor hadn't compressed it yet at drain time) — most
+        // entries are a compressed one-liner and far smaller than this.
+        max_size: 50_000,
         is_fixed_size: false,
     };
 }
@@ -836,6 +884,11 @@ thread_local! {
             MEMORY_MANAGER.with(|m| m.borrow().get(ROSTER_PROFILES_MEMORY_ID)),
         ));
 
+    static LONG_TERM_LOG: RefCell<StableBTreeMap<u64, LongTermLogEntry, Memory>> =
+        RefCell::new(StableBTreeMap::init(
+            MEMORY_MANAGER.with(|m| m.borrow().get(LONG_TERM_LOG_MEMORY_ID)),
+        ));
+
     // TOCTOU guard: the canister suspends at every .await, allowing a concurrent
     // message (timer fire + manual trigger_fuel_pump) to re-enter pump_frontend_cycles
     // simultaneously. This flag serialises pump invocations; the second caller exits
@@ -1391,6 +1444,10 @@ fn delete_workspace(workspace_id: u64) {
 /// later address this exact assistant message (e.g. the Async Janitor's
 /// background compression pass) without racing "the last message" if
 /// another turn lands before compression finishes. See overwrite_turn_content.
+///
+/// Pillar 24 (2026-07-20): messages trimmed off the front for exceeding
+/// MAX_HISTORY_MESSAGES are archived to LONG_TERM_LOG instead of discarded —
+/// see archive_to_long_term_log and LongTermLogEntry's doc comment.
 #[update]
 fn append_turn(workspace_id: u64, user_text: String, assistant_text: String) -> u64 {
     let caller = assert_whitelisted();
@@ -1404,11 +1461,59 @@ fn append_turn(workspace_id: u64, user_text: String, assistant_text: String) -> 
         history.messages.push(Message { role: "assistant".to_string(), content: assistant_text, timestamp: now, compressed: None });
         if history.messages.len() > MAX_HISTORY_MESSAGES {
             let excess = history.messages.len() - MAX_HISTORY_MESSAGES;
-            history.messages.drain(0..excess);
+            let drained: Vec<Message> = history.messages.drain(0..excess).collect();
+            archive_to_long_term_log(caller, workspace_id, drained);
         }
         h.insert(key, history);
     });
     now
+}
+
+/// Pillar 24 — moves messages aging out of the rolling window into the
+/// unbounded long-term log rather than losing them. Called only from
+/// append_turn, right before the drained messages would otherwise be gone
+/// for good.
+fn archive_to_long_term_log(owner: Principal, workspace_id: u64, messages: Vec<Message>) {
+    LONG_TERM_LOG.with(|log| {
+        let mut log = log.borrow_mut();
+        for msg in messages {
+            let id = take_next_id();
+            log.insert(
+                id,
+                LongTermLogEntry {
+                    id,
+                    owner,
+                    workspace_id,
+                    role: msg.role,
+                    content: msg.content,
+                    timestamp: msg.timestamp,
+                },
+            );
+        }
+    });
+}
+
+/// Pillar 24 — read back one workspace's long-term log, oldest first (the
+/// BTreeMap's natural key order, since `id` comes from the monotonic global
+/// counter). Owner-checked same as get_history — which also means this
+/// traps once the workspace record itself is gone (assert_workspace_owner
+/// needs a live Workspace to check against), so callers must read it BEFORE
+/// delete_workspace removes the record, not after. #resolveCriticLoop
+/// already does this correctly (resolves before delete); a future "browse
+/// what a deleted workspace's long-term log held" feature would need a
+/// different lookup path that doesn't depend on the Workspace record still
+/// existing.
+#[query]
+fn get_long_term_log(workspace_id: u64) -> Vec<LongTermLogEntry> {
+    let caller = assert_whitelisted();
+    assert_workspace_owner(caller, workspace_id);
+    LONG_TERM_LOG.with(|log| {
+        log.borrow()
+            .iter()
+            .map(|entry| entry.value().clone())
+            .filter(|entry| entry.owner == caller && entry.workspace_id == workspace_id)
+            .collect()
+    })
 }
 
 /// Async Janitor support: swaps a previously-stored assistant message's

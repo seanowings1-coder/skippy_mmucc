@@ -23,6 +23,14 @@ export const idlFactory = ({ IDL }) => {
     'compressed' : IDL.Opt(IDL.Bool),
     'timestamp' : IDL.Nat64,
   });
+  const LongTermLogEntry = IDL.Record({
+    'id' : IDL.Nat64,
+    'content' : IDL.Text,
+    'workspace_id' : IDL.Nat64,
+    'owner' : IDL.Principal,
+    'role' : IDL.Text,
+    'timestamp' : IDL.Nat64,
+  });
   const DocumentSection = IDL.Record({
     'id' : IDL.Nat64,
     'title' : IDL.Text,
@@ -181,6 +189,11 @@ export const idlFactory = ({ IDL }) => {
       ),
     'get_cycle_balance' : IDL.Func([], [IDL.Nat64], ['query']),
     'get_history' : IDL.Func([IDL.Nat64], [IDL.Vec(Message)], ['query']),
+    'get_long_term_log' : IDL.Func(
+        [IDL.Nat64],
+        [IDL.Vec(LongTermLogEntry)],
+        ['query'],
+      ),
     'get_manual_section' : IDL.Func(
         [IDL.Nat64],
         [IDL.Opt(DocumentSection)],

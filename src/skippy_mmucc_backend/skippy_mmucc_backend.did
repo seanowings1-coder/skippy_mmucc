@@ -140,6 +140,15 @@ type RosterProfile = record {
     created_at : nat64;
 };
 
+type LongTermLogEntry = record {
+    id : nat64;
+    owner : principal;
+    workspace_id : nat64;
+    role : text;
+    content : text;
+    timestamp : nat64;
+};
+
 service : (principal, principal, principal) -> {
     "greet": (text) -> (text) query;
 
@@ -170,6 +179,10 @@ service : (principal, principal, principal) -> {
     "overwrite_turn_content": (nat64, nat64, text) -> ();
     "get_history": (nat64) -> (vec Message) query;
     "purge_history": (nat64) -> ();
+
+    // Pillar 24 (Long-Term Memory), 2026-07-20 — messages aged out of the
+    // 40-message rolling window land here instead of being discarded.
+    "get_long_term_log": (nat64) -> (vec LongTermLogEntry) query;
 
     "set_persona_profile": (text, text) -> ();
     "get_my_persona_profile": () -> (opt PersonaProfile) query;

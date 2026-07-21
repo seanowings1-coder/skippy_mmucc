@@ -2511,7 +2511,23 @@ class App {
       console.error('[Skippy] mark_critic_loop_resolved failed:', err);
     }
     if (this.feedSkippyPersonality) {
-      this.#runCriticLoop(closingHistory);
+      // Pillar 24 (Long-Term Memory), 2026-07-20: closingHistory alone is
+      // only the live 40-message window — a long working session that blew
+      // past that window has everything earlier permanently trimmed off of
+      // it (see append_turn in lib.rs). Prepend whatever survived to
+      // LONG_TERM_LOG so the Critic Loop isn't blind to a session's earlier
+      // portion just because it ran long. Must be called before
+      // delete_workspace removes the workspace record — both call sites
+      // already await this whole method ahead of that (see
+      // #deleteActiveWorkspaceForever).
+      let fullHistory = closingHistory;
+      try {
+        const longTermEntries = await this.backendActor.get_long_term_log(workspaceId);
+        fullHistory = [...longTermEntries.map(({ role, content }) => ({ role, content })), ...closingHistory];
+      } catch (err) {
+        console.error('[Skippy] get_long_term_log failed, falling back to the live window only:', err);
+      }
+      this.#runCriticLoop(fullHistory);
     }
   };
 

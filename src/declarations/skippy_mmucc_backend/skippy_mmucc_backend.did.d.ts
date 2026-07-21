@@ -81,6 +81,14 @@ export interface GeneratedArtifact {
   'chunk_count' : [] | [number],
   'notes' : [] | [string],
 }
+export interface LongTermLogEntry {
+  'id' : bigint,
+  'content' : string,
+  'workspace_id' : bigint,
+  'owner' : Principal,
+  'role' : string,
+  'timestamp' : bigint,
+}
 export interface Message {
   'content' : string,
   'role' : string,
@@ -169,6 +177,7 @@ export interface _SERVICE {
   >,
   'get_cycle_balance' : ActorMethod<[], bigint>,
   'get_history' : ActorMethod<[bigint], Array<Message>>,
+  'get_long_term_log' : ActorMethod<[bigint], Array<LongTermLogEntry>>,
   'get_manual_section' : ActorMethod<[bigint], [] | [DocumentSection]>,
   'get_my_evolution_profile' : ActorMethod<[], EvolutionProfile>,
   'get_my_persona_profile' : ActorMethod<[], [] | [PersonaProfile]>,
