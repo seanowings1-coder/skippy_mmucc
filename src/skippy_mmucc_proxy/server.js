@@ -238,10 +238,17 @@ const TAVILY_API_KEY = process.env.TAVILY_API_KEY;
 // account exists (per the user's explicit 2026-06-21 instruction).
 // Auth uses API Key (SK...) + secret rather than the master Auth Token —
 // same REST endpoint, Basic Auth username = API Key SID, password = secret.
+// The Fuel Gauge balance check below is the one exception — the Balance API
+// only accepts the master Auth Token, not an API Key.
 const TWILIO_ACCOUNT_SID = process.env.TWILIO_ACCOUNT_SID;
 const TWILIO_API_KEY_SID = process.env.TWILIO_API_KEY_SID;
 const TWILIO_API_KEY_SECRET = process.env.TWILIO_API_KEY_SECRET;
-const TWILIO_FROM_NUMBER = process.env.TWILIO_FROM_NUMBER;
+const TWILIO_AUTH_TOKEN = process.env.TWILIO_AUTH_TOKEN;
+// A2P 10DLC campaign approved 2026-07-22 — sendSms() below sends via this
+// registered Messaging Service SID, not a bare From number, per Twilio's
+// compliant-delivery requirement (a bare From number risks carrier filtering
+// post-approval).
+const TWILIO_MESSAGING_SERVICE_SID = process.env.TWILIO_MESSAGING_SERVICE_SID;
 const EMERGENCY_CONTACT_NUMBERS = (process.env.EMERGENCY_CONTACT_NUMBERS || '')
   .split(',')
   .map((n) => n.trim())
@@ -940,7 +947,7 @@ async function tavilySearch(query) {
 // when Twilio isn't configured yet, so /emergency-dispatch stays fully
 // testable with dummy contact numbers before a real account exists.
 async function sendSms(to, body) {
-  if (!TWILIO_ACCOUNT_SID || !TWILIO_API_KEY_SID || !TWILIO_API_KEY_SECRET || !TWILIO_FROM_NUMBER) {
+  if (!TWILIO_ACCOUNT_SID || !TWILIO_API_KEY_SID || !TWILIO_API_KEY_SECRET || !TWILIO_MESSAGING_SERVICE_SID) {
     console.warn(`[Skippy emergency] Twilio not configured — SMS not sent to ${to}: "${body}"`);
     return { skipped: true };
   }
@@ -953,7 +960,7 @@ async function sendSms(to, body) {
         Authorization: `Basic ${auth}`,
         'Content-Type': 'application/x-www-form-urlencoded',
       },
-      body: new URLSearchParams({ To: to, From: TWILIO_FROM_NUMBER, Body: body }),
+      body: new URLSearchParams({ To: to, MessagingServiceSid: TWILIO_MESSAGING_SERVICE_SID, Body: body }),
     },
   );
   if (!response.ok) {
@@ -3372,9 +3379,11 @@ app.get('/api/fuel', requireSession, async (req, res) => {
     }
   }
 
-  if (TWILIO_ACCOUNT_SID && TWILIO_API_KEY_SID && TWILIO_API_KEY_SECRET) {
+  if (TWILIO_ACCOUNT_SID && TWILIO_AUTH_TOKEN) {
     try {
-      const twAuth = Buffer.from(`${TWILIO_API_KEY_SID}:${TWILIO_API_KEY_SECRET}`).toString('base64');
+      // Balance API requires the master Auth Token — the API Key used for
+      // sendSms() above returns 401 here.
+      const twAuth = Buffer.from(`${TWILIO_ACCOUNT_SID}:${TWILIO_AUTH_TOKEN}`).toString('base64');
       const twResponse = await fetch(
         `https://api.twilio.com/2010-04-01/Accounts/${TWILIO_ACCOUNT_SID}/Balance.json`,
         { headers: { Authorization: `Basic ${twAuth}` } },
