@@ -189,6 +189,7 @@ DEEPINFRA_MODEL_SNAPPY=        # defaults to Sao10K/L3.1-70B-Euryale-v2.2
 DEEPINFRA_MODEL_SNAPPY_FALLBACK= # defaults to deepseek-ai/DeepSeek-V4-Flash
 DEEPINFRA_MODEL_SUPERBRAIN=    # defaults to deepseek-ai/DeepSeek-V4-Pro
 DEEPINFRA_MODEL_TACTICAL=      # defaults to deepseek-ai/DeepSeek-V4-Flash — Steel Rain race entrant
+DEEPINFRA_EMBEDDING_MODEL=     # defaults to BAAI/bge-large-en-v1.5 — /embed's primary, 1024-dim
 ```
 
 ## Project Blueprint
@@ -229,9 +230,11 @@ Replacing OpenRouter with DeepInfra due to 503 reliability issues. `DEEPINFRA_AP
 
 | Tier | Peers (fall-forward order) | On total failure |
 |---|---|---|
-| Everyday ("Snappy") | Euryale 70B (DeepInfra) → DeepSeek V4 Flash (DeepInfra) → Dolphin Venice, paid (OpenRouter) | Escalate to Heavy Hitter |
-| Heavy Hitter ("Super Brain") | DeepSeek V4 Pro (DeepInfra) → Claude Sonnet 4.6 (OpenRouter) → Hermes 4 405B (OpenRouter) | Hard error — top of the ladder, no further fallback |
+| Everyday ("Snappy") | Euryale 70B (DeepInfra) → Hermes 3 70B (DeepInfra) → DeepSeek V4 Flash (DeepInfra) | Escalate to Heavy Hitter |
+| Heavy Hitter ("Super Brain") | Claude Sonnet 5 (DeepInfra) → Kimi K2.7 Code (DeepInfra) → DeepSeek V4 Pro (DeepInfra) | Hard error — top of the ladder, no further fallback |
 | Steel Rain (tactical/focus) | DeepSeek V4 Flash (DeepInfra) **raced against** Claude Haiku (OpenRouter), not sequenced — see "Steel Rain / tactical race" above. Deliberately NOT part of the everyday↔heavy_hitter ladder; only entered by the trigger phrase. | Falls through to the old sequential Sonnet→Haiku→free→paid cascade as true last resort |
+
+**Reordered again 2026-07-16**: both ladders are now 100% DeepInfra (Claude Sonnet 5 moved to Heavy Hitter primary, upgraded from 4.6 and off OpenRouter now that DeepInfra hosts Anthropic models directly at official pricing) — OpenRouter is reserved exclusively for the Steel Rain Haiku racer above, per the user's explicit "day-to-day is DeepInfra, OpenRouter is Steel Rain's job" call. The table above reflects this current state, not the original 2026-07-09 design.
 
 All peers confirmed to actually exist via each provider's live `/models` listing before being hardcoded (2026-07-09) — this project's standing discipline since the Aurora-XL-v3.14 fabrication incident. `paidTier`/`brainDowngrade` were re-purposed again: every peer in both ladders is paid by design (no free-tier peer anywhere in either list — the OpenRouter free tier hit a hard rate wall during this same session's karaoke testing), so `paidTier` now means "didn't come from the very first, fastest-expected peer," and `brainDowngrade` only fires on a genuine cross-tier escalation (within-tier peer fallback is not a downgrade — the peers are meant to be comparably good, not a ladder).
 
@@ -240,8 +243,11 @@ Claude Sonnet stays in the Heavy Hitter rotation *with its guardrails intact, de
 Heavy Hitter also gets a dedicated persona dial-down in the system prompt (applies regardless of `mode`): ~90-95% direct task-focused answer, minimal Skippy personality — "when I'm coding I really don't have time for a skippy being an ass." Professional mode ("be nice mode") was tuned the same session to allow a little real attitude/light sarcasm rather than near-zero — the hard line is still no mockery/insults/condescension toward the user, not zero personality.
 
 - DeepInfra uses the same OpenAI-compatible endpoint shape as OpenRouter, just a different base URL: `https://api.deepinfra.com/v1/openai/chat/completions`.
-- Env vars: `DEEPINFRA_API_KEY`, `DEEPINFRA_MODEL_SNAPPY`, `DEEPINFRA_MODEL_SNAPPY_FALLBACK`, `DEEPINFRA_MODEL_SUPERBRAIN`, `DEEPINFRA_MODEL_TACTICAL` — see "Required .env variables" above.
-- **Not yet done** (next pass): `/karaoke`, `/karaoke-offer`, `/project-brief`, `/critic-loop`, and the `/embed` embeddings call are still OpenRouter-only, on the old `EVERYDAY_CASCADE` array (kept — still actively used by those routes, not dead code even though `/respond` no longer uses it for everyday).
+- Env vars: `DEEPINFRA_API_KEY`, `DEEPINFRA_MODEL_SNAPPY`, `DEEPINFRA_MODEL_SNAPPY_FALLBACK`, `DEEPINFRA_MODEL_SUPERBRAIN`, `DEEPINFRA_MODEL_TACTICAL`, `DEEPINFRA_EMBEDDING_MODEL` — see "Required .env variables" above.
+
+**`/karaoke`, `/karaoke-offer`, `/project-brief`, `/critic-loop`, `/embed` migrated 2026-07-21** (was the last "not yet done" gap — all five were still 100% OpenRouter, and `/project-brief`/`/critic-loop` had no fallback at all, just one single call). `/karaoke` and `/karaoke-offer` now use `EVERYDAY_PEERS` (Euryale 70B → DeepSeek V4 Flash — live-tested first specifically against karaoke's "repeat the chorus verbatim" instruction, 5/6 clean each, since that exact capability gap is what ruled out Lunaris 8B originally); `/project-brief` and `/critic-loop` now use `HEAVY_HITTER_PEERS` (Claude Sonnet 5 → Kimi K2.7 Code). All four keep the old `EVERYDAY_CASCADE[0]`/`OPENROUTER_MODEL_HEAVY_HITTER` (Dolphin / Claude Sonnet 4.6) as a genuine last resort only, not a first-line fallback — `EVERYDAY_CASCADE` indices `[1]`-`[6]` are no longer referenced anywhere, left in place as a historical record rather than deleted.
+
+`/embed` is a deliberately different shape: DeepInfra's `BAAI/bge-large-en-v1.5` (1024-dim, live-verified) is now primary with **no per-call fallback** to OpenRouter — an embedding is permanent comparison data, not a stateless chat reply, so silently mixing vectors from two different embedding models into the same RAG corpus would put queries and stored chunks in different vector spaces without anyone knowing. OpenRouter only serves as a whole-system fallback when `DEEPINFRA_API_KEY` isn't set at all. No corpus re-embed was needed for this migration — the RAG corpus was empty/nothing-worth-preserving at migration time, confirmed with the user before proceeding; a future non-empty corpus switching embedding models WOULD need every existing section re-embedded through the new model, not just a config change.
 
 ### TTS → Fish Audio — SHIPPED 2026-07-12, live-tested and confirmed working
 Replaced ElevenLabs with Fish Audio (`s2-pro` model) in `/speak` to reduce cost. `POST https://api.fish.audio/v1/tts`, `Authorization: Bearer $FISH_AUDIO_API_KEY`, `model: s2-pro` header, body `{ text, reference_id: voiceId, format: 'mp3' }` — response is a raw MP3 stream, same shape as the old ElevenLabs call, so the existing `Readable.fromWeb(...).pipe(res)` piping needed no changes. Both `requireSession`/`speakRequireSession`'s per-Principal `voiceId` fallback now default to `FISH_AUDIO_VOICE_ID` instead of `ELEVENLABS_VOICE_ID`. Verified against the real API (402 insufficient-credit before the account had funds, then a genuine 200 + playable MP3) before shipping. Committed `skippy_mmucc` `084f409` / `Skippy-proxy` `56aa204`, pushed, confirmed live via Railway deploy log and a real in-app voice test.

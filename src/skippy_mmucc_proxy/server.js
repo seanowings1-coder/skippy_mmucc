@@ -79,6 +79,11 @@ const FISH_AUDIO_SINGING_VOICE_ID = process.env.FISH_AUDIO_SINGING_VOICE_ID;
 // brainDowngrade fires on first paid tier. paidTier lights the amber dot.
 // 404 "No endpoints found" = model offline. 429 = rate-limited. Either triggers next tier.
 // Override any slot via env vars; defaults cover the full cascade without .env changes.
+// 2026-07-21: /karaoke, /karaoke-offer, /project-brief, /critic-loop migrated to
+// DeepInfra-primary (see EVERYDAY_PEERS/HEAVY_HITTER_PEERS below) — this array's
+// index [0] (Dolphin) is still live, kept as those routes' true last-resort
+// fallback. Indices [1]-[6] are no longer referenced anywhere; left in place as
+// a historical record of the pre-DeepInfra cascade rather than deleted.
 const EVERYDAY_CASCADE = [
   { label: 'Dolphin Venice (free)', model: process.env.OPENROUTER_MODEL       || 'cognitivecomputations/dolphin-mistral-24b-venice-edition:free', paid: false },
   { label: 'Llama 3.3 70B (free)', model: process.env.OPENROUTER_MODEL_FREE2  || 'meta-llama/llama-3.3-70b-instruct:free',                        paid: false },
@@ -208,6 +213,16 @@ const STEEL_RAIN_PEERS = [
 const OPENROUTER_EMBEDDING_MODEL =
   process.env.OPENROUTER_EMBEDDING_MODEL || 'openai/text-embedding-3-small';
 const EMBEDDING_DIMENSIONS = 512;
+// DeepInfra migration, 2026-07-21 — verified live against the real API
+// before hardcoding (this project's standing discipline since the
+// Aurora-XL fabrication incident): BAAI/bge-large-en-v1.5 is a real,
+// working, OpenAI-compatible embeddings endpoint on DeepInfra, confirmed via
+// a direct test call. It returns a fixed 1024-dim vector — no `dimensions`
+// truncation param like OpenAI's matryoshka-capable models, so
+// EMBEDDING_DIMENSIONS above is only meaningful for the OpenRouter fallback
+// path now.
+const DEEPINFRA_EMBEDDING_MODEL =
+  process.env.DEEPINFRA_EMBEDDING_MODEL || 'BAAI/bge-large-en-v1.5';
 
 // Tavily (Pillar 6's Steel Rain / Dumbass Web Loop) — a fixed, trusted
 // third-party search endpoint, never an arbitrary user/LLM-supplied URL, so
@@ -626,7 +641,41 @@ function systemPromptFor(mode, brain) {
 
 // Shared by /embed (per-turn query embedding) and /chunk-and-embed (Neo Skin
 // document ingestion) — one OpenRouter call handles the whole batch either way.
+// DeepInfra migration, 2026-07-21 — primary now DeepInfra's BGE-large
+// (verified live, see DEEPINFRA_EMBEDDING_MODEL above), OpenRouter kept only
+// as a WHOLE-SYSTEM fallback when DEEPINFRA_API_KEY isn't set at all — never
+// a per-call fallback on a transient DeepInfra failure. This is deliberately
+// different from every other DeepInfra->OpenRouter fallback in this file:
+// a chat reply is stateless, but an embedding is permanent, comparison-only
+// data — silently mixing vectors from two different embedding models into
+// the same RAG corpus would put query vectors and stored vectors in
+// different vector spaces without anyone knowing, quietly degrading search
+// accuracy exactly like the bug this design avoids. If DeepInfra genuinely
+// fails mid-request, this throws rather than silently falling back to a
+// different model's vector space.
 async function embedTexts(texts) {
+  if (DEEPINFRA_API_KEY) {
+    const response = await fetch('https://api.deepinfra.com/v1/openai/embeddings', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${DEEPINFRA_API_KEY}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        model: DEEPINFRA_EMBEDDING_MODEL,
+        input: texts,
+      }),
+    });
+    if (!response.ok) {
+      const detail = await response.text();
+      throw new Error(`DeepInfra embeddings error: ${response.status} ${detail}`);
+    }
+    const data = await response.json();
+    return data.data.map((d) => d.embedding);
+  }
+  // Inert-but-safe fallback, same pattern as everywhere else DeepInfra is
+  // optional in this app: no key set at all means the whole embedding
+  // pipeline stays on OpenRouter, not a mid-corpus mix of two models.
   const response = await fetch('https://openrouter.ai/api/v1/embeddings', {
     method: 'POST',
     headers: {
@@ -2072,8 +2121,8 @@ app.post('/project-brief', requireSession, async (req, res) => {
   if (history.length === 0) {
     return res.status(400).json({ error: 'No conversation history to summarize.' });
   }
-  if (!OPENROUTER_API_KEY) {
-    return res.status(502).json({ error: 'OPENROUTER_API_KEY is not set.' });
+  if (!DEEPINFRA_API_KEY && !OPENROUTER_API_KEY) {
+    return res.status(502).json({ error: 'Neither DEEPINFRA_API_KEY nor OPENROUTER_API_KEY is set.' });
   }
 
   const title = typeof req.body?.title === 'string' ? req.body.title : 'Workspace';
@@ -2108,19 +2157,29 @@ app.post('/project-brief', requireSession, async (req, res) => {
   });
   req.on('error', () => {});
 
-  try {
-    const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+  const briefMessages = [
+    { role: 'system', content: briefSystemPrompt },
+    { role: 'user', content: `Workspace: ${title}\n\n${transcript}` },
+  ];
+  // Migrated to DeepInfra 2026-07-21 (was single-shot OpenRouter with zero
+  // fallback) — same primary Heavy Hitter peers /respond uses (see
+  // HEAVY_HITTER_PEERS above), OpenRouter kept only as a true last resort,
+  // not the everyday path. This route now has a real fallback for the first
+  // time, not just a provider swap.
+  const callDeepInfra = (model) =>
+    fetch('https://api.deepinfra.com/v1/openai/chat/completions', {
       method: 'POST',
-      headers: {
-        Authorization: `Bearer ${OPENROUTER_API_KEY}`,
-        'Content-Type': 'application/json',
-      },
+      headers: { Authorization: `Bearer ${DEEPINFRA_API_KEY}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model, messages: briefMessages, max_tokens: 4096 }),
+      signal: upstreamAbort.signal,
+    });
+  const callOpenRouter = () =>
+    fetch('https://openrouter.ai/api/v1/chat/completions', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${OPENROUTER_API_KEY}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({
         model: BRAIN_MODELS.heavy_hitter,
-        messages: [
-          { role: 'system', content: briefSystemPrompt },
-          { role: 'user', content: `Workspace: ${title}\n\n${transcript}` },
-        ],
+        messages: briefMessages,
         // Omitting max_tokens lets OpenRouter default to the model's absolute
         // max (65536), which the account's credit balance can't cover — that
         // caused a 402 on every single call (confirmed live 2026-07-07). A
@@ -2129,19 +2188,39 @@ app.post('/project-brief', requireSession, async (req, res) => {
       }),
       signal: upstreamAbort.signal,
     });
+
+  try {
+    let response, providerLabel;
+    if (DEEPINFRA_API_KEY) {
+      response = await callDeepInfra(HEAVY_HITTER_PEERS[0].model);
+      providerLabel = HEAVY_HITTER_PEERS[0].label;
+      if (!response.ok && HEAVY_HITTER_PEERS[1]) {
+        console.warn(`[Skippy/project-brief] ${providerLabel} failed — trying ${HEAVY_HITTER_PEERS[1].label}`);
+        response = await callDeepInfra(HEAVY_HITTER_PEERS[1].model);
+        providerLabel = HEAVY_HITTER_PEERS[1].label;
+      }
+      if (!response.ok && OPENROUTER_API_KEY) {
+        console.warn(`[Skippy/project-brief] DeepInfra exhausted — true last resort: OpenRouter`);
+        response = await callOpenRouter();
+        providerLabel = 'OpenRouter (last resort)';
+      }
+    } else {
+      response = await callOpenRouter();
+      providerLabel = 'OpenRouter (no DeepInfra key)';
+    }
     if (!response.ok) {
       const detail = await response.text();
-      return res.status(502).json({ error: `OpenRouter error: ${response.status} ${detail}` });
+      return res.status(502).json({ error: `${providerLabel} error: ${response.status} ${detail}` });
     }
     const data = await response.json();
     const brief = data.choices?.[0]?.message?.content;
     if (!brief) {
-      return res.status(502).json({ error: 'OpenRouter returned no brief.' });
+      return res.status(502).json({ error: `${providerLabel} returned no brief.` });
     }
     res.json({ brief: stripLeakedFormatting(brief) });
   } catch (err) {
     if (err.name === 'AbortError') return;
-    res.status(502).json({ error: `Failed to reach OpenRouter: ${err.message}` });
+    res.status(502).json({ error: `Failed to reach the brief model: ${err.message}` });
   }
 });
 
@@ -2166,8 +2245,8 @@ app.post('/critic-loop', requireSession, async (req, res) => {
   if (history.length === 0) {
     return res.status(400).json({ error: 'No conversation history to evaluate.' });
   }
-  if (!OPENROUTER_API_KEY) {
-    return res.status(502).json({ error: 'OPENROUTER_API_KEY is not set.' });
+  if (!DEEPINFRA_API_KEY && !OPENROUTER_API_KEY) {
+    return res.status(502).json({ error: 'Neither DEEPINFRA_API_KEY nor OPENROUTER_API_KEY is set.' });
   }
 
   const transcript = history
@@ -2206,33 +2285,60 @@ app.post('/critic-loop', requireSession, async (req, res) => {
   });
   req.on('error', () => {});
 
-  try {
-    const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+  const criticMessages = [
+    { role: 'system', content: criticSystemPrompt },
+    { role: 'user', content: transcript },
+  ];
+  // Migrated to DeepInfra 2026-07-21, same shape as /project-brief above —
+  // same Heavy Hitter peers, OpenRouter kept only as true last resort.
+  const callDeepInfra = (model) =>
+    fetch('https://api.deepinfra.com/v1/openai/chat/completions', {
       method: 'POST',
-      headers: {
-        Authorization: `Bearer ${OPENROUTER_API_KEY}`,
-        'Content-Type': 'application/json',
-      },
+      headers: { Authorization: `Bearer ${DEEPINFRA_API_KEY}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model, messages: criticMessages, max_tokens: 600 }),
+      signal: upstreamAbort.signal,
+    });
+  const callOpenRouter = () =>
+    fetch('https://openrouter.ai/api/v1/chat/completions', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${OPENROUTER_API_KEY}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({
         model: BRAIN_MODELS.heavy_hitter,
-        messages: [
-          { role: 'system', content: criticSystemPrompt },
-          { role: 'user', content: transcript },
-        ],
+        messages: criticMessages,
         // Same omitted-max_tokens 402 bug as /project-brief above — the
         // critic's output is just a small JSON object, doesn't need much.
         max_tokens: 600,
       }),
       signal: upstreamAbort.signal,
     });
+
+  try {
+    let response, providerLabel;
+    if (DEEPINFRA_API_KEY) {
+      response = await callDeepInfra(HEAVY_HITTER_PEERS[0].model);
+      providerLabel = HEAVY_HITTER_PEERS[0].label;
+      if (!response.ok && HEAVY_HITTER_PEERS[1]) {
+        console.warn(`[Skippy/critic-loop] ${providerLabel} failed — trying ${HEAVY_HITTER_PEERS[1].label}`);
+        response = await callDeepInfra(HEAVY_HITTER_PEERS[1].model);
+        providerLabel = HEAVY_HITTER_PEERS[1].label;
+      }
+      if (!response.ok && OPENROUTER_API_KEY) {
+        console.warn(`[Skippy/critic-loop] DeepInfra exhausted — true last resort: OpenRouter`);
+        response = await callOpenRouter();
+        providerLabel = 'OpenRouter (last resort)';
+      }
+    } else {
+      response = await callOpenRouter();
+      providerLabel = 'OpenRouter (no DeepInfra key)';
+    }
     if (!response.ok) {
       const detail = await response.text();
-      return res.status(502).json({ error: `OpenRouter error: ${response.status} ${detail}` });
+      return res.status(502).json({ error: `${providerLabel} error: ${response.status} ${detail}` });
     }
     const data = await response.json();
     const raw = data.choices?.[0]?.message?.content;
     if (!raw) {
-      return res.status(502).json({ error: 'OpenRouter returned no self-critique.' });
+      return res.status(502).json({ error: `${providerLabel} returned no self-critique.` });
     }
     // Defensive: strip a ```json fence if the model wraps its output anyway,
     // despite being told not to — same "models don't always comply with
@@ -2256,7 +2362,7 @@ app.post('/critic-loop', requireSession, async (req, res) => {
     });
   } catch (err) {
     if (err.name === 'AbortError') return;
-    res.status(502).json({ error: `Failed to reach OpenRouter: ${err.message}` });
+    res.status(502).json({ error: `Failed to reach the critic model: ${err.message}` });
   }
 });
 
@@ -2464,7 +2570,9 @@ We'll keep on chasing every sunrise till the sky runs dry!
 FINAL REMINDER, THE #1 WAY SONGS RUN TOO LONG: every time you reach a spot where the chorus should recur, you MUST paste the EXACT SAME chorus lines you already wrote — character for character, not new lines that merely feel chorus-like. If you notice yourself composing fresh lyrics for what should be a chorus repeat, stop and go back and copy the original chorus verbatim instead. A song with real verbatim repeats is naturally shorter to sing than one where every section is unique content — this is not just a rhyme-scheme detail, it is how the song stays a reasonable length.`;
 
 app.post('/karaoke-offer', requireSession, async (req, res) => {
-  if (!OPENROUTER_API_KEY) return res.status(502).json({ error: 'OPENROUTER_API_KEY is not set.' });
+  if (!DEEPINFRA_API_KEY && !OPENROUTER_API_KEY) {
+    return res.status(502).json({ error: 'Neither DEEPINFRA_API_KEY nor OPENROUTER_API_KEY is set.' });
+  }
   const { mode } = req.body || {};
   // Use the persona system prompt so the offer is in-character, but with a
   // neutral synthetic user message — NOT the literal "karaoke time" that caused
@@ -2481,41 +2589,50 @@ app.post('/karaoke-offer', requireSession, async (req, res) => {
   req.on('close', () => { process.nextTick(() => { try { upstreamAbort.abort(); } catch {} }); });
   req.on('error', () => {});
 
-  const callOffer = (model) => fetch('https://openrouter.ai/api/v1/chat/completions', {
-    method: 'POST',
-    headers: { Authorization: `Bearer ${OPENROUTER_API_KEY}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ model, ...BRAIN_GENERATION_PARAMS.everyday, messages: offerMessages }),
-    signal: upstreamAbort.signal,
-  });
+  // Migrated to DeepInfra 2026-07-21 — same EVERYDAY_PEERS /respond uses
+  // (Euryale 70B, then DeepSeek V4 Flash), OpenRouter's Dolphin kept as true
+  // last resort (proven capable for this persona task, see the /karaoke
+  // cascade comment below). Any failure (not just 404/429) falls through —
+  // unlike OpenRouter's free/paid split, DeepInfra doesn't have a rate-limit
+  // shape worth special-casing here.
+  const callDeepInfra = (model) =>
+    fetch('https://api.deepinfra.com/v1/openai/chat/completions', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${DEEPINFRA_API_KEY}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model, ...BRAIN_GENERATION_PARAMS.everyday, messages: offerMessages }),
+      signal: upstreamAbort.signal,
+    });
+  const callOpenRouter = (model) =>
+    fetch('https://openrouter.ai/api/v1/chat/completions', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${OPENROUTER_API_KEY}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model, ...BRAIN_GENERATION_PARAMS.everyday, messages: offerMessages }),
+      signal: upstreamAbort.signal,
+    });
 
   try {
-    let activeModel = BRAIN_MODELS.everyday;
-    let response = await callOffer(activeModel);
-
-    if (!response.ok && (response.status === 404 || response.status === 429)) {
-      const errText = await response.text();
-      if (response.status === 429 || errText.includes('No endpoints found')) {
-        console.warn(`[Skippy/karaoke-offer] ${activeModel} rate-limited — trying paid tier`);
-        activeModel = EVERYDAY_CASCADE[3].model;
-        response = await callOffer(activeModel);
-      } else {
-        return res.status(502).json({ error: `OpenRouter error: ${response.status} ${errText}` });
+    let response, providerLabel;
+    if (DEEPINFRA_API_KEY) {
+      response = await callDeepInfra(EVERYDAY_PEERS[0].model);
+      providerLabel = EVERYDAY_PEERS[0].label;
+      if (!response.ok && EVERYDAY_PEERS[2]) {
+        console.warn(`[Skippy/karaoke-offer] ${providerLabel} failed — trying ${EVERYDAY_PEERS[2].label}`);
+        response = await callDeepInfra(EVERYDAY_PEERS[2].model);
+        providerLabel = EVERYDAY_PEERS[2].label;
       }
-    }
-    if (!response.ok && (response.status === 404 || response.status === 429)) {
-      console.warn(`[Skippy/karaoke-offer] paid tier rate-limited — trying free fallback`);
-      activeModel = EVERYDAY_CASCADE[1].model;
-      response = await callOffer(activeModel);
-    }
-    if (!response.ok && (response.status === 404 || response.status === 429)) {
-      console.warn(`[Skippy/karaoke-offer] free fallback rate-limited — trying paid fallback`);
-      activeModel = EVERYDAY_CASCADE[4].model;
-      response = await callOffer(activeModel);
+      if (!response.ok && OPENROUTER_API_KEY) {
+        console.warn(`[Skippy/karaoke-offer] DeepInfra exhausted — true last resort: OpenRouter`);
+        response = await callOpenRouter(BRAIN_MODELS.everyday);
+        providerLabel = 'OpenRouter (last resort)';
+      }
+    } else {
+      response = await callOpenRouter(BRAIN_MODELS.everyday);
+      providerLabel = 'OpenRouter (no DeepInfra key)';
     }
 
     if (!response.ok) {
       const detail = await response.text();
-      return res.status(502).json({ error: `OpenRouter error: ${response.status} ${detail}` });
+      return res.status(502).json({ error: `${providerLabel} error: ${response.status} ${detail}` });
     }
     const data = await response.json();
     const raw = data.choices?.[0]?.message?.content;
@@ -2523,13 +2640,13 @@ app.post('/karaoke-offer', requireSession, async (req, res) => {
     res.json({ offer: stripLeakedFormatting(raw) });
   } catch (err) {
     if (err.name === 'AbortError') return;
-    res.status(502).json({ error: `Failed to reach OpenRouter: ${err.message}` });
+    res.status(502).json({ error: `Failed to reach the offer model: ${err.message}` });
   }
 });
 
 app.post('/karaoke', requireSession, async (req, res) => {
-  if (!OPENROUTER_API_KEY) {
-    return res.status(502).json({ error: 'OPENROUTER_API_KEY is not set.' });
+  if (!DEEPINFRA_API_KEY && !OPENROUTER_API_KEY) {
+    return res.status(502).json({ error: 'Neither DEEPINFRA_API_KEY nor OPENROUTER_API_KEY is set.' });
   }
   const upstreamAbort = new AbortController();
   req.on('close', () => {
@@ -2589,79 +2706,82 @@ app.post('/karaoke', requireSession, async (req, res) => {
       { role: 'system', content: KARAOKE_SYSTEM_PROMPT },
       { role: 'user', content: karaokeUserMessage },
     ];
-    const callKaraoke = (model) =>
+    const karaokeGenParams = { max_tokens: 600, temperature: 0.85, repetition_penalty: 1.15 };
+    // Explicit ceiling (not omitted) — confirmed 2026-07-06 that relying on
+    // no max_tokens at all still truncated full songs, likely an
+    // OpenRouter/provider default kicking in when the param is absent.
+    // Confirmed live 2026-07-08 (two separate failure modes, same night):
+    // (1) a weak cascade-fallback model degenerated into repeating the
+    // same chorus/hook block verbatim dozens of times — fixed with
+    // repetition_penalty. (2) A DIFFERENT weak fallback later went the
+    // opposite direction: no temperature was ever set (so it ran on
+    // whatever the model's own default is, often 1.0+), and combined
+    // with a still-generous token ceiling and poor instruction-following,
+    // it drifted into a long, incoherent, structure-ignoring ramble about
+    // AI singularity/sentience that even leaked a stray code fragment
+    // ('=d=len("HISTORY")') into the lyrics — the HARD STOP instruction
+    // never engaged because it just kept generating novel content
+    // instead of looping. temperature reins in that drift; max_tokens
+    // cut further (900 -> 600, still comfortably more than the ~27-line
+    // template needs) bounds worst-case length harder regardless.
+    const callDeepInfra = (model) =>
+      fetch('https://api.deepinfra.com/v1/openai/chat/completions', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${DEEPINFRA_API_KEY}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model, messages: karaokeMessages, ...karaokeGenParams }),
+        signal: upstreamAbort.signal,
+      });
+    const callOpenRouter = (model) =>
       fetch('https://openrouter.ai/api/v1/chat/completions', {
         method: 'POST',
         headers: { Authorization: `Bearer ${OPENROUTER_API_KEY}`, 'Content-Type': 'application/json' },
-        // Explicit ceiling (not omitted) — confirmed 2026-07-06 that relying on
-        // no max_tokens at all still truncated full songs, likely an
-        // OpenRouter/provider default kicking in when the param is absent.
-        // Confirmed live 2026-07-08 (two separate failure modes, same night):
-        // (1) a weak cascade-fallback model degenerated into repeating the
-        // same chorus/hook block verbatim dozens of times — fixed with
-        // repetition_penalty. (2) A DIFFERENT weak fallback later went the
-        // opposite direction: no temperature was ever set (so it ran on
-        // whatever the model's own default is, often 1.0+), and combined
-        // with a still-generous token ceiling and poor instruction-following,
-        // it drifted into a long, incoherent, structure-ignoring ramble about
-        // AI singularity/sentience that even leaked a stray code fragment
-        // ('=d=len("HISTORY")') into the lyrics — the HARD STOP instruction
-        // never engaged because it just kept generating novel content
-        // instead of looping. temperature reins in that drift; max_tokens
-        // cut further (900 -> 600, still comfortably more than the ~27-line
-        // template needs) bounds worst-case length harder regardless.
-        body: JSON.stringify({
-          model,
-          messages: karaokeMessages,
-          max_tokens: 600,
-          temperature: 0.85,
-          repetition_penalty: 1.15,
-        }),
+        body: JSON.stringify({ model, messages: karaokeMessages, ...karaokeGenParams }),
         signal: upstreamAbort.signal,
       });
 
-    // Dolphin-first cascade, REORDERED 2026-07-09 from the original /respond-mirroring order
-    // (free -> Lunaris paid -> Llama free -> MythoMax paid). Confirmed live via direct A/B
-    // testing: Lunaris 8B cannot reliably execute the "repeat the chorus verbatim" instruction
-    // no matter how the prompt is worded (a real model-capability gap, not a prompt bug) —
-    // every section comes out as unique new lyrics, which is also why songs run far longer than
-    // intended (no free verbatim reuse). Dolphin and Llama 3.3 70B both repeat correctly with
-    // the identical prompt. Since free-tier rate limits are per-model (Dolphin being limited
-    // doesn't mean Llama is), trying Llama 3.3 70B (free, confirmed capable) before Lunaris
-    // (paid, confirmed incapable) means karaoke lands on a competent model far more often —
-    // Lunaris/MythoMax are pushed to true-last-resort instead of first fallback.
-    let activeModel = BRAIN_MODELS.everyday;
-    let response = await callKaraoke(activeModel);
-
-    if (!response.ok && (response.status === 404 || response.status === 429)) {
-      const errText = await response.text();
-      if (response.status === 429 || errText.includes('No endpoints found')) {
-        console.warn(`[Skippy/karaoke] ${activeModel} rate-limited — trying free fallback (Llama)`);
-        activeModel = EVERYDAY_CASCADE[1].model;
-        response = await callKaraoke(activeModel);
-      } else {
-        return res.status(502).json({ error: `OpenRouter error: ${response.status} ${errText}` });
+    // Migrated to DeepInfra 2026-07-21 — live-verified first (not assumed)
+    // that the two chosen DeepInfra peers can actually execute this song's
+    // trickiest instruction, "repeat the chorus verbatim": 5/6 and 5/6 clean
+    // across repeated real test generations against the real KARAOKE_SYSTEM_PROMPT
+    // (Euryale 70B, then DeepSeek V4 Flash — same order as EVERYDAY_PEERS).
+    // This is the exact same class of gap that ruled out Lunaris 8B below —
+    // don't swap in an untested DeepInfra model here without re-verifying
+    // this specific instruction, a generically "smart" model can still fail
+    // it. OpenRouter's Dolphin (BRAIN_MODELS.everyday, still proven capable
+    // per the original 2026-07-09 testing) is kept as true last resort only,
+    // not the primary path anymore — Llama/Lunaris/MythoMax dropped
+    // entirely, no longer needed now that DeepInfra is the real primary.
+    let activeModel, response, providerLabel;
+    if (DEEPINFRA_API_KEY) {
+      activeModel = EVERYDAY_PEERS[0].model;
+      response = await callDeepInfra(activeModel);
+      providerLabel = EVERYDAY_PEERS[0].label;
+      if (!response.ok && EVERYDAY_PEERS[2]) {
+        console.warn(`[Skippy/karaoke] ${providerLabel} failed — trying ${EVERYDAY_PEERS[2].label}`);
+        activeModel = EVERYDAY_PEERS[2].model;
+        response = await callDeepInfra(activeModel);
+        providerLabel = EVERYDAY_PEERS[2].label;
       }
-    }
-    if (!response.ok && (response.status === 404 || response.status === 429)) {
-      console.warn(`[Skippy/karaoke] Llama rate-limited — trying Lunaris (paid)`);
-      activeModel = EVERYDAY_CASCADE[3].model;
-      response = await callKaraoke(activeModel);
-    }
-    if (!response.ok && (response.status === 404 || response.status === 429)) {
-      console.warn(`[Skippy/karaoke] Lunaris rate-limited — trying MythoMax (paid)`);
-      activeModel = EVERYDAY_CASCADE[4].model;
-      response = await callKaraoke(activeModel);
+      if (!response.ok && OPENROUTER_API_KEY) {
+        console.warn(`[Skippy/karaoke] DeepInfra exhausted — true last resort: OpenRouter`);
+        activeModel = BRAIN_MODELS.everyday;
+        response = await callOpenRouter(activeModel);
+        providerLabel = 'OpenRouter (last resort)';
+      }
+    } else {
+      activeModel = BRAIN_MODELS.everyday;
+      response = await callOpenRouter(activeModel);
+      providerLabel = 'OpenRouter (no DeepInfra key)';
     }
 
     if (!response.ok) {
       const detail = await response.text();
-      return res.status(502).json({ error: `OpenRouter error: ${response.status} ${detail}` });
+      return res.status(502).json({ error: `${providerLabel} error: ${response.status} ${detail}` });
     }
     const data = await response.json();
     const raw = data.choices?.[0]?.message?.content;
     if (!raw) {
-      return res.status(502).json({ error: 'OpenRouter returned no song.' });
+      return res.status(502).json({ error: `${providerLabel} returned no song.` });
     }
     const reply = mergeKaraokeMarkers(stripLeakedFormatting(raw));
 
@@ -2874,8 +2994,8 @@ app.post('/embed', requireSession, async (req, res) => {
   if (!Array.isArray(texts) || texts.length === 0 || !texts.every((t) => typeof t === 'string')) {
     return res.status(400).json({ error: 'Missing or invalid "texts" array in request body.' });
   }
-  if (!OPENROUTER_API_KEY) {
-    return res.status(502).json({ error: 'OPENROUTER_API_KEY is not set.' });
+  if (!DEEPINFRA_API_KEY && !OPENROUTER_API_KEY) {
+    return res.status(502).json({ error: 'Neither DEEPINFRA_API_KEY nor OPENROUTER_API_KEY is set.' });
   }
 
   try {
