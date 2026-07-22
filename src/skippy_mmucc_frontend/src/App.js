@@ -5476,7 +5476,7 @@ class App {
                       <input name="profileName" type="text" .value=${this.profileName} placeholder="Commander" />
                     </label>
                     <label>
-                      ElevenLabs Voice ID
+                      Fish Audio Voice ID (reference_id)
                       <input name="profileVoiceId" type="text" .value=${this.profileVoiceId} placeholder="(default voice)" />
                     </label>
                     <button type="submit">Save profile</button>
