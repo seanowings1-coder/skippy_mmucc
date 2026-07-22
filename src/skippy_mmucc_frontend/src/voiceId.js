@@ -172,8 +172,19 @@ let modelPromise = null;
 // very first clip's embedding call is the one blocked on this download.
 function getModel(onDownloadProgress) {
   if (!modelPromise) {
+    // transformers.js's own progress events only cover the network fetch —
+    // status 'done' fires the instant bytes are in hand, then
+    // constructSessions() hands the buffer to onnxruntime-web's
+    // createInferenceSession() with zero progress callback of its own. On a
+    // cold cache (fresh install/reinstall) that WASM session build is real,
+    // multi-minute work, not a rounding artifact — confirmed live
+    // 2026-07-21: the bar hit 100% and sat there for ~5 minutes while the
+    // ONNX session actually compiled. Report that gap as its own
+    // 'initializing' stage instead of leaving the caller staring at a full
+    // bar with no way to tell "done" from "hung."
     const progress_callback = (info) => {
-      if (info.status === 'progress') onDownloadProgress?.(Math.round(info.progress));
+      if (info.status === 'progress') onDownloadProgress?.(Math.round(info.progress), 'downloading');
+      else if (info.status === 'done' && info.file?.endsWith('.onnx')) onDownloadProgress?.(100, 'initializing');
     };
     modelPromise = (async () => {
       try {
@@ -298,11 +309,12 @@ function averageEmbeddings(embeddings) {
 /**
  * Records ENROLLMENT_CLIPS short clips, averages their embeddings, and
  * persists the result to IndexedDB. Calls
- * `onProgress({ phase: 'loading-model' | 'recording', percent })` — the
- * 'loading-model' phase only ever fires on a fresh page load (the one-time
- * ~100MB download), 'recording' tracks per-clip enrollment progress as
- * before. Throws on mic-permission denial or any inference failure — the
- * caller owns UI/error display.
+ * `onProgress({ phase: 'loading-model' | 'initializing-model' | 'recording', percent })`
+ * — the 'loading-model'/'initializing-model' phases only ever fire on a
+ * fresh page load (the one-time ~100MB download, then the ONNX session
+ * build that follows it with no download bytes left to report), 'recording'
+ * tracks per-clip enrollment progress as before. Throws on mic-permission
+ * denial or any inference failure — the caller owns UI/error display.
  */
 export async function enrollVoice(onProgress) {
   const stream = await navigator.mediaDevices.getUserMedia(MIC_CONSTRAINTS);
@@ -310,8 +322,8 @@ export async function enrollVoice(onProgress) {
     const embeddings = [];
     for (let i = 0; i < ENROLLMENT_CLIPS; i++) {
       const blob = await recordClip(stream, ENROLLMENT_CLIP_MS);
-      const embedding = await getEmbedding(blob, (percent) => {
-        onProgress?.({ phase: 'loading-model', percent });
+      const embedding = await getEmbedding(blob, (percent, stage) => {
+        onProgress?.({ phase: stage === 'initializing' ? 'initializing-model' : 'loading-model', percent });
       });
       embeddings.push(embedding);
       onProgress?.({ phase: 'recording', percent: Math.round(((i + 1) / ENROLLMENT_CLIPS) * 100) });

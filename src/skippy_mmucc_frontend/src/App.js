@@ -5957,10 +5957,14 @@ class App {
                           <p style="margin:0 0 0.5em;font-size:0.9em;">
                             ${this.voiceEnrollmentPhase === 'loading-model'
                               ? `Downloading model... ${this.voiceEnrollmentProgress.toFixed(0)}%`
+                              : this.voiceEnrollmentPhase === 'initializing-model'
+                              ? 'Model downloaded — waking it up now. This step has no real progress to report and can take several minutes on a fresh install, even sitting at 100%. It is not stuck, just chewing through one-time setup.'
                               : `Enrolling... ${this.voiceEnrollmentProgress.toFixed(0)}% — keep reading`}
                           </p>
-                          <div style="height:6px;background:#374151;border-radius:3px;">
-                            <div style="height:100%;width:${this.voiceEnrollmentProgress.toFixed(0)}%;background:var(--accent-cyan,#00e5ff);border-radius:3px;transition:width 0.3s;"></div>
+                          <div style="height:6px;background:#374151;border-radius:3px;overflow:hidden;">
+                            ${this.voiceEnrollmentPhase === 'initializing-model'
+                              ? html`<div class="voice-init-bar"></div>`
+                              : html`<div style="height:100%;width:${this.voiceEnrollmentProgress.toFixed(0)}%;background:var(--accent-cyan,#00e5ff);border-radius:3px;transition:width 0.3s;"></div>`}
                           </div>
                         `
                       : html`
