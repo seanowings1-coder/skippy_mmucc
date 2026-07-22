@@ -1365,7 +1365,12 @@ app.post('/respond', requireSession, async (req, res) => {
       `numbers, or specifics that actually appear in these results — if they don't contain the ` +
       `specific answer (e.g. results about the wrong location, or no real answer at all), say so ` +
       `explicitly (still in character) rather than inventing a plausible-sounding answer. Never use ` +
-      `the "[Web]" tag unless you're actually drawing from these results for this answer:\n${block}`;
+      `the "[Web]" tag unless you're actually drawing from these results for this answer. The tag ` +
+      `is not optional decoration — a correct answer with the tag silently missing is still a ` +
+      `citation failure, exactly as wrong as citing when you shouldn't. Example — RIGHT: "68°F and ` +
+      `clear in Lincoln right now, Commander [Web]." WRONG (same accurate answer, tag dropped): ` +
+      `"68°F and clear in Lincoln right now, Commander." Attach the tag the very first time you ` +
+      `state anything drawn from these results, every single time, not just sometimes:\n${block}`;
   } else {
     // Closes a confirmed fabrication path, 2026-06-21: with no real webContext
     // this turn, the model had no instruction either permitting or forbidding
