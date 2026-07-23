@@ -231,6 +231,16 @@ const DEEPINFRA_EMBEDDING_MODEL =
 // so raw HTML is never returned, satisfying "zero scraping" by construction.
 const TAVILY_API_KEY = process.env.TAVILY_API_KEY;
 
+// Railway's Variables UI has been caught storing values with stray
+// surrounding quotes/whitespace (same class of bug hit before with another
+// gauge's env var) — sanitize defensively rather than trust the platform to
+// hand back exactly what was typed.
+function cleanEnv(key) {
+  const raw = process.env[key];
+  if (raw == null) return raw;
+  return raw.trim().replace(/^["']+|["']+$/g, '').trim();
+}
+
 // Pillar 12 (Guardian Emergency Protocol). Twilio credentials are
 // deliberately allowed to be unset — sendSms() below no-ops with a console
 // warning instead of throwing, so the whole dispatch/relay pipeline is
@@ -240,15 +250,15 @@ const TAVILY_API_KEY = process.env.TAVILY_API_KEY;
 // same REST endpoint, Basic Auth username = API Key SID, password = secret.
 // The Fuel Gauge balance check below is the one exception — the Balance API
 // only accepts the master Auth Token, not an API Key.
-const TWILIO_ACCOUNT_SID = process.env.TWILIO_ACCOUNT_SID;
-const TWILIO_API_KEY_SID = process.env.TWILIO_API_KEY_SID;
-const TWILIO_API_KEY_SECRET = process.env.TWILIO_API_KEY_SECRET;
-const TWILIO_AUTH_TOKEN = process.env.TWILIO_AUTH_TOKEN;
+const TWILIO_ACCOUNT_SID = cleanEnv('TWILIO_ACCOUNT_SID');
+const TWILIO_API_KEY_SID = cleanEnv('TWILIO_API_KEY_SID');
+const TWILIO_API_KEY_SECRET = cleanEnv('TWILIO_API_KEY_SECRET');
+const TWILIO_AUTH_TOKEN = cleanEnv('TWILIO_AUTH_TOKEN');
 // A2P 10DLC campaign approved 2026-07-22 — sendSms() below sends via this
 // registered Messaging Service SID, not a bare From number, per Twilio's
 // compliant-delivery requirement (a bare From number risks carrier filtering
 // post-approval).
-const TWILIO_MESSAGING_SERVICE_SID = process.env.TWILIO_MESSAGING_SERVICE_SID;
+const TWILIO_MESSAGING_SERVICE_SID = cleanEnv('TWILIO_MESSAGING_SERVICE_SID');
 const EMERGENCY_CONTACT_NUMBERS = (process.env.EMERGENCY_CONTACT_NUMBERS || '')
   .split(',')
   .map((n) => n.trim())
