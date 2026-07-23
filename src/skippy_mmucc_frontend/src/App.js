@@ -135,7 +135,11 @@ function extractCourierContent(lowerText, originalText) {
 // the emergency entirely, so "stand down" was chosen to fit this app's
 // existing Commander/tactical theme — flagged for the user to confirm or
 // rename if they want something else.
-const OPEN_COMMS_PHRASES = ['open comms', 'comms open', 'open calms', 'open coms', 'coms open', 'open com', 'radio open', 'walkie-talkie', 'walkie talkie', 'walky talky'];
+// 'comes open'/'calms open'/'com open' added 2026-07-22 — confirmed live
+// during a real Guardian test that the reversed-order variants of 'calms'/
+// 'comes' were missing (only 'coms' had its reversed form), so a mis-heard
+// "Skippy, open comms" fell through to a real web search mid-emergency.
+const OPEN_COMMS_PHRASES = ['open comms', 'comms open', 'open calms', 'calms open', 'open coms', 'coms open', 'open com', 'com open', 'comes open', 'radio open', 'walkie-talkie', 'walkie talkie', 'walky talky'];
 const GO_DARK_PHRASES = ['go dark'];
 const STAND_DOWN_PHRASES = ['stand down', 'end emergency', 'end emergency dispatch'];
 
