@@ -259,10 +259,16 @@ const TWILIO_AUTH_TOKEN = cleanEnv('TWILIO_AUTH_TOKEN');
 // compliant-delivery requirement (a bare From number risks carrier filtering
 // post-approval).
 const TWILIO_MESSAGING_SERVICE_SID = cleanEnv('TWILIO_MESSAGING_SERVICE_SID');
-const EMERGENCY_CONTACT_NUMBERS = (process.env.EMERGENCY_CONTACT_NUMBERS || '')
-  .split(',')
-  .map((n) => n.trim())
-  .filter(Boolean);
+// Two-principal-aware emergency contacts (added 2026-07-22, replacing a flat
+// EMERGENCY_CONTACT_NUMBERS broadcast list) — dispatch below texts only the
+// OTHER whitelisted principal, same "route to the other principal" pattern
+// the Courier Queue already uses. A flat broadcast list would also SMS the
+// triggering person's own phone, which defeats the point if they're trying
+// to stay quiet/hidden.
+const COMMANDER_PRINCIPAL = cleanEnv('COMMANDER_PRINCIPAL');
+const PARTNER_PRINCIPAL = cleanEnv('PARTNER_PRINCIPAL');
+const COMMANDER_PHONE_NUMBER = cleanEnv('COMMANDER_PHONE_NUMBER');
+const PARTNER_PHONE_NUMBER = cleanEnv('PARTNER_PHONE_NUMBER');
 // Direct 911 SMS dispatch is explicitly deferred (see CLAUDE.md Pillar 12)
 // pending the user's own validation with local Nebraska LEA contacts —
 // defaults OFF regardless of whether a number happens to be configured.
@@ -3533,10 +3539,28 @@ app.post('/emergency-dispatch', requireSession, async (req, res) => {
   const mapsUrl = hasLocation ? `https://maps.google.com/?q=${lat},${lon}` : null;
   const locationPart = hasLocation ? ` Map: ${mapsUrl}` : ' (location unavailable)';
 
+  // Notify only the OTHER principal — never the person who triggered the
+  // dispatch. A flat broadcast to both would text the triggering person's
+  // own phone too, which is actively bad if they're hiding/trying to stay
+  // quiet (see the user's 2026-07-22 flag on this).
+  const triggeringPrincipal = req.skippySession.principal?.toText?.()
+    ?? String(req.skippySession.principal);
+  let otherContactNumber = null;
+  if (COMMANDER_PRINCIPAL && triggeringPrincipal === COMMANDER_PRINCIPAL) {
+    otherContactNumber = PARTNER_PHONE_NUMBER;
+  } else if (PARTNER_PRINCIPAL && triggeringPrincipal === PARTNER_PRINCIPAL) {
+    otherContactNumber = COMMANDER_PHONE_NUMBER;
+  }
+  if (!otherContactNumber) {
+    console.warn(
+      `[Skippy emergency] Could not resolve the other principal's phone number for dispatch (triggering principal: ${triggeringPrincipal}) — check COMMANDER_PRINCIPAL/PARTNER_PRINCIPAL/COMMANDER_PHONE_NUMBER/PARTNER_PHONE_NUMBER env vars.`,
+    );
+  }
+
   try {
-    for (const number of EMERGENCY_CONTACT_NUMBERS) {
+    if (otherContactNumber) {
       await sendSms(
-        number,
+        otherContactNumber,
         `EMERGENCY DISPATCH: ${userName} has triggered a panic alert. Live Location & Audio Feed: ${liveOpsUrl}${locationPart}`,
       );
     }
