@@ -4484,6 +4484,11 @@ class App {
     this.commsOpen = false;
     this.emergencyToken = null;
     this.emergencyId = null;
+    // Confirmed 2026-07-22: standing down drops out of Tactical into Focus,
+    // not all the way back to Default. Focus keeps the fast brain and
+    // instant web access (still useful right after a real emergency) while
+    // hiding the EMERGENCY PANIC button, since Focus never unlocks it.
+    this.operationalMode = 'focus';
     const reply = 'Standing down. Emergency dispatch ended.';
     this.statusMessage = '';
     this.#recordTurn(text, reply);
