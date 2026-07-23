@@ -139,6 +139,17 @@ const OPEN_COMMS_PHRASES = ['open comms', 'comms open', 'open calms', 'open coms
 const GO_DARK_PHRASES = ['go dark'];
 const STAND_DOWN_PHRASES = ['stand down', 'end emergency', 'end emergency dispatch'];
 
+// Confirmed live 2026-07-22 (Tactical mode's Guardian test session): the mic
+// occasionally catches nothing but a mangled fragment of the wake word
+// itself ("skip", "skips") with zero real content attached, and — because
+// Tactical mode deliberately fires an instant web search on any RAG miss —
+// that noise was going all the way out as a genuine query and pulling
+// arbitrary web content (including, once, a page with an embedded prompt
+// injection) into the system prompt. This is intentionally narrow: it only
+// swallows utterances that are ENTIRELY wake-word noise, not real short
+// questions, so Tactical's actual instant-search behavior stays intact.
+const WAKE_WORD_NOISE_ONLY = /^(hey |ok |okay )?skip(p?y)?'?s?\.?$/i;
+
 // Pillar 15 (Sovereign Guest Lockout) — confirmed 2026-06-22: enabling is a
 // single voice/text/button action with no confirmation step (the owner is
 // deliberately about to hand off the device and wants zero friction, not a
@@ -3008,6 +3019,10 @@ class App {
         const remainder = chunk.slice(matchIndex + matchedPhrase.length).trim();
         this.noteBuffer = remainder;
         this.state = 'dictating';
+      } else if (chunk.trim() && WAKE_WORD_NOISE_ONLY.test(chunk.trim())) {
+        // Pure wake-word noise ("skip", "skips") with nothing else — drop it
+        // rather than dispatching. See WAKE_WORD_NOISE_ONLY's comment above.
+        console.log('[Skippy] dropping wake-word-only noise, not dispatching:', chunk.trim());
       } else if (chunk.trim()) {
         // Not a note-taking trigger phrase — buffer it briefly instead of
         // dispatching immediately. Chrome's SpeechRecognition can end and

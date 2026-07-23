@@ -967,6 +967,7 @@ async function sendSms(to, body) {
     console.warn(`[Skippy emergency] Twilio not configured — SMS not sent to ${to}: "${body}"`);
     return { skipped: true };
   }
+  console.log(`[Skippy emergency] sendSms → to=${to} messagingServiceSid=${TWILIO_MESSAGING_SERVICE_SID}`);
   const auth = Buffer.from(`${TWILIO_API_KEY_SID}:${TWILIO_API_KEY_SECRET}`).toString('base64');
   const response = await fetch(
     `https://api.twilio.com/2010-04-01/Accounts/${TWILIO_ACCOUNT_SID}/Messages.json`,
@@ -981,9 +982,12 @@ async function sendSms(to, body) {
   );
   if (!response.ok) {
     const detail = await response.text();
+    console.error(`[Skippy emergency] Twilio send FAILED: status=${response.status} body=${detail}`);
     throw new Error(`Twilio error: ${response.status} ${detail}`);
   }
-  return response.json();
+  const result = await response.json();
+  console.log(`[Skippy emergency] Twilio send OK: sid=${result.sid} status=${result.status}`);
+  return result;
 }
 
 // Defense-in-depth, added 2026-06-21: prompt instructions telling the model
@@ -3555,6 +3559,8 @@ app.post('/emergency-dispatch', requireSession, async (req, res) => {
     console.warn(
       `[Skippy emergency] Could not resolve the other principal's phone number for dispatch (triggering principal: ${triggeringPrincipal}) — check COMMANDER_PRINCIPAL/PARTNER_PRINCIPAL/COMMANDER_PHONE_NUMBER/PARTNER_PHONE_NUMBER env vars.`,
     );
+  } else {
+    console.log(`[Skippy emergency] dispatch triggered by ${triggeringPrincipal} (${userName}) — notifying other principal's number.`);
   }
 
   try {
@@ -3576,6 +3582,7 @@ app.post('/emergency-dispatch', requireSession, async (req, res) => {
     }
     res.json({ token, liveOpsUrl });
   } catch (err) {
+    console.error(`[Skippy emergency] /emergency-dispatch failed: ${err.message}`);
     res.status(502).json({ error: err.message });
   }
 });
