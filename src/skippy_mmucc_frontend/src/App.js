@@ -1067,6 +1067,14 @@ class App {
   // track the live state once triggered. token/id/ws/recorder/stream are
   // the live session's plumbing, torn down on "Skippy, stand down."
   emergencyConfirmOpen = false;
+  // Mobile dock Steel Rain button (2026-07-24): a long-press jumps straight
+  // to the emergency confirm dialog from any mode, so triggering Guardian
+  // Emergency doesn't require first switching to Tactical and then finding
+  // the (non-dock) EMERGENCY PANIC button. #dockSrLongPressFired suppresses
+  // the trailing click's normal mode-toggle behavior once a long-press has
+  // already handled the tap.
+  #dockSrLongPressTimer = null;
+  #dockSrLongPressFired = false;
   emergencyActive = false;
   ghostMode = false;
   commsOpen = false;
@@ -4329,10 +4337,13 @@ class App {
   };
 
   // Deterministic test of the Dual-Voice audio pipeline (Pillar 18) —
-  // Pillar 12 (Guardian Emergency Protocol). Placement protection: only
-  // rendered while operationalMode === 'tactical' (see #render) — there's no
-  // dedicated Steel Rain overlay view yet (Pillar 11 hasn't been built), so
-  // this is today's equivalent of "only reachable from inside Steel Rain."
+  // Pillar 12 (Guardian Emergency Protocol). Originally only reachable via
+  // the visible EMERGENCY PANIC button (Tactical mode only). As of
+  // 2026-07-24 there are two more entry points that call this same
+  // confirm-gate directly, from any mode: the covert desktop button
+  // (.covert-panic, see #render) and a long-press on the mobile dock's
+  // Steel Rain button (#handleDockSrPointerDown below). Both still land on
+  // the same YES/CONFIRM dialog — no path skips that gate.
   #openEmergencyConfirm = () => {
     this.emergencyConfirmOpen = true;
     this.#render();
@@ -4340,6 +4351,36 @@ class App {
 
   #closeEmergencyConfirm = () => {
     this.emergencyConfirmOpen = false;
+    this.#render();
+  };
+
+  // Long-press (not a plain tap) on the mobile dock's Steel Rain button —
+  // jumps straight to the emergency confirm dialog without first switching
+  // modes. Short taps fall through to #handleDockSrClick's normal toggle.
+  #handleDockSrPointerDown = () => {
+    if (this.guestMode || this.emergencyActive) return;
+    this.#dockSrLongPressFired = false;
+    clearTimeout(this.#dockSrLongPressTimer);
+    this.#dockSrLongPressTimer = setTimeout(() => {
+      this.#dockSrLongPressFired = true;
+      this.#openEmergencyConfirm();
+    }, 600);
+  };
+
+  #handleDockSrPointerUp = () => {
+    clearTimeout(this.#dockSrLongPressTimer);
+  };
+
+  #handleDockSrClick = () => {
+    if (this.guestMode) return;
+    if (this.#dockSrLongPressFired) {
+      // The long-press already opened the emergency confirm dialog — this
+      // trailing click is the same physical tap ending, not a new action.
+      this.#dockSrLongPressFired = false;
+      return;
+    }
+    this.operationalMode = this.operationalMode === 'tactical' ? 'default' : 'tactical';
+    this.statusMessage = '';
     this.#render();
   };
 
@@ -6198,12 +6239,11 @@ class App {
           >✋</button>
           <button
             class="dock-sr ${this.operationalMode === 'tactical' ? 'active' : ''}"
-            @click=${() => {
-              if (this.guestMode) return;
-              this.operationalMode = this.operationalMode === 'tactical' ? 'default' : 'tactical';
-              this.statusMessage = '';
-              this.#render();
-            }}
+            title="Tap: toggle Steel Rain. Long-press: jump straight to Emergency Panic."
+            @pointerdown=${this.#handleDockSrPointerDown}
+            @pointerup=${this.#handleDockSrPointerUp}
+            @pointercancel=${this.#handleDockSrPointerUp}
+            @click=${this.#handleDockSrClick}
           >⚡ ${this.operationalMode === 'tactical' ? 'Normal' : 'Steel Rain'}</button>
         </div>
         </section>
@@ -6237,6 +6277,9 @@ class App {
             <span class="logo-llc">LLC</span>
           </span>
         </div>
+        ${!this.guestMode && !this.emergencyActive
+          ? html`<button class="covert-panic desktop-only" @click=${this.#openEmergencyConfirm}></button>`
+          : ''}
         <details class="notes-popout">
             <summary>Neo Skin</summary>
             <select @change=${this.#handleManualChange}>

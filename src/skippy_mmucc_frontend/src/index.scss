@@ -397,6 +397,42 @@ button:disabled {
   color: rgb(75, 75, 75);
 }
 
+// Covert Emergency trigger (desktop only, 2026-07-24) — deliberately
+// camouflaged, not styled like any other button in the app. Sits in the gap
+// between the logo card and Neo Skin, colored to match .col-right's own
+// background exactly (not the raised logo card's), with a center dot one
+// shade darker — same relationship as --bg-dark-armor is to
+// --bg-matte-carbon elsewhere in this palette. User's own design intent:
+// if someone dangerous is standing over your shoulder while you're typing,
+// a labeled EMERGENCY PANIC button gives away what you're doing; this
+// button reads as empty background at a glance but still opens the same
+// confirm dialog as the visible one. No border, no hover state, no text —
+// any of those would defeat the point.
+.covert-panic {
+  display: block;
+  width: 100%;
+  height: 1.7em;
+  margin: 0 0 0.6em;
+  padding: 0;
+  border: none;
+  border-radius: 4px;
+  background: var(--bg-dark-armor);
+  position: relative;
+  cursor: default;
+
+  &::after {
+    content: '';
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    width: 5px;
+    height: 5px;
+    border-radius: 50%;
+    transform: translate(-50%, -50%);
+    background: var(--bg-matte-carbon);
+  }
+}
+
 
 .col-center {
   display: flex;
