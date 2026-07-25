@@ -466,6 +466,30 @@ button:disabled {
   font-weight: 600;
 }
 
+// Skippy's Memory folders (2026-07-24) — a sub-level grouping inside the
+// already-boxed "Skippy's Memory" details, so the default nested card style
+// above (matched again here since .artifact-group is itself a <details>)
+// would double up border+background and look like two stacked panels.
+// Flatten it to a plain indented list instead — no border/background of its
+// own, just a lighter summary weight to read as a sub-heading, not a peer.
+.artifact-group {
+  background: none;
+  border: none;
+  border-radius: 0;
+  padding: 0;
+  margin: 0 0 0.5em 0.4em;
+
+  summary {
+    font-weight: 500;
+    font-size: 0.9em;
+    opacity: 0.85;
+  }
+
+  ul {
+    margin: 0.3em 0 0;
+  }
+}
+
 // Destructive action hidden behind a deliberate extra click — confirmed
 // live 2026-06-25: a "Delete entire manual" button sitting in the normal
 // button row next to "Open" was an easy accidental tap. Collapsed by

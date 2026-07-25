@@ -397,6 +397,17 @@ const ROSTER_TRIGGER_PROMPT_REPLIES = [
 const EVERYDAY_PEER_LABELS = ['Euryale 70B (DeepInfra)', 'Hermes 3 70B (DeepInfra)', 'DeepSeek V4 Flash (DeepInfra)'];
 const HEAVY_HITTER_PEER_LABELS = ['Claude Sonnet 5 (DeepInfra)', 'Kimi K2.7 Code (DeepInfra)', 'DeepSeek V4 Pro (DeepInfra)'];
 
+// Skippy's Memory (Pillar 22) folder labels — display only. `kind` itself
+// stays a free-form tag the backend never branches on (see #saveArtifact
+// call sites), so an unrecognized kind just falls back to its raw string
+// here rather than needing a code change.
+const ARTIFACT_KIND_LABELS = {
+  karaoke: 'Karaoke',
+  code: 'Code',
+  workspace_export: 'Workspace Exports',
+  project_brief: 'Project Briefs',
+};
+
 // Read-only "peace of mind" listing for Steel Rain (tactical/focus mode) —
 // a completely separate system from Everyday/Heavy Hitter above, with no
 // per-brain skip/enable of its own (nothing here is individually
@@ -5621,44 +5632,64 @@ class App {
                   <summary>Skippy's Memory (${this.savedArtifacts.length})</summary>
                   ${this.savedArtifacts.length === 0
                     ? html`<p class="status">Nothing saved yet — use a "Save to Memory"/"Save" button on a karaoke song, export, brief, or code block.</p>`
-                    : html`
-                        <ul>
-                          ${this.savedArtifacts
-                            .slice()
-                            .sort((a, b) => Number(b.created_at) - Number(a.created_at))
-                            .map((art) => {
-                              const mime = art.mime?.[0] || '';
-                              const isPreviewable = mime.startsWith('audio/') || mime.startsWith('text/');
-                              const isOpen = this.previewArtifact?.id === art.id;
-                              return html`
-                                <li>
-                                  <strong>${art.title?.[0] || art.kind}</strong>
-                                  <span class="section-id">(${art.kind})</span>
-                                  <br />
-                                  <span class="status">
-                                    ${new Date(Number(art.created_at / 1_000_000n)).toLocaleString()}
-                                  </span>
-                                  ${art.notes?.[0]
-                                    ? html`<br /><span class="artifact-note">${art.notes[0]}</span>`
-                                    : ''}
-                                  ${isPreviewable
-                                    ? html`<button @click=${() => this.#previewSavedArtifact(art.id)}>
-                                        ${isOpen ? 'Hide' : 'Preview'}
-                                      </button>`
-                                    : ''}
-                                  <button @click=${() => this.#downloadSavedArtifact(art.id)}>Download</button>
-                                  <button @click=${() => this.#deleteSavedArtifact(art.id)}>Delete</button>
-                                  ${isOpen && this.previewArtifact.kind === 'audio'
-                                    ? html`<audio controls src=${this.previewArtifact.url} class="artifact-preview-audio"></audio>`
-                                    : ''}
-                                  ${isOpen && this.previewArtifact.kind === 'text'
-                                    ? html`<pre class="artifact-preview-text">${this.previewArtifact.content}</pre>`
-                                    : ''}
-                                </li>
-                              `;
-                            })}
-                        </ul>
-                      `}
+                    : (() => {
+                        // Nesting/folders (backlog since 2026-07-14, "add nesting folders
+                        // into the backlog" — user's own instruction, flat list was going
+                        // to get long to scroll). Grouped by `kind` since the backend never
+                        // branches on that field — it's a free-form tag, so any future kind
+                        // not in ARTIFACT_KIND_LABELS just falls back to the raw string
+                        // rather than needing a code change here.
+                        const groups = new Map();
+                        for (const art of this.savedArtifacts) {
+                          if (!groups.has(art.kind)) groups.set(art.kind, []);
+                          groups.get(art.kind).push(art);
+                        }
+                        const orderedGroups = [...groups.entries()]
+                          .map(([kind, items]) => [
+                            kind,
+                            items.slice().sort((a, b) => Number(b.created_at) - Number(a.created_at)),
+                          ])
+                          .sort((a, b) => Number(b[1][0].created_at) - Number(a[1][0].created_at));
+                        return orderedGroups.map(
+                          ([kind, items]) => html`
+                            <details class="artifact-group" open>
+                              <summary>${ARTIFACT_KIND_LABELS[kind] || kind} (${items.length})</summary>
+                              <ul>
+                                ${items.map((art) => {
+                                  const mime = art.mime?.[0] || '';
+                                  const isPreviewable = mime.startsWith('audio/') || mime.startsWith('text/');
+                                  const isOpen = this.previewArtifact?.id === art.id;
+                                  return html`
+                                    <li>
+                                      <strong>${art.title?.[0] || art.kind}</strong>
+                                      <br />
+                                      <span class="status">
+                                        ${new Date(Number(art.created_at / 1_000_000n)).toLocaleString()}
+                                      </span>
+                                      ${art.notes?.[0]
+                                        ? html`<br /><span class="artifact-note">${art.notes[0]}</span>`
+                                        : ''}
+                                      ${isPreviewable
+                                        ? html`<button @click=${() => this.#previewSavedArtifact(art.id)}>
+                                            ${isOpen ? 'Hide' : 'Preview'}
+                                          </button>`
+                                        : ''}
+                                      <button @click=${() => this.#downloadSavedArtifact(art.id)}>Download</button>
+                                      <button @click=${() => this.#deleteSavedArtifact(art.id)}>Delete</button>
+                                      ${isOpen && this.previewArtifact.kind === 'audio'
+                                        ? html`<audio controls src=${this.previewArtifact.url} class="artifact-preview-audio"></audio>`
+                                        : ''}
+                                      ${isOpen && this.previewArtifact.kind === 'text'
+                                        ? html`<pre class="artifact-preview-text">${this.previewArtifact.content}</pre>`
+                                        : ''}
+                                    </li>
+                                  `;
+                                })}
+                              </ul>
+                            </details>
+                          `,
+                        );
+                      })()}
                 </details>
 
                 <details class="known-facts">
