@@ -3695,25 +3695,35 @@ app.get('/live-ops/:token', (req, res) => {
     // already happened.
     let audioUnlocked = false;
     document.getElementById('unlockBtn').addEventListener('click', () => {
-      // A bare new Audio() with no source at all — .play() rejects
-      // immediately with nothing ever actually decoded, which may not
-      // register as a genuine gesture-approved playback the way a real
-      // (even silent) clip does. Using an actual tiny silent WAV instead,
-      // confirmed 2026-07-25 after "nothing comes out my mobile" persisted
-      // across multiple tests even with this button tapped every time.
-      const unlock = new Audio('data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQAAAAA=');
-      unlock.play()
-        .then(() => {
-          console.log('live-ops audio unlock succeeded');
-          logAudioDebug('unlock tap: play() succeeded');
-          unlock.pause();
-        })
-        .catch((err) => {
-          console.warn('live-ops audio unlock FAILED:', err);
-          logAudioDebug(\`unlock tap: play() FAILED: \${err.name} \${err.message}\`);
-        });
+      // Remove the overlay FIRST, unconditionally, before attempting
+      // anything else — confirmed live 2026-07-25 that tapping did nothing
+      // at all, likely because .play() (or Audio construction) threw
+      // synchronously on some device/browser and skipped the rest of the
+      // handler with the old ordering. Nothing about the audio-unlock
+      // attempt below should ever be able to leave the user stuck on this
+      // screen.
       audioUnlocked = true;
       document.getElementById('unlockOverlay').remove();
+      try {
+        // A bare new Audio() with no source at all — .play() rejects
+        // immediately with nothing ever actually decoded, which may not
+        // register as a genuine gesture-approved playback the way a real
+        // (even silent) clip does. Using an actual tiny silent WAV instead.
+        const unlock = new Audio('data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQAAAAA=');
+        unlock.play()
+          .then(() => {
+            console.log('live-ops audio unlock succeeded');
+            logAudioDebug('unlock tap: play() succeeded');
+            unlock.pause();
+          })
+          .catch((err) => {
+            console.warn('live-ops audio unlock FAILED:', err);
+            logAudioDebug(\`unlock tap: play() FAILED: \${err.name} \${err.message}\`);
+          });
+      } catch (err) {
+        console.warn('live-ops audio unlock threw synchronously:', err);
+        logAudioDebug(\`unlock tap threw: \${err.name} \${err.message}\`);
+      }
     });
 
     // Simple sequential playback — each relayed/finalized chunk plays as its
