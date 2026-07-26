@@ -3617,9 +3617,15 @@ app.get('/live-ops/:token', (req, res) => {
     .presets { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 16px; }
     .presets button { flex: 1 1 45%; padding: 12px 4px; background: #1A1A1A; color: #D1D5DB; border: 1px solid #555; border-radius: 4px; }
     #status { font-size: 0.85em; color: #888; }
+    #feedback { font-size: 0.85em; color: #00E5FF; min-height: 1.2em; margin-top: 8px; }
+    #unlockOverlay { position: fixed; inset: 0; background: #0D0D0D; z-index: 10; display: flex; align-items: center; justify-content: center; }
+    #unlockBtn { padding: 20px 32px; font-size: 1.1em; background: #00E5FF; color: #0D0D0D; border: none; border-radius: 8px; }
   </style>
 </head>
 <body>
+  <div id="unlockOverlay">
+    <button id="unlockBtn">🔊 Tap to Start Listening</button>
+  </div>
   <h1>Live Emergency Feed</h1>
   <p class="instructions">
     You are listening to a live emergency audio feed. This is <strong>not a phone call</strong> —
@@ -3634,13 +3640,37 @@ app.get('/live-ops/:token', (req, res) => {
     <button data-preset="Stay quiet, don't speak.">Stay quiet</button>
     <button data-preset="I can't hear you, try again.">Can't hear you</button>
   </div>
+  <div id="feedback"></div>
   <script>
     const wsScheme = location.protocol === 'https:' ? 'wss' : 'ws';
     const ws = new WebSocket(\`\${wsScheme}://\${location.host}/emergency-ws?token=${req.params.token}&role=listener\`);
     const statusEl = document.getElementById('status');
+    const feedbackEl = document.getElementById('feedback');
+    let feedbackTimer = null;
+    function showFeedback(text) {
+      feedbackEl.textContent = text;
+      clearTimeout(feedbackTimer);
+      feedbackTimer = setTimeout(() => { feedbackEl.textContent = ''; }, 3000);
+    }
     ws.onopen = () => { statusEl.textContent = 'Connected — listening live.'; };
     ws.onclose = () => { statusEl.textContent = 'Disconnected.'; };
     ws.onerror = () => { statusEl.textContent = 'Connection error.'; };
+
+    // Mobile browsers block programmatic audio.play() until the page has had
+    // a real user gesture — a link opened fresh from an SMS has none, so
+    // every relayed chunk was silently failing to play with zero indication
+    // (confirmed live 2026-07-25: "nothing comes out my mobile"). One throwaway
+    // play()+pause() inside a real click handler unlocks playback for the
+    // rest of the page's session; everything below this point assumes that's
+    // already happened.
+    let audioUnlocked = false;
+    document.getElementById('unlockBtn').addEventListener('click', () => {
+      const unlock = new Audio();
+      unlock.play().catch(() => {}).finally(() => unlock.pause());
+      audioUnlocked = true;
+      document.getElementById('unlockOverlay').remove();
+    });
+
     // Simple sequential playback — each relayed/finalized chunk plays as its
     // own <audio> element. Not perfectly gapless, but far simpler/more
     // robust than real MediaSource buffering for a v1 of a safety feature.
@@ -3648,7 +3678,10 @@ app.get('/live-ops/:token', (req, res) => {
       if (typeof event.data === 'string') return; // device-side JSON events aren't sent to listeners
       const blob = new Blob([event.data], { type: 'audio/webm' });
       const audio = new Audio(URL.createObjectURL(blob));
-      audio.play().catch(() => {});
+      audio.play().catch((err) => {
+        if (!audioUnlocked) showFeedback('Tap "Start Listening" above to enable audio.');
+        console.warn('live-ops audio playback failed:', err);
+      });
     };
 
     let recorder = null;
@@ -3661,7 +3694,10 @@ app.get('/live-ops/:token', (req, res) => {
       recorder.ondataavailable = (e) => chunks.push(e.data);
       recorder.onstop = async () => {
         const blob = new Blob(chunks, { type: 'audio/webm' });
-        if (ws.readyState === WebSocket.OPEN) ws.send(await blob.arrayBuffer());
+        if (ws.readyState === WebSocket.OPEN) {
+          ws.send(await blob.arrayBuffer());
+          showFeedback('Message sent.');
+        }
         stream.getTracks().forEach((t) => t.stop());
       };
       recorder.start();
@@ -3680,6 +3716,7 @@ app.get('/live-ops/:token', (req, res) => {
       btn.addEventListener('click', () => {
         if (ws.readyState === WebSocket.OPEN) {
           ws.send(JSON.stringify({ type: 'preset', text: btn.dataset.preset }));
+          showFeedback(\`Sent: "\${btn.dataset.preset}"\`);
         }
       });
     });

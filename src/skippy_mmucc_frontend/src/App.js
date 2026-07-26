@@ -1089,6 +1089,12 @@ class App {
   emergencyActive = false;
   ghostMode = false;
   commsOpen = false;
+  // A silent, self-clearing on-screen readout of an incoming preset message
+  // (see #showEmergencyToast) — user's explicit call 2026-07-25: speaking a
+  // preset aloud while comms are closed risks giving away a hiding spot, but
+  // a brief text-only flash is an acceptable, deliberately requested risk.
+  emergencyToast = null;
+  #emergencyToastTimer = null;
   emergencyToken = null;
   emergencyId = null;
   emergencyWs = null;
@@ -2007,8 +2013,14 @@ class App {
       if (mime.startsWith('audio/')) {
         const url = URL.createObjectURL(new Blob([bytes], { type: mime }));
         this.previewArtifact = { id, kind: 'audio', url };
+        // Preview now takes over the center column (like the Neo Skin manual
+        // browser) — on mobile the left drawer sits on top of it, so it has
+        // to close for the preview to actually be visible. Mirrors
+        // #refreshSections closing showRightDrawer for the same reason.
+        this.showLeftDrawer = false;
       } else if (mime.startsWith('text/')) {
         this.previewArtifact = { id, kind: 'text', content: new TextDecoder().decode(bytes) };
+        this.showLeftDrawer = false;
       } else {
         this.statusMessage = "Preview isn't available for this file type — download it to view.";
         this.previewArtifact = null;
@@ -4481,7 +4493,26 @@ class App {
         // whole premise is zero sound/light otherwise.
         if (this.commsOpen) {
           const audio = new Audio(URL.createObjectURL(event.data));
-          audio.play().catch(() => {});
+          // Self-hearing gap, confirmed live 2026-07-25: playing this without
+          // isSpeaking bookkeeping meant the continuous recognition treated a
+          // relayed clip coming out of the speaker as a brand-new genuine
+          // utterance — a real safety risk, since a bystander's relayed voice
+          // could accidentally phrase-match "stand down"/"go dark" mid-relay
+          // and kill the emergency. No transcript exists for real speech, so
+          // #isLikelySelfEcho's content match can't help here, but the plain
+          // isSpeaking guard in #handleFinalChunk covers the actual playback
+          // window, which is the real risk surface.
+          this.isSpeaking = true;
+          this.currentSpeakingText = '';
+          this.#render();
+          const clearSpeaking = () => {
+            this.isSpeaking = false;
+            this.lastSpeakEndTime = Date.now();
+            this.#render();
+          };
+          audio.onended = clearSpeaking;
+          audio.onerror = clearSpeaking;
+          audio.play().catch(clearSpeaking);
         }
         return;
       }
@@ -4496,8 +4527,22 @@ class App {
         this.backendActor.append_emergency_audio_chunk(this.emergencyId, bytes).catch((err) => {
           console.error('[Skippy emergency] failed to persist audio chunk:', err);
         });
-      } else if (parsed.type === 'preset' && this.commsOpen) {
-        window.speechSynthesis?.speak(new SpeechSynthesisUtterance(parsed.text));
+      } else if (parsed.type === 'preset') {
+        // Always show the text — silent, self-clearing, safe regardless of
+        // comms state. Only the AUDIO readout is gated behind commsOpen
+        // (speaking aloud while hiding could give away the spot); see
+        // emergencyToast's declaration.
+        this.#showEmergencyToast(parsed.text);
+        if (this.commsOpen) {
+          // Same self-hearing gap as the relayed-clip case above — routes
+          // through the existing Economy TTS path (browser-native, no proxy
+          // dependency, matches the original intent) instead of a raw
+          // speechSynthesis call, so isSpeaking/currentSpeakingText/
+          // lastSpokenText all get set correctly and #handleFinalChunk's
+          // self-echo guards actually catch the readout instead of it being
+          // re-heard as a genuine new command.
+          this.#speakEconomy(parsed.text);
+        }
       }
     };
 
@@ -4546,6 +4591,18 @@ class App {
     this.#recordTurn(text, reply);
     this.#render();
     this.#speak(reply);
+  };
+
+  // Resets the 5s timer on each new message rather than stacking — only the
+  // most recent incoming text is worth showing.
+  #showEmergencyToast = (text) => {
+    this.emergencyToast = text;
+    this.#render();
+    clearTimeout(this.#emergencyToastTimer);
+    this.#emergencyToastTimer = setTimeout(() => {
+      this.emergencyToast = null;
+      this.#render();
+    }, 5000);
   };
 
   #openComms = (text) => {
@@ -5203,8 +5260,15 @@ class App {
                   "Skippy, go dark" — silence<br/>
                   "Skippy, stand down" — end emergency
                 </div>
+                ${this.emergencyToast
+                  ? html`<div style="color:#00e5ff;font-size:0.9em;text-align:center;padding:0 2em;">${this.emergencyToast}</div>`
+                  : ''}
               </div>`
-            : html`<div style="position: fixed; inset: 0; background: black; z-index: 9999;"></div>`
+            : html`<div style="position:fixed;inset:0;background:black;z-index:9999;display:flex;align-items:center;justify-content:center;">
+                ${this.emergencyToast
+                  ? html`<div style="color:#444;font-size:0.85em;text-align:center;padding:0 2em;letter-spacing:0.03em;">${this.emergencyToast}</div>`
+                  : ''}
+              </div>`
           : ''}
 
         ${this.lexiconOpen
@@ -5652,7 +5716,7 @@ class App {
                           .sort((a, b) => Number(b[1][0].created_at) - Number(a[1][0].created_at));
                         return orderedGroups.map(
                           ([kind, items]) => html`
-                            <details class="artifact-group" open>
+                            <details class="artifact-group">
                               <summary>${ARTIFACT_KIND_LABELS[kind] || kind} (${items.length})</summary>
                               <ul>
                                 ${items.map((art) => {
@@ -5676,12 +5740,6 @@ class App {
                                         : ''}
                                       <button @click=${() => this.#downloadSavedArtifact(art.id)}>Download</button>
                                       <button @click=${() => this.#deleteSavedArtifact(art.id)}>Delete</button>
-                                      ${isOpen && this.previewArtifact.kind === 'audio'
-                                        ? html`<audio controls src=${this.previewArtifact.url} class="artifact-preview-audio"></audio>`
-                                        : ''}
-                                      ${isOpen && this.previewArtifact.kind === 'text'
-                                        ? html`<pre class="artifact-preview-text">${this.previewArtifact.content}</pre>`
-                                        : ''}
                                     </li>
                                   `;
                                 })}
@@ -5892,7 +5950,17 @@ class App {
 
         <section class="col-center">
         <div class="conversation-transcript" id="transcript-scroll">
-          ${this.manualBrowserOpen
+          ${this.previewArtifact
+            ? html`
+                <div class="manual-browser-header">
+                  <strong>${this.savedArtifacts.find((a) => a.id === this.previewArtifact.id)?.title?.[0] || 'Preview'}</strong>
+                  <button @click=${() => this.#previewSavedArtifact(this.previewArtifact.id)}>← Back to chat</button>
+                </div>
+                ${this.previewArtifact.kind === 'audio'
+                  ? html`<audio controls src=${this.previewArtifact.url} class="artifact-preview-audio"></audio>`
+                  : html`<pre class="artifact-preview-text">${this.previewArtifact.content}</pre>`}
+              `
+            : this.manualBrowserOpen
             ? html`
                 <div class="manual-browser-header">
                   <strong>${this.selectedManual}</strong> (${this.sections.length} section${this.sections.length === 1 ? '' : 's'})
