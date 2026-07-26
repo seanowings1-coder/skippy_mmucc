@@ -3694,7 +3694,21 @@ app.get('/live-ops/:token', (req, res) => {
     // rest of the page's session; everything below this point assumes that's
     // already happened.
     let audioUnlocked = false;
-    document.getElementById('unlockBtn').addEventListener('click', () => {
+    let unlockHandled = false;
+    function handleUnlockTap() {
+      // Guards against double-firing — the button is inside the overlay, so
+      // a tap ON the button bubbles up and would otherwise trigger the
+      // overlay's own listener too (bound separately below).
+      if (unlockHandled) return;
+      unlockHandled = true;
+      // TEMPORARY diagnostic — added 2026-07-26 after the previous fix
+      // (removing the overlay first, unconditionally) was confirmed
+      // deployed and STILL didn't respond to taps. alert() is immune to
+      // CSS/z-index/async issues — if this doesn't show up, the click event
+      // itself isn't reaching this code at all, which points somewhere
+      // completely different (event binding/touch target, not anything
+      // inside this handler). Remove once the real cause is confirmed.
+      alert('unlock tap registered');
       // Remove the overlay FIRST, unconditionally, before attempting
       // anything else — confirmed live 2026-07-25 that tapping did nothing
       // at all, likely because .play() (or Audio construction) threw
@@ -3724,7 +3738,13 @@ app.get('/live-ops/:token', (req, res) => {
         console.warn('live-ops audio unlock threw synchronously:', err);
         logAudioDebug(\`unlock tap threw: \${err.name} \${err.message}\`);
       }
-    });
+    }
+    // Bound to both the button AND the full-screen overlay behind it — if
+    // the tap is landing slightly off the button's actual hit area (a real
+    // possibility depending on how the click vs. tap event resolves on a
+    // given device), this still catches it.
+    document.getElementById('unlockBtn').addEventListener('click', handleUnlockTap);
+    document.getElementById('unlockOverlay').addEventListener('click', handleUnlockTap);
 
     // Simple sequential playback — each relayed/finalized chunk plays as its
     // own <audio> element. Not perfectly gapless, but far simpler/more
