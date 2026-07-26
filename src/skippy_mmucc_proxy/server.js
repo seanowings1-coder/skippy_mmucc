@@ -3620,14 +3620,20 @@ app.get('/live-ops/:token', (req, res) => {
     .presets button { flex: 1 1 45%; padding: 12px 4px; background: #1A1A1A; color: #D1D5DB; border: 1px solid #555; border-radius: 4px; }
     #status { font-size: 0.85em; color: #888; }
     #feedback { font-size: 0.85em; color: #00E5FF; min-height: 1.2em; margin-top: 8px; }
-    #unlockOverlay { position: fixed; inset: 0; background: #0D0D0D; z-index: 10; display: flex; align-items: center; justify-content: center; }
-    #unlockBtn { padding: 20px 32px; font-size: 1.1em; background: #00E5FF; color: #0D0D0D; border: none; border-radius: 8px; }
+    #unlockBtn { width: 100%; padding: 20px 0; font-size: 1.1em; background: #00E5FF; color: #0D0D0D; border: none; border-radius: 8px; margin-bottom: 16px; }
   </style>
 </head>
 <body>
-  <div id="unlockOverlay">
-    <button id="unlockBtn">🔊 Tap to Start Listening</button>
-  </div>
+  <!-- Diagnostic change, 2026-07-26: this used to be a position:fixed
+       full-screen overlay blocking the rest of the page until tapped —
+       taps on it never registered at all (confirmed via an alert() that
+       never fired, even on a build Railway's deploy log confirmed was
+       live). Now a plain in-flow button, same as the preset buttons below
+       it, to test whether a NORMAL button responds to taps at all on this
+       device — if this one works but the old fixed-overlay one didn't,
+       that isolates the bug to the fixed-position/full-screen CSS
+       specifically, not a general touch problem. -->
+  <button id="unlockBtn">🔊 Tap to Start Listening (enables audio)</button>
   <h1>Live Emergency Feed</h1>
   <p class="instructions">
     You are listening to a live emergency audio feed. This is <strong>not a phone call</strong> —
@@ -3695,29 +3701,19 @@ app.get('/live-ops/:token', (req, res) => {
     // already happened.
     let audioUnlocked = false;
     let unlockHandled = false;
+    const unlockBtnEl = document.getElementById('unlockBtn');
     function handleUnlockTap() {
-      // Guards against double-firing — the button is inside the overlay, so
-      // a tap ON the button bubbles up and would otherwise trigger the
-      // overlay's own listener too (bound separately below).
       if (unlockHandled) return;
       unlockHandled = true;
-      // TEMPORARY diagnostic — added 2026-07-26 after the previous fix
-      // (removing the overlay first, unconditionally) was confirmed
-      // deployed and STILL didn't respond to taps. alert() is immune to
-      // CSS/z-index/async issues — if this doesn't show up, the click event
-      // itself isn't reaching this code at all, which points somewhere
-      // completely different (event binding/touch target, not anything
-      // inside this handler). Remove once the real cause is confirmed.
+      // TEMPORARY diagnostic — added 2026-07-26. alert() is immune to
+      // CSS/z-index/async issues — if this doesn't show up even now that
+      // this is a plain in-flow button (no more position:fixed overlay),
+      // the click event isn't reaching this page's JS at all, on ANY
+      // element, which rules out the fixed-overlay CSS theory entirely.
       alert('unlock tap registered');
-      // Remove the overlay FIRST, unconditionally, before attempting
-      // anything else — confirmed live 2026-07-25 that tapping did nothing
-      // at all, likely because .play() (or Audio construction) threw
-      // synchronously on some device/browser and skipped the rest of the
-      // handler with the old ordering. Nothing about the audio-unlock
-      // attempt below should ever be able to leave the user stuck on this
-      // screen.
       audioUnlocked = true;
-      document.getElementById('unlockOverlay').remove();
+      unlockBtnEl.textContent = 'Audio enabled ✓';
+      unlockBtnEl.disabled = true;
       try {
         // Reverted 2026-07-26 back to the original bare new Audio() — the
         // real silent-WAV data URI (introduced to make the unlock more
@@ -3742,12 +3738,7 @@ app.get('/live-ops/:token', (req, res) => {
         logAudioDebug(\`unlock tap threw: \${err.name} \${err.message}\`);
       }
     }
-    // Bound to both the button AND the full-screen overlay behind it — if
-    // the tap is landing slightly off the button's actual hit area (a real
-    // possibility depending on how the click vs. tap event resolves on a
-    // given device), this still catches it.
-    document.getElementById('unlockBtn').addEventListener('click', handleUnlockTap);
-    document.getElementById('unlockOverlay').addEventListener('click', handleUnlockTap);
+    unlockBtnEl.addEventListener('click', handleUnlockTap);
 
     // Simple sequential playback — each relayed/finalized chunk plays as its
     // own <audio> element. Not perfectly gapless, but far simpler/more
