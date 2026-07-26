@@ -4576,18 +4576,41 @@ class App {
       // Announce current state immediately — a listener connecting after
       // this point (or reconnecting mid-session) has no other way to know.
       this.#sendCommsState(this.commsOpen);
-      const recorder = new MediaRecorder(this.emergencyStream);
-      recorder.ondataavailable = async (e) => {
-        // Diagnostic logging added 2026-07-25 — zero visibility existed into
-        // whether this side is even capturing/sending real audio at all,
-        // separate from whether it plays on the listener end.
-        console.log('[Skippy emergency] outgoing mic chunk, bytes:', e.data.size);
-        if (e.data.size > 0 && ws.readyState === WebSocket.OPEN) {
-          ws.send(await e.data.arrayBuffer());
-        }
+      // A single long-running MediaRecorder with a timeslice only puts a
+      // valid WebM header on its FIRST emitted chunk — every chunk after
+      // that is a headerless continuation fragment a fresh <audio> element
+      // on the listener side can't decode independently. Confirmed live
+      // 2026-07-25: chunks were genuinely captured and sent (real byte
+      // counts, confirmed via logging) but never audible on mobile at all,
+      // while the listener's own Hold-to-Speak — a single non-timesliced
+      // recording per press, i.e. one complete self-contained blob — played
+      // back perfectly. Fix: stop/restart the recorder every interval
+      // instead, so every emitted segment is independently valid, matching
+      // the pattern that's already proven to work.
+      const startSegment = () => {
+        if (!this.emergencyStream || ws.readyState !== WebSocket.OPEN) return;
+        const recorder = new MediaRecorder(this.emergencyStream);
+        const segmentChunks = [];
+        recorder.ondataavailable = (e) => {
+          if (e.data.size > 0) segmentChunks.push(e.data);
+        };
+        recorder.onstop = async () => {
+          if (segmentChunks.length > 0) {
+            const blob = new Blob(segmentChunks, { type: 'audio/webm' });
+            console.log('[Skippy emergency] outgoing mic segment, bytes:', blob.size);
+            if (ws.readyState === WebSocket.OPEN) {
+              ws.send(await blob.arrayBuffer());
+            }
+          }
+          if (this.emergencyStream && ws.readyState === WebSocket.OPEN) startSegment();
+        };
+        recorder.start();
+        this.emergencyRecorder = recorder;
+        setTimeout(() => {
+          if (recorder.state !== 'inactive') recorder.stop();
+        }, 2000);
       };
-      recorder.start(2000); // 2s chunks, continuously, until #stopGuardianStream
-      this.emergencyRecorder = recorder;
+      startSegment();
     };
   };
 

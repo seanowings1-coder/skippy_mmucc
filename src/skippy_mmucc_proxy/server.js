@@ -3644,7 +3644,20 @@ app.get('/live-ops/:token', (req, res) => {
     <button data-preset="I can't hear you, try again.">Can't hear you</button>
   </div>
   <div id="feedback"></div>
+  <div id="audioDebug" style="font-size:0.75em;color:#555;margin-top:16px;white-space:pre-line;"></div>
   <script>
+    // On-screen debug line, added 2026-07-25 — desktop→mobile audio has
+    // stayed silent across several rounds of fixes with no way to see this
+    // page's own console (no practical DevTools access on a phone mid
+    // live-fire test). Shows the last few chunk-received/play-attempt
+    // events directly on screen instead.
+    const audioDebugEl = document.getElementById('audioDebug');
+    let audioDebugLines = [];
+    function logAudioDebug(line) {
+      audioDebugLines.push(new Date().toLocaleTimeString() + ' ' + line);
+      audioDebugLines = audioDebugLines.slice(-6);
+      audioDebugEl.textContent = audioDebugLines.join('\n');
+    }
     const wsScheme = location.protocol === 'https:' ? 'wss' : 'ws';
     const ws = new WebSocket(\`\${wsScheme}://\${location.host}/emergency-ws?token=${req.params.token}&role=listener\`);
     const statusEl = document.getElementById('status');
@@ -3669,9 +3682,9 @@ app.get('/live-ops/:token', (req, res) => {
     }
     setCommsOpen(false);
 
-    ws.onopen = () => { statusEl.textContent = 'Connected — listening live.'; };
-    ws.onclose = () => { statusEl.textContent = 'Disconnected.'; setCommsOpen(false); };
-    ws.onerror = () => { statusEl.textContent = 'Connection error.'; };
+    ws.onopen = () => { statusEl.textContent = 'Connected — listening live.'; logAudioDebug('WS connected'); };
+    ws.onclose = () => { statusEl.textContent = 'Disconnected.'; setCommsOpen(false); logAudioDebug('WS closed'); };
+    ws.onerror = () => { statusEl.textContent = 'Connection error.'; logAudioDebug('WS error'); };
 
     // Mobile browsers block programmatic audio.play() until the page has had
     // a real user gesture — a link opened fresh from an SMS has none, so
@@ -3692,9 +3705,13 @@ app.get('/live-ops/:token', (req, res) => {
       unlock.play()
         .then(() => {
           console.log('live-ops audio unlock succeeded');
+          logAudioDebug('unlock tap: play() succeeded');
           unlock.pause();
         })
-        .catch((err) => console.warn('live-ops audio unlock FAILED:', err));
+        .catch((err) => {
+          console.warn('live-ops audio unlock FAILED:', err);
+          logAudioDebug(\`unlock tap: play() FAILED: \${err.name} \${err.message}\`);
+        });
       audioUnlocked = true;
       document.getElementById('unlockOverlay').remove();
     });
@@ -3710,14 +3727,20 @@ app.get('/live-ops/:token', (req, res) => {
         } catch {}
         return;
       }
-      console.log('live-ops received audio chunk, bytes:', event.data.size ?? event.data.byteLength);
+      const size = event.data.size ?? event.data.byteLength;
+      console.log('live-ops received audio chunk, bytes:', size);
+      logAudioDebug(\`chunk received, \${size}B, unlocked=\${audioUnlocked}\`);
       const blob = new Blob([event.data], { type: 'audio/webm' });
       const audio = new Audio(URL.createObjectURL(blob));
       audio.play()
-        .then(() => console.log('live-ops audio chunk playing'))
+        .then(() => {
+          console.log('live-ops audio chunk playing');
+          logAudioDebug('play() succeeded');
+        })
         .catch((err) => {
           if (!audioUnlocked) showFeedback('Tap "Start Listening" above to enable audio.');
           console.warn('live-ops audio playback FAILED:', err);
+          logAudioDebug(\`play() FAILED: \${err.name} \${err.message}\`);
         });
     };
 
