@@ -4573,6 +4573,9 @@ class App {
 
     ws.onopen = () => {
       console.log('[Skippy emergency] device WS connected');
+      // Announce current state immediately — a listener connecting after
+      // this point (or reconnecting mid-session) has no other way to know.
+      this.#sendCommsState(this.commsOpen);
       const recorder = new MediaRecorder(this.emergencyStream);
       recorder.ondataavailable = async (e) => {
         if (e.data.size > 0 && ws.readyState === WebSocket.OPEN) {
@@ -4631,8 +4634,20 @@ class App {
     }, 5000);
   };
 
+  // Lets the listener page (mobile) know whether it's worth trying to talk —
+  // added 2026-07-25 after a real live-fire test showed a bystander's relayed
+  // clip recorded while comms were closed just got silently discarded on this
+  // end with no indication either side. See the live-ops page's
+  // setCommsOpen for the other half.
+  #sendCommsState = (open) => {
+    if (this.emergencyWs && this.emergencyWs.readyState === WebSocket.OPEN) {
+      this.emergencyWs.send(JSON.stringify({ type: 'comms_state', open }));
+    }
+  };
+
   #openComms = (text) => {
     this.commsOpen = true;
+    this.#sendCommsState(true);
     const reply = 'Comms open.';
     this.#recordTurn(text, reply);
     this.#render();
@@ -4644,6 +4659,7 @@ class App {
   // the transcript only.
   #goDark = (text) => {
     this.commsOpen = false;
+    this.#sendCommsState(false);
     this.#recordTurn(text, 'Going dark.');
     this.#render();
   };

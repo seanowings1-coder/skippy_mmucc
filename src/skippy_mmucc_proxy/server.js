@@ -3614,6 +3614,8 @@ app.get('/live-ops/:token', (req, res) => {
     p.instructions { font-size: 0.95em; line-height: 1.4; }
     #talk { width: 100%; padding: 32px 0; font-size: 1.3em; background: #1A1A1A; color: #D1D5DB; border: 2px solid #00E5FF; border-radius: 8px; margin: 16px 0; }
     #talk.active { background: #00E5FF; color: #0D0D0D; }
+    #talk:disabled { border-color: #444; color: #555; }
+    #commsNotice { font-size: 0.85em; color: #f59e0b; margin-bottom: 8px; }
     .presets { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 16px; }
     .presets button { flex: 1 1 45%; padding: 12px 4px; background: #1A1A1A; color: #D1D5DB; border: 1px solid #555; border-radius: 4px; }
     #status { font-size: 0.85em; color: #888; }
@@ -3633,7 +3635,8 @@ app.get('/live-ops/:token', (req, res) => {
     person will hear it a few seconds later, not instantly.
   </p>
   <div id="status">Connecting...</div>
-  <button id="talk">Hold to Speak</button>
+  <div id="commsNotice"></div>
+  <button id="talk" disabled>Hold to Speak</button>
   <div class="presets">
     <button data-preset="Help is on the way.">Help is on the way</button>
     <button data-preset="Police have been notified.">Police notified</button>
@@ -3652,8 +3655,22 @@ app.get('/live-ops/:token', (req, res) => {
       clearTimeout(feedbackTimer);
       feedbackTimer = setTimeout(() => { feedbackEl.textContent = ''; }, 3000);
     }
+    const talkBtn = document.getElementById('talk');
+    const commsNoticeEl = document.getElementById('commsNotice');
+    // Defaults closed/disabled until the device tells us otherwise (its
+    // comms_state message on connect, or after "open comms"/"go dark") —
+    // matches the device's own default (commsOpen starts false on trigger).
+    // Added 2026-07-25: previously Hold-to-Speak was always enabled, so a
+    // clip recorded while comms were closed got silently discarded on the
+    // device end with zero indication either side.
+    function setCommsOpen(open) {
+      talkBtn.disabled = !open;
+      commsNoticeEl.textContent = open ? '' : "Comms are closed — they can't hear you yet.";
+    }
+    setCommsOpen(false);
+
     ws.onopen = () => { statusEl.textContent = 'Connected — listening live.'; };
-    ws.onclose = () => { statusEl.textContent = 'Disconnected.'; };
+    ws.onclose = () => { statusEl.textContent = 'Disconnected.'; setCommsOpen(false); };
     ws.onerror = () => { statusEl.textContent = 'Connection error.'; };
 
     // Mobile browsers block programmatic audio.play() until the page has had
@@ -3675,7 +3692,13 @@ app.get('/live-ops/:token', (req, res) => {
     // own <audio> element. Not perfectly gapless, but far simpler/more
     // robust than real MediaSource buffering for a v1 of a safety feature.
     ws.onmessage = (event) => {
-      if (typeof event.data === 'string') return; // device-side JSON events aren't sent to listeners
+      if (typeof event.data === 'string') {
+        try {
+          const msg = JSON.parse(event.data);
+          if (msg.type === 'comms_state') setCommsOpen(!!msg.open);
+        } catch {}
+        return;
+      }
       const blob = new Blob([event.data], { type: 'audio/webm' });
       const audio = new Audio(URL.createObjectURL(blob));
       audio.play().catch((err) => {
@@ -3686,7 +3709,6 @@ app.get('/live-ops/:token', (req, res) => {
 
     let recorder = null;
     let chunks = [];
-    const talkBtn = document.getElementById('talk');
     async function startTalk() {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       chunks = [];
@@ -3804,7 +3826,17 @@ wss.on('connection', (ws, request) => {
       }, FINALIZE_INTERVAL_MS);
     }
     ws.on('message', (data, isBinary) => {
-      if (!isBinary) return; // device only ever sends raw mic audio up
+      if (!isBinary) {
+        // Device can also send a small JSON control message (comms_state) —
+        // added 2026-07-25 so the listener page can disable Hold-to-Speak
+        // while comms are closed instead of silently discarding a relayed
+        // clip the device won't even play. No interpretation needed here,
+        // just relay it straight through like everything else.
+        for (const listener of entry.listeners) {
+          if (listener.readyState === listener.OPEN) listener.send(data.toString('utf8'));
+        }
+        return;
+      }
       entry.bufferChunks.push(Buffer.from(data));
       for (const listener of entry.listeners) {
         if (listener.readyState === listener.OPEN) listener.send(data);
