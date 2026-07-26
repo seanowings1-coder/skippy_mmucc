@@ -3719,11 +3719,14 @@ app.get('/live-ops/:token', (req, res) => {
       audioUnlocked = true;
       document.getElementById('unlockOverlay').remove();
       try {
-        // A bare new Audio() with no source at all — .play() rejects
-        // immediately with nothing ever actually decoded, which may not
-        // register as a genuine gesture-approved playback the way a real
-        // (even silent) clip does. Using an actual tiny silent WAV instead.
-        const unlock = new Audio('data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQAAAAA=');
+        // Reverted 2026-07-26 back to the original bare new Audio() — the
+        // real silent-WAV data URI (introduced to make the unlock more
+        // "genuine") is the exact commit where "can't get past the button"
+        // first started, confirmed by diffing against the last version the
+        // user could actually get past. Whatever the precise browser-level
+        // reason, the bare version is the one with a real track record of
+        // working, so reverting to it rather than continuing to theorize.
+        const unlock = new Audio();
         unlock.play()
           .then(() => {
             console.log('live-ops audio unlock succeeded');
@@ -3731,8 +3734,8 @@ app.get('/live-ops/:token', (req, res) => {
             unlock.pause();
           })
           .catch((err) => {
-            console.warn('live-ops audio unlock FAILED:', err);
-            logAudioDebug(\`unlock tap: play() FAILED: \${err.name} \${err.message}\`);
+            console.warn('live-ops audio unlock FAILED (expected/harmless for a sourceless element):', err);
+            logAudioDebug(\`unlock tap: play() FAILED (expected): \${err.name} \${err.message}\`);
           });
       } catch (err) {
         console.warn('live-ops audio unlock threw synchronously:', err);
