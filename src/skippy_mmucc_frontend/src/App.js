@@ -4445,8 +4445,15 @@ class App {
       this.recognition.start();
     }
     this.#render();
-    await this.#startGuardianStream();
 
+    // #startGuardianStream opens the device-role WebSocket using
+    // this.emergencyToken — it MUST run after the token below is actually
+    // set, not before. Confirmed live 2026-07-25: calling it first meant the
+    // socket was built with the still-null token, and the proxy correctly
+    // rejected every connection with close code 1008 "Invalid token or
+    // role" — so no audio or relayed message ever reached either side, on
+    // every prior live-fire test, deterministically (not a flaky timing
+    // issue).
     try {
       const response = await fetch(`${PROXY_URL}/emergency-dispatch`, {
         method: 'POST',
@@ -4462,7 +4469,10 @@ class App {
       this.emergencyId = await this.backendActor.start_emergency(data.token);
     } catch (err) {
       console.error('[Skippy] Dispatch request failed:', err.message);
+      return;
     }
+
+    await this.#startGuardianStream();
   };
 
   // Opens the device-role WebSocket to the proxy's live relay and starts
@@ -4486,7 +4496,22 @@ class App {
     );
     this.emergencyWs = ws;
 
+    // Diagnostic instrumentation added 2026-07-25 — this socket previously
+    // had no onclose/onerror at all, so a silent disconnect (network blip,
+    // Railway restart, idle timeout) would leave the UI stuck showing
+    // "COMMS OPEN" while actually relaying nothing, with zero indication
+    // anywhere. Confirmed live: relayed messages stopped arriving with no
+    // client-side error surfaced. These logs exist to catch that on the next
+    // live-fire test, not as a fix in themselves.
+    ws.onclose = (event) => {
+      console.warn('[Skippy emergency] device WS closed — code:', event.code, 'reason:', event.reason || '(none)');
+    };
+    ws.onerror = (event) => {
+      console.error('[Skippy emergency] device WS error:', event);
+    };
+
     ws.onmessage = async (event) => {
+      console.log('[Skippy emergency] device WS message received, binary:', typeof event.data !== 'string');
       if (typeof event.data !== 'string') {
         // A relayed push-to-talk burst from a listener — only ever played
         // through the speaker when comms are explicitly open; Ghost Mode's
@@ -4547,6 +4572,7 @@ class App {
     };
 
     ws.onopen = () => {
+      console.log('[Skippy emergency] device WS connected');
       const recorder = new MediaRecorder(this.emergencyStream);
       recorder.ondataavailable = async (e) => {
         if (e.data.size > 0 && ws.readyState === WebSocket.OPEN) {
