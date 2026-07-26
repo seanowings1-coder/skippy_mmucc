@@ -3682,8 +3682,19 @@ app.get('/live-ops/:token', (req, res) => {
     // already happened.
     let audioUnlocked = false;
     document.getElementById('unlockBtn').addEventListener('click', () => {
-      const unlock = new Audio();
-      unlock.play().catch(() => {}).finally(() => unlock.pause());
+      // A bare new Audio() with no source at all — .play() rejects
+      // immediately with nothing ever actually decoded, which may not
+      // register as a genuine gesture-approved playback the way a real
+      // (even silent) clip does. Using an actual tiny silent WAV instead,
+      // confirmed 2026-07-25 after "nothing comes out my mobile" persisted
+      // across multiple tests even with this button tapped every time.
+      const unlock = new Audio('data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQAAAAA=');
+      unlock.play()
+        .then(() => {
+          console.log('live-ops audio unlock succeeded');
+          unlock.pause();
+        })
+        .catch((err) => console.warn('live-ops audio unlock FAILED:', err));
       audioUnlocked = true;
       document.getElementById('unlockOverlay').remove();
     });
@@ -3699,12 +3710,15 @@ app.get('/live-ops/:token', (req, res) => {
         } catch {}
         return;
       }
+      console.log('live-ops received audio chunk, bytes:', event.data.size ?? event.data.byteLength);
       const blob = new Blob([event.data], { type: 'audio/webm' });
       const audio = new Audio(URL.createObjectURL(blob));
-      audio.play().catch((err) => {
-        if (!audioUnlocked) showFeedback('Tap "Start Listening" above to enable audio.');
-        console.warn('live-ops audio playback failed:', err);
-      });
+      audio.play()
+        .then(() => console.log('live-ops audio chunk playing'))
+        .catch((err) => {
+          if (!audioUnlocked) showFeedback('Tap "Start Listening" above to enable audio.');
+          console.warn('live-ops audio playback FAILED:', err);
+        });
     };
 
     let recorder = null;

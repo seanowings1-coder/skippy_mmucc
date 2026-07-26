@@ -4578,6 +4578,10 @@ class App {
       this.#sendCommsState(this.commsOpen);
       const recorder = new MediaRecorder(this.emergencyStream);
       recorder.ondataavailable = async (e) => {
+        // Diagnostic logging added 2026-07-25 — zero visibility existed into
+        // whether this side is even capturing/sending real audio at all,
+        // separate from whether it plays on the listener end.
+        console.log('[Skippy emergency] outgoing mic chunk, bytes:', e.data.size);
         if (e.data.size > 0 && ws.readyState === WebSocket.OPEN) {
           ws.send(await e.data.arrayBuffer());
         }
