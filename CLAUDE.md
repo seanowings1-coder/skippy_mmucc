@@ -123,7 +123,7 @@ Express.js server. All routes require the `requireSession` middleware (validates
 | `GET /api/fuel` | Cycle balance + OpenRouter/ElevenLabs/DeepInfra/Twilio balance status |
 | `GET /api/deepinfra-topup` | Mints a fresh, single-use DeepInfra Stripe billing portal URL (not cacheable, unlike other providers' static Top Up links) |
 | `POST /emergency-dispatch` | Triggers Guardian Emergency Protocol, mints secure token |
-| `GET /live-ops/:token` | SSE stream for emergency contacts (no auth — token is the credential) |
+| `GET /live-ops/:token` | WebSocket-based live audio page for emergency contacts (no auth — token is the credential) |
 | `GET /api/weather-check` | Manual on-demand Weather Safety Monitor check (Pillar 26) — `?test=1` forces a Pushover send without touching the real tier-dedup state |
 
 ### Everyday / Heavy Hitter brains (`/respond`)
@@ -220,8 +220,10 @@ Planned/aspirational system design for features not yet fully implemented.
 
 ### 4. Guardian Emergency Protocol (Pillar 12)
 - Trigger phrase → proxy `/emergency-dispatch` → mints `secure_token`, texts SMS links to whitelisted contacts, starts in-proxy live audio buffer.
-- Frontend streams audio chunks to proxy → proxy stores finalized chunks via `append_emergency_audio_chunk` on canister (append-only evidentiary ledger, no delete path).
-- Contacts access live audio via `GET /live-ops/:token` SSE endpoint (no authentication beyond the token).
+- Frontend streams audio chunks to proxy → proxy relays one `finalize` message per already-complete ~2s segment back to the device → frontend calls `append_emergency_audio_chunk` on canister (append-only evidentiary ledger, no delete path). **Archival concatenation bug fixed 2026-07-27**: the proxy used to batch several complete segments together with `Buffer.concat()` every 10s before archiving, which a standard player only decodes the first segment of — audio saved before this fix may be truncated to ~2s per 10s batch, not recoverable retroactively.
+- Contacts access live audio via `GET /live-ops/:token` (WebSocket-based, not SSE despite the routes table's older description) — no authentication beyond the token.
+- **Retrieval — Emergency Audio Archive panel, shipped 2026-07-27**: `Workspace Security → Emergency Audio Archive` lists every past emergency (`list_my_emergencies`) and lets you play/download the recorded audio (`list_emergency_audio_chunks`, one `.webm` file per segment, lazily fetched per-emergency on expand). Both canister methods already existed and were unused before this — no backend changes needed.
+- **Tamper-evidence, discussed 2026-07-27**: ICP subnet consensus already protects against an outside attacker silently editing stored data (independent node providers must agree on every write) — judged sufficient by the user without needing stronger cryptographic proof (e.g. ICP certified data, which would additionally prove the canister's own controller never edited it) for now.
 - Known gap: emergency audio stored without encryption-at-rest.
 
 ### 5. Courier Queue (Pillar 7)
