@@ -3941,6 +3941,13 @@ app.get('/live-ops/:token', (req, res) => {
     let recorder = null;
     let chunks = [];
     async function startTalk() {
+      // Confirmed live 2026-07-27: the disabled HTML attribute blocks a
+      // normal mouse click, but a raw touchstart listener still fires on
+      // Android Chrome regardless — recorded and "sent" a clip while comms
+      // were still closed, showing a false "Message sent." confirmation
+      // right next to the amber warning saying they can't hear you yet.
+      // Guard the actual function, don't rely on the attribute alone.
+      if (talkBtn.disabled) return;
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       chunks = [];
       recorder = new MediaRecorder(stream);
