@@ -124,6 +124,7 @@ Express.js server. All routes require the `requireSession` middleware (validates
 | `GET /api/deepinfra-topup` | Mints a fresh, single-use DeepInfra Stripe billing portal URL (not cacheable, unlike other providers' static Top Up links) |
 | `POST /emergency-dispatch` | Triggers Guardian Emergency Protocol, mints secure token |
 | `GET /live-ops/:token` | SSE stream for emergency contacts (no auth — token is the credential) |
+| `GET /api/weather-check` | Manual on-demand Weather Safety Monitor check (Pillar 26) — `?test=1` forces a Pushover send without touching the real tier-dedup state |
 
 ### Everyday / Heavy Hitter brains (`/respond`)
 See "Brain → DeepInfra migration" below for the full peer-fall-forward + cross-tier-escalation design — that section is the source of truth, not duplicated here. In short: 2-3 genuine peer models per tier, tried in order, everyday escalates to Heavy Hitter on total failure, Heavy Hitter hard-errors on its own total failure. Everyday peers can be individually deselected from the brain-grid modal (sticky via `localStorage`).
@@ -190,6 +191,11 @@ DEEPINFRA_MODEL_SNAPPY_FALLBACK= # defaults to deepseek-ai/DeepSeek-V4-Flash
 DEEPINFRA_MODEL_SUPERBRAIN=    # defaults to deepseek-ai/DeepSeek-V4-Pro
 DEEPINFRA_MODEL_TACTICAL=      # defaults to deepseek-ai/DeepSeek-V4-Flash — Steel Rain race entrant
 DEEPINFRA_EMBEDDING_MODEL=     # defaults to BAAI/bge-large-en-v1.5 — /embed's primary, 1024-dim
+PUSHOVER_APP_TOKEN=            # Weather Safety Monitor (Pillar 26) — blank = feature inert
+PUSHOVER_USER_KEY=             # Weather Safety Monitor (Pillar 26) — blank = feature inert
+WEATHER_LAT=                   # optional override — defaults to Lincoln, NE (40.8136)
+WEATHER_LON=                   # optional override — defaults to Lincoln, NE (-96.7026)
+WEATHER_STATION_ID=            # optional override — defaults to KLNK (Lincoln Municipal Airport)
 ```
 
 ## Project Blueprint
@@ -220,6 +226,14 @@ Planned/aspirational system design for features not yet fully implemented.
 
 ### 5. Courier Queue (Pillar 7)
 - Two-user system: `queue_courier_message` routes to the other whitelisted Principal automatically; `pop_pending_courier_messages` delivers and purges in one atomic call.
+
+### 6. Weather Safety Monitor (Pillar 26, shipped 2026-07-26)
+- Heat-index push alerts for the user's dysautonomia/syncope risk (heat/humidity → blood pooling → fainting, "the funky chicken" in the user's own words). Lives entirely in the proxy (Railway), not the canister — a `setInterval` cron, not tied to canister HTTPS outcalls or any login/session.
+- Checks every 30 min, 08:00–20:00 America/Chicago, against real current conditions from NWS (`api.weather.gov`, station `KLNK` near Lincoln, NE by default) — not forecast. Falls back to the NOAA Rothfusz heat-index formula when a station observation is missing the field directly.
+- 4-tier threat matrix (Caution 86°F → High Alert 93°F → Critical 98°F → Danger Zone 105°F+ feels-like), each with in-character Skippy one-liners, sent via Pushover (`PUSHOVER_APP_TOKEN`/`PUSHOVER_USER_KEY`) — a flat one-time-fee push service, not Twilio, to stay independent of the Guardian Emergency SMS pipeline's own A2P approval queue.
+- **Only sends a new alert when the tier changes (up or down)**, not on every 30-min check — user's explicit 2026-07-26 call to avoid meeting-interrupting spam, tracked via an in-memory `lastAlertedTierId` (resets on redeploy — an accepted tradeoff). No acknowledge/snooze mechanism exists or is needed given this design.
+- `GET /api/weather-check` (session-gated) is a manual on-demand trigger for testing — `?test=1` forces a real Pushover send without disturbing the dedup state, so testing never suppresses a genuine later alert.
+- Inert with a console warning if Pushover isn't configured.
 
 ## Planned Migrations (in progress as of 2026-07-02)
 
