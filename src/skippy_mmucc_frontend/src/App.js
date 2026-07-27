@@ -1148,6 +1148,17 @@ class App {
   // localStorage phase for this one.
   knownFacts = [];
   editingKnownFactId = null;
+  // Pillar 12 (Guardian Emergency Protocol) retrieval, added 2026-07-27 —
+  // the audio was already being stored permanently on the canister
+  // (append-only, no delete method), but nothing in the app could ever get
+  // it back out. list_my_emergencies() is loaded eagerly like the other
+  // small lists above; chunk bytes are fetched lazily per-emergency only
+  // when expanded, since audio can be substantially larger than everything
+  // else in this batch.
+  emergencyList = [];
+  expandedEmergencyId = null;
+  emergencyAudioChunks = [];
+  emergencyAudioLoading = false;
   // Counts real turns since the last fact-extraction pass — reset to 0 after
   // each attempt (success or failure). Deliberately less frequent than the
   // Async Janitor's every-turn compression: fact extraction is a heavier,
@@ -1469,6 +1480,7 @@ class App {
       this.backendActor.list_my_contacts().then((r) => (this.contacts = r)),
       this.backendActor.list_my_roster_profiles().then((r) => (this.rosterProfiles = r)),
       this.backendActor.list_my_known_facts().then((r) => (this.knownFacts = r)),
+      this.backendActor.list_my_emergencies().then((r) => (this.emergencyList = r)),
       this.backendActor.get_my_persona_profile().then((profileOpt) => {
         const profile = profileOpt[0];
         this.profileName = profile?.name?.[0] || '';
@@ -1988,6 +2000,57 @@ class App {
       this.statusMessage = `Couldn't download: ${extractCanisterTrapMessage(err)}`;
     }
     this.#render();
+  };
+
+  // Pillar 12 retrieval, added 2026-07-27. Chunks are fetched lazily, only
+  // on first expand of a given emergency, and cached in emergencyAudioChunks
+  // for the rest of the session — re-expanding the same emergency doesn't
+  // re-fetch. Sorted by created_at so playback/download order matches
+  // recording order regardless of whatever order the canister returns them in.
+  #clearEmergencyAudioUrls = () => {
+    for (const chunk of this.emergencyAudioChunks) {
+      if (chunk.url) URL.revokeObjectURL(chunk.url);
+    }
+  };
+
+  #toggleEmergencyExpand = async (id) => {
+    if (this.expandedEmergencyId === id) {
+      this.#clearEmergencyAudioUrls();
+      this.expandedEmergencyId = null;
+      this.emergencyAudioChunks = [];
+      this.#render();
+      return;
+    }
+    this.#clearEmergencyAudioUrls();
+    this.expandedEmergencyId = id;
+    this.emergencyAudioChunks = [];
+    this.emergencyAudioLoading = true;
+    this.#render();
+    try {
+      const chunks = await this.backendActor.list_emergency_audio_chunks(id);
+      const sorted = [...chunks].sort((a, b) => Number(a.created_at - b.created_at));
+      this.emergencyAudioChunks = sorted.map((chunk) => {
+        const bytes = chunk.data instanceof Uint8Array ? chunk.data : new Uint8Array(chunk.data);
+        return { ...chunk, url: URL.createObjectURL(new Blob([bytes], { type: 'audio/webm' })) };
+      });
+    } catch (err) {
+      this.statusMessage = `Couldn't load emergency audio: ${extractCanisterTrapMessage(err)}`;
+    }
+    this.emergencyAudioLoading = false;
+    this.#render();
+  };
+
+  // Each chunk downloads as its own numbered .webm file rather than one
+  // combined file — chunks are independently complete recordings (see the
+  // 2026-07-27 archival fix), not guaranteed to concatenate into one valid
+  // playable file even now that each one is individually sound. Reuses the
+  // object URL already created in #toggleEmergencyExpand rather than
+  // rebuilding the Blob.
+  #downloadEmergencyChunk = (emergencyId, chunk, index) => {
+    const a = document.createElement('a');
+    a.href = chunk.url;
+    a.download = `emergency-${emergencyId}-segment-${String(index + 1).padStart(3, '0')}.webm`;
+    a.click();
   };
 
   // In-app preview (2026-07-14) — no round-trip through the Downloads folder
@@ -5883,6 +5946,60 @@ class App {
                       `,
                     )}
                   </ul>
+                </details>
+
+                <details class="emergency-archive">
+                  <summary>Emergency Audio Archive (${this.emergencyList.length})</summary>
+                  <p class="status">
+                    Every past Guardian Emergency, with the recorded audio evidence — permanent,
+                    append-only canister storage, no delete method exists for this data. Audio recorded
+                    before 2026-07-27 may be truncated to the first ~2 seconds of each 10-second segment
+                    (a real archival bug, fixed going forward — see CLAUDE.md).
+                  </p>
+                  ${this.emergencyList.length === 0
+                    ? html`<p class="status">No emergencies recorded yet.</p>`
+                    : html`
+                        <ul>
+                          ${[...this.emergencyList]
+                            .sort((a, b) => Number(b.started_at - a.started_at))
+                            .map((ev) => {
+                              const isOpen = this.expandedEmergencyId === ev.id;
+                              return html`
+                                <li style="margin:0.5em 0;">
+                                  <div>
+                                    ${new Date(Number(ev.started_at / 1_000_000n)).toLocaleString()}
+                                    <button @click=${() => this.#toggleEmergencyExpand(ev.id)}>
+                                      ${isOpen ? 'Hide' : 'View audio'}
+                                    </button>
+                                  </div>
+                                  ${isOpen
+                                    ? this.emergencyAudioLoading
+                                      ? html`<p class="status">Loading...</p>`
+                                      : this.emergencyAudioChunks.length === 0
+                                        ? html`<p class="status">No audio was recorded for this emergency.</p>`
+                                        : html`
+                                            <ol>
+                                              ${this.emergencyAudioChunks.map(
+                                                (chunk, i) => html`
+                                                  <li style="margin:0.4em 0;">
+                                                    <div class="status">
+                                                      ${new Date(Number(chunk.created_at / 1_000_000n)).toLocaleTimeString()}
+                                                    </div>
+                                                    <audio controls src=${chunk.url}></audio>
+                                                    <button @click=${() => this.#downloadEmergencyChunk(ev.id, chunk, i)}>
+                                                      Download
+                                                    </button>
+                                                  </li>
+                                                `,
+                                              )}
+                                            </ol>
+                                          `
+                                    : ''}
+                                </li>
+                              `;
+                            })}
+                        </ul>
+                      `}
                 </details>
               `}
         </details>
