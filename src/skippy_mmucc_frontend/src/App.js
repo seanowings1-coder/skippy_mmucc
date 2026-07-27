@@ -1151,7 +1151,7 @@ class App {
   // Pillar 12 (Guardian Emergency Protocol) retrieval, added 2026-07-27 —
   // the audio was already being stored permanently on the canister
   // (append-only, no delete method), but nothing in the app could ever get
-  // it back out. list_my_emergencies() is loaded eagerly like the other
+  // it back out. list_all_emergencies() is loaded eagerly like the other
   // small lists above; chunk bytes are fetched lazily per-emergency only
   // when expanded, since audio can be substantially larger than everything
   // else in this batch.
@@ -1480,7 +1480,7 @@ class App {
       this.backendActor.list_my_contacts().then((r) => (this.contacts = r)),
       this.backendActor.list_my_roster_profiles().then((r) => (this.rosterProfiles = r)),
       this.backendActor.list_my_known_facts().then((r) => (this.knownFacts = r)),
-      this.backendActor.list_my_emergencies().then((r) => (this.emergencyList = r)),
+      this.backendActor.list_all_emergencies().then((r) => (this.emergencyList = r)),
       this.backendActor.get_my_persona_profile().then((profileOpt) => {
         const profile = profileOpt[0];
         this.profileName = profile?.name?.[0] || '';
@@ -2051,6 +2051,47 @@ class App {
     a.href = chunk.url;
     a.download = `emergency-${emergencyId}-segment-${String(index + 1).padStart(3, '0')}.webm`;
     a.click();
+  };
+
+  // 2026-07-27 — the one deliberate exception to "emergency audio is never
+  // deletable," scoped to test/practice triggers only. Real emergencies
+  // never expose a working delete button at all (see the render logic),
+  // and the backend independently rejects delete_emergency for anything
+  // not explicitly marked a test, so this can't be bypassed by a frontend bug.
+  #toggleEmergencyTestFlag = async (ev) => {
+    const nowTest = !(ev.is_test?.[0] === true);
+    try {
+      await this.backendActor.mark_emergency_test(ev.id, nowTest);
+      this.emergencyList = this.emergencyList.map((e) =>
+        e.id === ev.id ? { ...e, is_test: [nowTest] } : e,
+      );
+    } catch (err) {
+      this.statusMessage = `Couldn't update: ${extractCanisterTrapMessage(err)}`;
+    }
+    this.#render();
+  };
+
+  #deleteEmergency = async (ev) => {
+    if (
+      !window.confirm(
+        'Permanently delete this test emergency and all its recorded audio? This cannot be undone.',
+      )
+    ) {
+      return;
+    }
+    try {
+      await this.backendActor.delete_emergency(ev.id);
+      this.emergencyList = this.emergencyList.filter((e) => e.id !== ev.id);
+      if (this.expandedEmergencyId === ev.id) {
+        this.#clearEmergencyAudioUrls();
+        this.expandedEmergencyId = null;
+        this.emergencyAudioChunks = [];
+      }
+      this.statusMessage = 'Test emergency deleted.';
+    } catch (err) {
+      this.statusMessage = `Couldn't delete: ${extractCanisterTrapMessage(err)}`;
+    }
+    this.#render();
   };
 
   // In-app preview (2026-07-14) — no round-trip through the Downloads folder
@@ -5951,10 +5992,11 @@ class App {
                 <details class="emergency-archive">
                   <summary>Emergency Audio Archive (${this.emergencyList.length})</summary>
                   <p class="status">
-                    Every past Guardian Emergency, with the recorded audio evidence — permanent,
-                    append-only canister storage, no delete method exists for this data. Audio recorded
-                    before 2026-07-27 may be truncated to the first ~2 seconds of each 10-second segment
-                    (a real archival bug, fixed going forward — see CLAUDE.md).
+                    Every household Guardian Emergency (either of you), with the recorded audio evidence
+                    — permanent, append-only canister storage. Real emergencies can never be deleted, by
+                    design. Mark a practice/test trigger as a test to unlock a real delete for that one
+                    entry only. Audio recorded before 2026-07-27 may be truncated to the first ~2 seconds
+                    of each 10-second segment (a real archival bug, fixed going forward — see CLAUDE.md).
                   </p>
                   ${this.emergencyList.length === 0
                     ? html`<p class="status">No emergencies recorded yet.</p>`
@@ -5964,13 +6006,21 @@ class App {
                             .sort((a, b) => Number(b.started_at - a.started_at))
                             .map((ev) => {
                               const isOpen = this.expandedEmergencyId === ev.id;
+                              const isTest = ev.is_test?.[0] === true;
                               return html`
                                 <li style="margin:0.5em 0;">
                                   <div>
                                     ${new Date(Number(ev.started_at / 1_000_000n)).toLocaleString()}
+                                    ${isTest ? html`<span class="status"> · marked as test</span>` : ''}
                                     <button @click=${() => this.#toggleEmergencyExpand(ev.id)}>
                                       ${isOpen ? 'Hide' : 'View audio'}
                                     </button>
+                                    <button @click=${() => this.#toggleEmergencyTestFlag(ev)}>
+                                      ${isTest ? 'Unmark test' : 'Mark as test'}
+                                    </button>
+                                    ${isTest
+                                      ? html`<button @click=${() => this.#deleteEmergency(ev)}>Delete</button>`
+                                      : ''}
                                   </div>
                                   ${isOpen
                                     ? this.emergencyAudioLoading

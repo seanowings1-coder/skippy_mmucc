@@ -401,6 +401,12 @@ pub struct EmergencyEvent {
     pub owner: Principal,
     pub secure_token: String,
     pub started_at: u64,
+    // Added 2026-07-27 — user's explicit call: real emergencies stay
+    // permanently undeletable (the original evidence-protection design is
+    // unchanged), but test/practice triggers need a way to be marked and
+    // cleaned up. None/Some(false) both mean "not a test" — only
+    // Some(true) unlocks delete_emergency below.
+    pub is_test: Option<bool>,
 }
 
 impl Storable for EmergencyEvent {
@@ -1767,14 +1773,16 @@ fn start_emergency(secure_token: String) -> u64 {
         owner: caller,
         secure_token,
         started_at: ic_cdk::api::time(),
+        is_test: None,
     };
     EMERGENCY_EVENTS.with(|e| e.borrow_mut().insert(id, event));
     id
 }
 
 /// Pillar 12 — appends one finalized audio chunk to the permanent,
-/// append-only evidentiary ledger. No corresponding delete method exists
-/// for this store, deliberately — see `EmergencyAudioChunk`'s doc comment.
+/// append-only evidentiary ledger for a REAL emergency. Only
+/// `delete_emergency` below can ever remove chunks, and only for an
+/// emergency explicitly marked as a test — see its doc comment.
 #[update]
 fn append_emergency_audio_chunk(emergency_id: u64, data: Vec<u8>) -> u64 {
     let caller = assert_whitelisted();
@@ -1790,10 +1798,20 @@ fn append_emergency_audio_chunk(emergency_id: u64, data: Vec<u8>) -> u64 {
     id
 }
 
+/// Viewing is symmetric across both whitelisted principals — 2026-07-27,
+/// matching how RAG is already deliberately global/not siloed (see
+/// CLAUDE.md). An emergency SMS-notifies the OTHER principal, who is
+/// already a direct participant in every event; there was never a real
+/// privacy boundary between the two of you here, only an accidental one
+/// from `list_my_emergencies` originally filtering by owner. No ownership
+/// check beyond `assert_whitelisted` — any of the two legitimate household
+/// members can view any household emergency's audio.
 #[query]
 fn list_emergency_audio_chunks(emergency_id: u64) -> Vec<EmergencyAudioChunk> {
-    let caller = assert_whitelisted();
-    assert_emergency_owner(caller, emergency_id);
+    assert_whitelisted();
+    if EMERGENCY_EVENTS.with(|e| e.borrow().get(&emergency_id)).is_none() {
+        ic_cdk::trap("Emergency event not found.");
+    }
     EMERGENCY_AUDIO.with(|a| {
         a.borrow()
             .iter()
@@ -1803,16 +1821,54 @@ fn list_emergency_audio_chunks(emergency_id: u64) -> Vec<EmergencyAudioChunk> {
     })
 }
 
+/// Renamed from list_my_emergencies 2026-07-27 — now genuinely returns
+/// every household emergency, not just the caller's own, per the same
+/// symmetric-visibility call as list_emergency_audio_chunks above.
 #[query]
-fn list_my_emergencies() -> Vec<EmergencyEvent> {
+fn list_all_emergencies() -> Vec<EmergencyEvent> {
+    assert_whitelisted();
+    EMERGENCY_EVENTS.with(|e| e.borrow().iter().map(|entry| entry.value().clone()).collect())
+}
+
+/// 2026-07-27 — lets a test/practice trigger be flagged so it becomes
+/// eligible for delete_emergency below. Owner-only (not symmetric like
+/// viewing above) — deliberately more conservative for anything that can
+/// lead to real deletion, even though only the triggering owner's own
+/// events are affected either way in practice.
+#[update]
+fn mark_emergency_test(emergency_id: u64, is_test: bool) {
     let caller = assert_whitelisted();
-    EMERGENCY_EVENTS.with(|e| {
-        e.borrow()
+    let mut event = assert_emergency_owner(caller, emergency_id);
+    event.is_test = Some(is_test);
+    EMERGENCY_EVENTS.with(|e| e.borrow_mut().insert(emergency_id, event));
+}
+
+/// 2026-07-27 — the one deliberate, narrow exception to Pillar 12's
+/// original "no delete, ever" design. Real emergencies remain permanently
+/// undeletable: this traps unless `is_test` was explicitly set true via
+/// mark_emergency_test first, checked here server-side too (not just
+/// hidden in the frontend) so the guarantee holds even if a future
+/// frontend build has a bug. Removes the event AND every audio chunk
+/// belonging to it.
+#[update]
+fn delete_emergency(emergency_id: u64) {
+    let caller = assert_whitelisted();
+    let event = assert_emergency_owner(caller, emergency_id);
+    if event.is_test != Some(true) {
+        ic_cdk::trap("Only emergencies explicitly marked as a test can be deleted.");
+    }
+    EMERGENCY_AUDIO.with(|a| {
+        let mut store = a.borrow_mut();
+        let ids: Vec<u64> = store
             .iter()
-            .filter(|entry| entry.value().owner == caller)
-            .map(|entry| entry.value().clone())
-            .collect()
-    })
+            .filter(|entry| entry.value().emergency_id == emergency_id)
+            .map(|entry| *entry.key())
+            .collect();
+        for id in &ids {
+            store.remove(id);
+        }
+    });
+    EMERGENCY_EVENTS.with(|e| e.borrow_mut().remove(&emergency_id));
 }
 
 /// Pillar 8 (Fuel & Quotas Dashboard) — exposes the canister's own cycle

@@ -64,6 +64,7 @@ type EmergencyEvent = record {
     owner : principal;
     secure_token : text;
     started_at : nat64;
+    is_test : opt bool;
 };
 
 type EmergencyAudioChunk = record {
@@ -206,7 +207,9 @@ service : (principal, principal, principal) -> {
     "start_emergency": (text) -> (nat64);
     "append_emergency_audio_chunk": (nat64, blob) -> (nat64);
     "list_emergency_audio_chunks": (nat64) -> (vec EmergencyAudioChunk) query;
-    "list_my_emergencies": () -> (vec EmergencyEvent) query;
+    "list_all_emergencies": () -> (vec EmergencyEvent) query;
+    "mark_emergency_test": (nat64, bool) -> ();
+    "delete_emergency": (nat64) -> ();
 
     "get_cycle_balance": () -> (nat64) query;
 

@@ -47,6 +47,7 @@ export interface EmergencyAudioChunk {
 }
 export interface EmergencyEvent {
   'id' : bigint,
+  'is_test' : [] | [boolean],
   'secure_token' : string,
   'owner' : Principal,
   'started_at' : bigint,
@@ -178,6 +179,7 @@ export interface _SERVICE {
   'create_workspace' : ActorMethod<[string], bigint>,
   'delete_artifact' : ActorMethod<[bigint], undefined>,
   'delete_contact' : ActorMethod<[bigint], undefined>,
+  'delete_emergency' : ActorMethod<[bigint], undefined>,
   'delete_known_fact' : ActorMethod<[bigint], undefined>,
   'delete_manual' : ActorMethod<[string], bigint>,
   'delete_manual_section' : ActorMethod<[bigint], boolean>,
@@ -196,6 +198,7 @@ export interface _SERVICE {
   'get_my_persona_profile' : ActorMethod<[], [] | [PersonaProfile]>,
   'get_pump_config' : ActorMethod<[], [Principal, bigint, bigint, bigint]>,
   'greet' : ActorMethod<[string], string>,
+  'list_all_emergencies' : ActorMethod<[], Array<EmergencyEvent>>,
   'list_emergency_audio_chunks' : ActorMethod<
     [bigint],
     Array<EmergencyAudioChunk>
@@ -203,7 +206,6 @@ export interface _SERVICE {
   'list_manual_names' : ActorMethod<[], Array<string>>,
   'list_my_artifacts' : ActorMethod<[], Array<ArtifactMeta>>,
   'list_my_contacts' : ActorMethod<[], Array<Contact>>,
-  'list_my_emergencies' : ActorMethod<[], Array<EmergencyEvent>>,
   'list_my_evolution_log' : ActorMethod<[number], Array<EvolutionLogEntry>>,
   'list_my_known_facts' : ActorMethod<[], Array<KnownFact>>,
   'list_my_roster_profiles' : ActorMethod<[], Array<RosterProfile>>,
@@ -212,6 +214,7 @@ export interface _SERVICE {
   'login' : ActorMethod<[], { 'Ok' : string } | { 'Err' : string }>,
   'manual_category_map' : ActorMethod<[], Array<[string, string]>>,
   'mark_critic_loop_resolved' : ActorMethod<[bigint], undefined>,
+  'mark_emergency_test' : ActorMethod<[bigint, boolean], undefined>,
   'overwrite_turn_content' : ActorMethod<[bigint, bigint, string], undefined>,
   'pop_pending_courier_messages' : ActorMethod<[], Array<CourierMessage>>,
   'purge_history' : ActorMethod<[bigint], undefined>,

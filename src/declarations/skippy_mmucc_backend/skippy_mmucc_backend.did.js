@@ -50,6 +50,13 @@ export const idlFactory = ({ IDL }) => {
     'name' : IDL.Opt(IDL.Text),
     'voice_id' : IDL.Opt(IDL.Text),
   });
+  const EmergencyEvent = IDL.Record({
+    'id' : IDL.Nat64,
+    'is_test' : IDL.Opt(IDL.Bool),
+    'secure_token' : IDL.Text,
+    'owner' : IDL.Principal,
+    'started_at' : IDL.Nat64,
+  });
   const EmergencyAudioChunk = IDL.Record({
     'id' : IDL.Nat64,
     'data' : IDL.Vec(IDL.Nat8),
@@ -76,12 +83,6 @@ export const idlFactory = ({ IDL }) => {
     'email' : IDL.Text,
     'keywords' : IDL.Opt(IDL.Vec(IDL.Text)),
     'company' : IDL.Opt(IDL.Text),
-  });
-  const EmergencyEvent = IDL.Record({
-    'id' : IDL.Nat64,
-    'secure_token' : IDL.Text,
-    'owner' : IDL.Principal,
-    'started_at' : IDL.Nat64,
   });
   const EvolutionLogEntry = IDL.Record({
     'id' : IDL.Nat64,
@@ -186,6 +187,7 @@ export const idlFactory = ({ IDL }) => {
     'create_workspace' : IDL.Func([IDL.Text], [IDL.Nat64], []),
     'delete_artifact' : IDL.Func([IDL.Nat64], [], []),
     'delete_contact' : IDL.Func([IDL.Nat64], [], []),
+    'delete_emergency' : IDL.Func([IDL.Nat64], [], []),
     'delete_known_fact' : IDL.Func([IDL.Nat64], [], []),
     'delete_manual' : IDL.Func([IDL.Text], [IDL.Nat64], []),
     'delete_manual_section' : IDL.Func([IDL.Nat64], [IDL.Bool], []),
@@ -225,6 +227,7 @@ export const idlFactory = ({ IDL }) => {
         ['query'],
       ),
     'greet' : IDL.Func([IDL.Text], [IDL.Text], ['query']),
+    'list_all_emergencies' : IDL.Func([], [IDL.Vec(EmergencyEvent)], ['query']),
     'list_emergency_audio_chunks' : IDL.Func(
         [IDL.Nat64],
         [IDL.Vec(EmergencyAudioChunk)],
@@ -233,7 +236,6 @@ export const idlFactory = ({ IDL }) => {
     'list_manual_names' : IDL.Func([], [IDL.Vec(IDL.Text)], ['query']),
     'list_my_artifacts' : IDL.Func([], [IDL.Vec(ArtifactMeta)], ['query']),
     'list_my_contacts' : IDL.Func([], [IDL.Vec(Contact)], ['query']),
-    'list_my_emergencies' : IDL.Func([], [IDL.Vec(EmergencyEvent)], ['query']),
     'list_my_evolution_log' : IDL.Func(
         [IDL.Nat32],
         [IDL.Vec(EvolutionLogEntry)],
@@ -262,6 +264,7 @@ export const idlFactory = ({ IDL }) => {
         ['query'],
       ),
     'mark_critic_loop_resolved' : IDL.Func([IDL.Nat64], [], []),
+    'mark_emergency_test' : IDL.Func([IDL.Nat64, IDL.Bool], [], []),
     'overwrite_turn_content' : IDL.Func(
         [IDL.Nat64, IDL.Nat64, IDL.Text],
         [],
