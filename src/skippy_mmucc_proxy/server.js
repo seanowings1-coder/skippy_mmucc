@@ -288,11 +288,10 @@ const PROXY_ALLOWED_ORIGINS = (
 // In-memory only, per Pillar 1's existing reasoning for why streamed audio
 // belongs in the Web2 proxy, not the canister (2MB message cap, no real
 // streaming support there). Keyed by the secure token carried in the SMS
-// link. The canister still gets the permanent record — see
-// FINALIZE_INTERVAL_MS below and the periodic finalize logic in the WS
-// handler — this map is just the live relay, not the evidentiary ledger.
+// link. The canister still gets the permanent record — see the device-role
+// 'finalize' relay in the WS handler — this map is just the live relay,
+// not the evidentiary ledger.
 const activeEmergencies = new Map();
-const FINALIZE_INTERVAL_MS = 10_000;
 
 // Weather Safety Monitor (heat-index alerts for the user's dysautonomia/
 // syncope risk, see CLAUDE.md/memory) — lives here, not the canister, same
@@ -3761,8 +3760,6 @@ app.post('/emergency-dispatch', requireSession, async (req, res) => {
     owner: req.skippySession.principal,
     device: null,
     listeners: new Set(),
-    bufferChunks: [],
-    finalizeTimer: null,
   });
 
   // Use PROXY_BASE_URL from env so the SMS link points to the real server.
@@ -4049,21 +4046,6 @@ wss.on('connection', (ws, request) => {
       return;
     }
     entry.device = ws;
-    // Periodic finalize: bundles whatever's been buffered since the last
-    // tick and hands it back to the *device* (not the canister directly —
-    // the proxy never calls the canister, per Pillar 1's implementation
-    // note) so the frontend can forward it to append_emergency_audio_chunk
-    // with its own already-authenticated identity.
-    if (!entry.finalizeTimer) {
-      entry.finalizeTimer = setInterval(() => {
-        if (entry.bufferChunks.length === 0) return;
-        const combined = Buffer.concat(entry.bufferChunks);
-        entry.bufferChunks = [];
-        if (entry.device && entry.device.readyState === entry.device.OPEN) {
-          entry.device.send(JSON.stringify({ type: 'finalize', data: combined.toString('base64') }));
-        }
-      }, FINALIZE_INTERVAL_MS);
-    }
     ws.on('message', (data, isBinary) => {
       if (!isBinary) {
         // Device can also send a small JSON control message (comms_state) —
@@ -4076,17 +4058,30 @@ wss.on('connection', (ws, request) => {
         }
         return;
       }
-      entry.bufferChunks.push(Buffer.from(data));
       for (const listener of entry.listeners) {
         if (listener.readyState === listener.OPEN) listener.send(data);
       }
+      // Persist immediately, one 'finalize' message per segment — fixed
+      // 2026-07-27. This used to buffer several ~2s segments and concat
+      // their raw bytes together every 10s before sending back to the
+      // device to archive. Each segment is already a complete, independently
+      // playable WebM file (per the MediaRecorder stop/restart fix earlier
+      // the same night) — concatenating several complete files together
+      // produces a blob a standard player only decodes the first segment
+      // of, silently truncating everything after ~2s of each 10s batch.
+      // Caught while building emergency-audio retrieval/playback and
+      // realizing what was actually stored wouldn't play back cleanly.
+      // Sending one already-complete segment per finalize message removes
+      // the concatenation entirely instead of trying to fix it after the
+      // fact. The proxy still never calls the canister directly (no II
+      // delegation, per Pillar 1) — this still routes through the device's
+      // own authenticated append_emergency_audio_chunk call, just once per
+      // segment instead of once per 10s batch.
+      if (entry.device && entry.device.readyState === entry.device.OPEN) {
+        entry.device.send(JSON.stringify({ type: 'finalize', data: Buffer.from(data).toString('base64') }));
+      }
     });
     ws.on('close', () => {
-      // Clear the finalize timer so it doesn't keep ticking with no device
-      // attached. Setting finalizeTimer to null allows it to be restarted if
-      // the device reconnects before stand-down.
-      clearInterval(entry.finalizeTimer);
-      entry.finalizeTimer = null;
       entry.device = null;
     });
   } else {
