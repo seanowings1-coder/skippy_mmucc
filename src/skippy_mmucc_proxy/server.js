@@ -294,6 +294,23 @@ const PROXY_ALLOWED_ORIGINS = (
 const activeEmergencies = new Map();
 const FINALIZE_INTERVAL_MS = 10_000;
 
+// Weather Safety Monitor (heat-index alerts for the user's dysautonomia/
+// syncope risk, see CLAUDE.md/memory) — lives here, not the canister, same
+// reasoning as Guardian Emergency SMS: this is a background job on an
+// always-on process, not a per-user canister call. Runs independently of
+// any Skippy login/session — Pushover pushes land on the phone whether or
+// not the app is even open.
+const PUSHOVER_APP_TOKEN = cleanEnv('PUSHOVER_APP_TOKEN');
+const PUSHOVER_USER_KEY = cleanEnv('PUSHOVER_USER_KEY');
+// Lincoln, NE — user confirmed 2026-07-20 this is "close enough" to their
+// actual rural location. Override via env if a more precise point is ever wanted.
+const WEATHER_LAT = process.env.WEATHER_LAT || '40.8136';
+const WEATHER_LON = process.env.WEATHER_LON || '-96.7026';
+// Nearest NWS observation station to the coordinates above — used for
+// real current conditions, not forecast, since a safety alert should
+// reflect what it actually feels like right now. Confirmed live 2026-07-26.
+const WEATHER_STATION_ID = process.env.WEATHER_STATION_ID || 'KLNK';
+
 const DFX_NETWORK = process.env.DFX_NETWORK || 'local';
 const IC_HOST = process.env.IC_HOST || 'https://icp-api.io';
 const BACKEND_CANISTER_ID = process.env.CANISTER_ID_SKIPPY_MMUCC_BACKEND;
@@ -988,6 +1005,201 @@ async function sendSms(to, body) {
   const result = await response.json();
   console.log(`[Skippy emergency] Twilio send OK: sid=${result.sid} status=${result.status}`);
   return result;
+}
+
+// Pillar 26 (Weather Safety Monitor). Plain REST call, no SDK — same style
+// as sendSms above. No-ops with a console warning rather than throwing when
+// Pushover isn't configured yet, matching the existing "buildable before the
+// real account exists" pattern.
+async function sendPushover(title, message, priority = 0) {
+  if (!PUSHOVER_APP_TOKEN || !PUSHOVER_USER_KEY) {
+    console.warn(`[Skippy weather] Pushover not configured — alert not sent: "${title}" — "${message}"`);
+    return { skipped: true };
+  }
+  const response = await fetch('https://api.pushover.net/1/messages.json', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({
+      token: PUSHOVER_APP_TOKEN,
+      user: PUSHOVER_USER_KEY,
+      title,
+      message,
+      priority: String(priority),
+    }),
+  });
+  if (!response.ok) {
+    const detail = await response.text();
+    console.error(`[Skippy weather] Pushover send FAILED: status=${response.status} body=${detail}`);
+    throw new Error(`Pushover error: ${response.status} ${detail}`);
+  }
+  console.log(`[Skippy weather] Pushover send OK: "${title}"`);
+  return response.json();
+}
+
+// NOAA Rothfusz regression — same formula NWS itself uses. Only invoked as a
+// fallback; NWS station observations usually already include heatIndex
+// directly (see checkWeatherSafety below), this just covers the gap when a
+// given observation is missing it. Takes/returns Fahrenheit.
+function computeHeatIndexF(tempF, relHumidityPct) {
+  const T = tempF;
+  const RH = relHumidityPct;
+  return (
+    -42.379 + 2.04901523 * T + 10.14333127 * RH - 0.22475541 * T * RH -
+    0.00683783 * T * T - 0.05481717 * RH * RH + 0.00122874 * T * T * RH +
+    0.00085282 * T * RH * RH - 0.00000199 * T * T * RH * RH
+  );
+}
+
+// Threat tiers per the user's own spec, 2026-07-20 — "funky chicken" is the
+// user's own term from their Marine Corps days for a heat-triggered
+// face-plant/fainting episode; keep it exactly as-is in the Critical tier,
+// don't genericize it. Checked in descending order (danger first) so a
+// heat index that clears multiple thresholds lands on the worst one.
+// 2-3 line variants per tier so repeated alerts on the same day don't all
+// read identically.
+const WEATHER_TIERS = [
+  {
+    id: 'danger',
+    label: 'Danger Zone',
+    min: 105,
+    safeWindow: '0 minutes',
+    lines: (t) => [
+      `Commander, ${t}°F feels-like. Do NOT go outside. Not five minutes, not one. Stay in, stay cool — that's an order.`,
+      `${t}°F feels-like out there right now. This isn't a suggestion, Commander — indoors, full stop, until I say otherwise.`,
+    ],
+  },
+  {
+    id: 'critical',
+    label: 'Critical',
+    min: 98,
+    safeWindow: '5 minutes',
+    lines: (t) => [
+      `This is "take the potato out of the microwave" hot — ${t}°F feels-like. Five-minute window before you're doing the funky chicken.`,
+      `${t}°F feels-like, Commander. Five minutes out there, tops, before your blood pressure stages a walkout.`,
+    ],
+  },
+  {
+    id: 'high',
+    label: 'High Alert',
+    min: 93,
+    safeWindow: '10 minutes',
+    lines: (t) => [
+      `Commander, ${t}°F feels-like and climbing. Ten minutes, tops, before your blood pressure decides to check out early.`,
+      `${t}°F feels-like out there. You've got about ten minutes before your body starts filing a formal complaint.`,
+    ],
+  },
+  {
+    id: 'caution',
+    label: 'Caution',
+    min: 86,
+    safeWindow: '15 minutes',
+    lines: (t) => [
+      `Hey Commander, it's climbing — feels like ${t}°F out there. About 15 minutes before your body starts arguing with you.`,
+      `${t}°F feels-like right now, Commander. Not an emergency yet, but keep it short out there — 15 minutes or so.`,
+    ],
+  },
+];
+
+// "safe" is deliberately not in WEATHER_TIERS above (it never fires an
+// escalation line, only an optional all-clear — see below).
+function getWeatherTier(heatIndexF) {
+  for (const tier of WEATHER_TIERS) {
+    if (heatIndexF >= tier.min) return tier;
+  }
+  return { id: 'safe', label: 'Safe', min: -Infinity, safeWindow: null };
+}
+
+// Module-level, resets on redeploy/restart — an acceptable tradeoff per the
+// user's 2026-07-26 call: only push a NEW alert when the tier actually
+// changes (up OR down), not on every 30-min check while conditions hold
+// steady. Avoids meeting-interrupting spam without needing a real
+// acknowledge/snooze mechanism, which Pushover has no API support for anyway.
+let lastAlertedTierId = null;
+
+async function checkWeatherSafety({ forceSend = false } = {}) {
+  const obsUrl = `https://api.weather.gov/stations/${WEATHER_STATION_ID}/observations/latest`;
+  const response = await fetch(obsUrl, {
+    headers: { 'User-Agent': '(skippy-mmucc weather safety monitor, contact via app owner)' },
+  });
+  if (!response.ok) {
+    console.error(`[Skippy weather] NWS observation fetch failed: status=${response.status}`);
+    return { error: `NWS ${response.status}` };
+  }
+  const data = await response.json();
+  const props = data.properties || {};
+  const tempC = props.temperature?.value;
+  const rh = props.relativeHumidity?.value;
+  if (tempC == null) {
+    console.error('[Skippy weather] NWS observation missing temperature entirely');
+    return { error: 'missing temperature' };
+  }
+  const tempF = tempC * 9 / 5 + 32;
+  let heatIndexF = props.heatIndex?.value != null ? props.heatIndex.value * 9 / 5 + 32 : null;
+  if (heatIndexF == null && rh != null) {
+    heatIndexF = computeHeatIndexF(tempF, rh);
+  }
+  // NWS's own heatIndex field is null below its ~80°F validity floor — not
+  // dangerous, just not applicable, so fall back to plain air temp for tier
+  // purposes rather than treating "no data" as "no alert logic runs at all."
+  if (heatIndexF == null) heatIndexF = tempF;
+
+  const tier = getWeatherTier(heatIndexF);
+  const roundedHI = Math.round(heatIndexF);
+  console.log(`[Skippy weather] check: tempF=${tempF.toFixed(1)} RH=${rh} heatIndexF=${roundedHI} tier=${tier.id} lastAlertedTierId=${lastAlertedTierId}`);
+
+  const tierChanged = tier.id !== lastAlertedTierId;
+  if (!forceSend && !tierChanged) {
+    return { heatIndexF: roundedHI, tier: tier.id, sent: false, reason: 'tier unchanged' };
+  }
+
+  let title;
+  let message;
+  if (tier.id === 'safe') {
+    // Only worth a push if we're actually coming DOWN from a worse tier —
+    // otherwise "all clear" on a cool morning with nothing preceding it is
+    // just noise. forceSend (manual test route) always sends regardless.
+    if (!forceSend && lastAlertedTierId == null) {
+      lastAlertedTierId = tier.id;
+      return { heatIndexF: roundedHI, tier: tier.id, sent: false, reason: 'already safe, no prior alert to clear' };
+    }
+    title = 'Skippy — all clear';
+    message = `Temps have dropped back down, Commander — ${roundedHI}°F feels-like now. You're clear.`;
+  } else {
+    title = `Skippy — ${tier.label} (${roundedHI}°F feels-like)`;
+    const variants = tier.lines(roundedHI);
+    message = variants[Math.floor(Math.random() * variants.length)];
+  }
+
+  if (forceSend) title = `[TEST] ${title}`;
+  await sendPushover(title, message, tier.id === 'danger' ? 1 : 0);
+  if (!forceSend) lastAlertedTierId = tier.id;
+  return { heatIndexF: roundedHI, tier: tier.id, sent: true, title, message };
+}
+
+// Checks every 30 min in real time; the callback itself no-ops outside
+// 08:00–20:00 America/Chicago so it doesn't need its own timezone-aware
+// scheduler — Railway's clock runs UTC, this reads local hour fresh each
+// tick instead of trying to compute a UTC offset once and drifting across
+// DST. A plain setInterval was chosen over adding a cron dependency
+// (node-cron etc.) — see feedback_npm_install_agent_chosen_package.md,
+// new npm installs in this project need the user to run them personally.
+const WEATHER_CHECK_INTERVAL_MS = 30 * 60 * 1000;
+function isWithinWeatherMonitoringWindow() {
+  const hour = Number(
+    new Intl.DateTimeFormat('en-US', { timeZone: 'America/Chicago', hour: 'numeric', hour12: false }).format(new Date()),
+  );
+  return hour >= 8 && hour < 20;
+}
+function startWeatherSafetyMonitor() {
+  if (!PUSHOVER_APP_TOKEN || !PUSHOVER_USER_KEY) {
+    console.warn('[Skippy weather] PUSHOVER_APP_TOKEN/PUSHOVER_USER_KEY not set — Weather Safety Monitor is inert.');
+    return;
+  }
+  setInterval(() => {
+    if (!isWithinWeatherMonitoringWindow()) return;
+    checkWeatherSafety().catch((err) => console.error('[Skippy weather] check failed:', err));
+  }, WEATHER_CHECK_INTERVAL_MS);
+  console.log('[Skippy weather] Weather Safety Monitor started — checking every 30 min, 08:00-20:00 America/Chicago.');
 }
 
 // Defense-in-depth, added 2026-06-21: prompt instructions telling the model
@@ -3422,6 +3634,24 @@ app.get('/api/fuel', requireSession, async (req, res) => {
   res.json(result);
 });
 
+// Pillar 26 (Weather Safety Monitor) — manual on-demand check, same purpose
+// as the rest of this app's diagnostic routes: verify the real pipeline
+// (NWS fetch → tier logic → Pushover) without waiting up to 30 min for the
+// background interval to fire. ?test=1 forces a send regardless of whether
+// the tier changed, prefixed "[TEST]" and without touching the real
+// lastAlertedTierId dedup state, so testing never suppresses a genuine
+// later alert.
+app.get('/api/weather-check', requireSession, async (req, res) => {
+  res.set('Cache-Control', 'no-store');
+  try {
+    const result = await checkWeatherSafety({ forceSend: req.query.test === '1' });
+    res.json(result);
+  } catch (err) {
+    console.error('[Skippy weather] manual check failed:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // DeepInfra top-up — unlike OpenRouter/ElevenLabs/Twilio's Top Up links above (static pages,
 // safe to hardcode as <a href>), DeepInfra's billing portal is a live, single-use Stripe
 // Checkout session — it has to be minted fresh per click, not cached or reused. Separate route
@@ -3614,26 +3844,18 @@ app.get('/live-ops/:token', (req, res) => {
     p.instructions { font-size: 0.95em; line-height: 1.4; }
     #talk { width: 100%; padding: 32px 0; font-size: 1.3em; background: #1A1A1A; color: #D1D5DB; border: 2px solid #00E5FF; border-radius: 8px; margin: 16px 0; }
     #talk.active { background: #00E5FF; color: #0D0D0D; }
-    #talk:disabled { border-color: #444; color: #555; }
-    #commsNotice { font-size: 0.85em; color: #f59e0b; margin-bottom: 8px; }
     .presets { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 16px; }
     .presets button { flex: 1 1 45%; padding: 12px 4px; background: #1A1A1A; color: #D1D5DB; border: 1px solid #555; border-radius: 4px; }
     #status { font-size: 0.85em; color: #888; }
     #feedback { font-size: 0.85em; color: #00E5FF; min-height: 1.2em; margin-top: 8px; }
-    #unlockBtn { width: 100%; padding: 20px 0; font-size: 1.1em; background: #00E5FF; color: #0D0D0D; border: none; border-radius: 8px; margin-bottom: 16px; }
+    #unlockOverlay { position: fixed; inset: 0; background: #0D0D0D; z-index: 10; display: flex; align-items: center; justify-content: center; }
+    #unlockBtn { padding: 20px 32px; font-size: 1.1em; background: #00E5FF; color: #0D0D0D; border: none; border-radius: 8px; }
   </style>
 </head>
 <body>
-  <!-- Diagnostic change, 2026-07-26: this used to be a position:fixed
-       full-screen overlay blocking the rest of the page until tapped —
-       taps on it never registered at all (confirmed via an alert() that
-       never fired, even on a build Railway's deploy log confirmed was
-       live). Now a plain in-flow button, same as the preset buttons below
-       it, to test whether a NORMAL button responds to taps at all on this
-       device — if this one works but the old fixed-overlay one didn't,
-       that isolates the bug to the fixed-position/full-screen CSS
-       specifically, not a general touch problem. -->
-  <button id="unlockBtn">🔊 Tap to Start Listening (enables audio)</button>
+  <div id="unlockOverlay">
+    <button id="unlockBtn">🔊 Tap to Start Listening</button>
+  </div>
   <h1>Live Emergency Feed</h1>
   <p class="instructions">
     You are listening to a live emergency audio feed. This is <strong>not a phone call</strong> —
@@ -3641,8 +3863,7 @@ app.get('/live-ops/:token', (req, res) => {
     person will hear it a few seconds later, not instantly.
   </p>
   <div id="status">Connecting...</div>
-  <div id="commsNotice"></div>
-  <button id="talk" disabled>Hold to Speak</button>
+  <button id="talk">Hold to Speak</button>
   <div class="presets">
     <button data-preset="Help is on the way.">Help is on the way</button>
     <button data-preset="Police have been notified.">Police notified</button>
@@ -3650,20 +3871,7 @@ app.get('/live-ops/:token', (req, res) => {
     <button data-preset="I can't hear you, try again.">Can't hear you</button>
   </div>
   <div id="feedback"></div>
-  <div id="audioDebug" style="font-size:0.75em;color:#555;margin-top:16px;white-space:pre-line;"></div>
   <script>
-    // On-screen debug line, added 2026-07-25 — desktop→mobile audio has
-    // stayed silent across several rounds of fixes with no way to see this
-    // page's own console (no practical DevTools access on a phone mid
-    // live-fire test). Shows the last few chunk-received/play-attempt
-    // events directly on screen instead.
-    const audioDebugEl = document.getElementById('audioDebug');
-    let audioDebugLines = [];
-    function logAudioDebug(line) {
-      audioDebugLines.push(new Date().toLocaleTimeString() + ' ' + line);
-      audioDebugLines = audioDebugLines.slice(-6);
-      audioDebugEl.textContent = audioDebugLines.join('\n');
-    }
     const wsScheme = location.protocol === 'https:' ? 'wss' : 'ws';
     const ws = new WebSocket(\`\${wsScheme}://\${location.host}/emergency-ws?token=${req.params.token}&role=listener\`);
     const statusEl = document.getElementById('status');
@@ -3674,23 +3882,9 @@ app.get('/live-ops/:token', (req, res) => {
       clearTimeout(feedbackTimer);
       feedbackTimer = setTimeout(() => { feedbackEl.textContent = ''; }, 3000);
     }
-    const talkBtn = document.getElementById('talk');
-    const commsNoticeEl = document.getElementById('commsNotice');
-    // Defaults closed/disabled until the device tells us otherwise (its
-    // comms_state message on connect, or after "open comms"/"go dark") —
-    // matches the device's own default (commsOpen starts false on trigger).
-    // Added 2026-07-25: previously Hold-to-Speak was always enabled, so a
-    // clip recorded while comms were closed got silently discarded on the
-    // device end with zero indication either side.
-    function setCommsOpen(open) {
-      talkBtn.disabled = !open;
-      commsNoticeEl.textContent = open ? '' : "Comms are closed — they can't hear you yet.";
-    }
-    setCommsOpen(false);
-
-    ws.onopen = () => { statusEl.textContent = 'Connected — listening live.'; logAudioDebug('WS connected'); };
-    ws.onclose = () => { statusEl.textContent = 'Disconnected.'; setCommsOpen(false); logAudioDebug('WS closed'); };
-    ws.onerror = () => { statusEl.textContent = 'Connection error.'; logAudioDebug('WS error'); };
+    ws.onopen = () => { statusEl.textContent = 'Connected — listening live.'; };
+    ws.onclose = () => { statusEl.textContent = 'Disconnected.'; };
+    ws.onerror = () => { statusEl.textContent = 'Connection error.'; };
 
     // Mobile browsers block programmatic audio.play() until the page has had
     // a real user gesture — a link opened fresh from an SMS has none, so
@@ -3700,76 +3894,29 @@ app.get('/live-ops/:token', (req, res) => {
     // rest of the page's session; everything below this point assumes that's
     // already happened.
     let audioUnlocked = false;
-    let unlockHandled = false;
-    const unlockBtnEl = document.getElementById('unlockBtn');
-    function handleUnlockTap() {
-      if (unlockHandled) return;
-      unlockHandled = true;
-      // TEMPORARY diagnostic — added 2026-07-26. alert() is immune to
-      // CSS/z-index/async issues — if this doesn't show up even now that
-      // this is a plain in-flow button (no more position:fixed overlay),
-      // the click event isn't reaching this page's JS at all, on ANY
-      // element, which rules out the fixed-overlay CSS theory entirely.
-      alert('unlock tap registered');
+    document.getElementById('unlockBtn').addEventListener('click', () => {
+      const unlock = new Audio();
+      unlock.play().catch(() => {}).finally(() => unlock.pause());
       audioUnlocked = true;
-      unlockBtnEl.textContent = 'Audio enabled ✓';
-      unlockBtnEl.disabled = true;
-      try {
-        // Reverted 2026-07-26 back to the original bare new Audio() — the
-        // real silent-WAV data URI (introduced to make the unlock more
-        // "genuine") is the exact commit where "can't get past the button"
-        // first started, confirmed by diffing against the last version the
-        // user could actually get past. Whatever the precise browser-level
-        // reason, the bare version is the one with a real track record of
-        // working, so reverting to it rather than continuing to theorize.
-        const unlock = new Audio();
-        unlock.play()
-          .then(() => {
-            console.log('live-ops audio unlock succeeded');
-            logAudioDebug('unlock tap: play() succeeded');
-            unlock.pause();
-          })
-          .catch((err) => {
-            console.warn('live-ops audio unlock FAILED (expected/harmless for a sourceless element):', err);
-            logAudioDebug(\`unlock tap: play() FAILED (expected): \${err.name} \${err.message}\`);
-          });
-      } catch (err) {
-        console.warn('live-ops audio unlock threw synchronously:', err);
-        logAudioDebug(\`unlock tap threw: \${err.name} \${err.message}\`);
-      }
-    }
-    unlockBtnEl.addEventListener('click', handleUnlockTap);
+      document.getElementById('unlockOverlay').remove();
+    });
 
     // Simple sequential playback — each relayed/finalized chunk plays as its
     // own <audio> element. Not perfectly gapless, but far simpler/more
     // robust than real MediaSource buffering for a v1 of a safety feature.
     ws.onmessage = (event) => {
-      if (typeof event.data === 'string') {
-        try {
-          const msg = JSON.parse(event.data);
-          if (msg.type === 'comms_state') setCommsOpen(!!msg.open);
-        } catch {}
-        return;
-      }
-      const size = event.data.size ?? event.data.byteLength;
-      console.log('live-ops received audio chunk, bytes:', size);
-      logAudioDebug(\`chunk received, \${size}B, unlocked=\${audioUnlocked}\`);
+      if (typeof event.data === 'string') return; // device-side JSON events aren't sent to listeners
       const blob = new Blob([event.data], { type: 'audio/webm' });
       const audio = new Audio(URL.createObjectURL(blob));
-      audio.play()
-        .then(() => {
-          console.log('live-ops audio chunk playing');
-          logAudioDebug('play() succeeded');
-        })
-        .catch((err) => {
-          if (!audioUnlocked) showFeedback('Tap "Start Listening" above to enable audio.');
-          console.warn('live-ops audio playback FAILED:', err);
-          logAudioDebug(\`play() FAILED: \${err.name} \${err.message}\`);
-        });
+      audio.play().catch((err) => {
+        if (!audioUnlocked) showFeedback('Tap "Start Listening" above to enable audio.');
+        console.warn('live-ops audio playback failed:', err);
+      });
     };
 
     let recorder = null;
     let chunks = [];
+    const talkBtn = document.getElementById('talk');
     async function startTalk() {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       chunks = [];
@@ -3832,6 +3979,7 @@ const server = app.listen(PORT, '0.0.0.0', () => {
       'Set PROXY_ALLOWED_ORIGINS to the mainnet frontend URL before production use.'
     );
   }
+  startWeatherSafetyMonitor();
 });
 
 // Pillar 12's live relay — a dumb two-way pipe per active emergency, keyed
@@ -3887,17 +4035,7 @@ wss.on('connection', (ws, request) => {
       }, FINALIZE_INTERVAL_MS);
     }
     ws.on('message', (data, isBinary) => {
-      if (!isBinary) {
-        // Device can also send a small JSON control message (comms_state) —
-        // added 2026-07-25 so the listener page can disable Hold-to-Speak
-        // while comms are closed instead of silently discarding a relayed
-        // clip the device won't even play. No interpretation needed here,
-        // just relay it straight through like everything else.
-        for (const listener of entry.listeners) {
-          if (listener.readyState === listener.OPEN) listener.send(data.toString('utf8'));
-        }
-        return;
-      }
+      if (!isBinary) return; // device only ever sends raw mic audio up
       entry.bufferChunks.push(Buffer.from(data));
       for (const listener of entry.listeners) {
         if (listener.readyState === listener.OPEN) listener.send(data);
