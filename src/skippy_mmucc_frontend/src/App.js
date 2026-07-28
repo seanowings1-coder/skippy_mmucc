@@ -75,6 +75,17 @@ const FACT_EXTRACTION_INTERVAL = 4;
 // data, just how a reload interprets it.
 const LEGACY_COMPRESSED_SHORTHAND_PATTERN = /^\[tone:\s*[\w\s-]+\]/i;
 
+// TEMPORARY DEBUG FLAG, 2026-07-27 — set true to see what's actually
+// happening during a real Guardian Emergency test (state, live transcript,
+// etc.) instead of a blank black screen. Only suppresses the OVERLAY's
+// rendering — emergencyActive/ghostMode/commsOpen and everything they gate
+// (TTS silencing, the emergency-phrase checks, the audio relay) are
+// completely untouched, so this is safe to test with. MUST be flipped back
+// to false before this is trusted for a real emergency again — a visible
+// screen defeats Ghost Mode's whole purpose of not giving away that the
+// phone is in use.
+const DEBUG_SHOW_GHOST_MODE_UI = true;
+
 const TRIGGER_PHRASES = [
   'let me make sure i write this down',
   'let me grab my notepad',
@@ -5532,7 +5543,7 @@ class App {
 
     let body = html`
       <div class="command-deck">
-        ${this.ghostMode
+        ${this.ghostMode && !DEBUG_SHOW_GHOST_MODE_UI
           ? this.commsOpen
             ? html`<div style="position:fixed;inset:0;background:#0a0a0a;z-index:9999;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:1.5em;color:#d1d5db;font-family:inherit;">
                 <div style="font-size:1.1em;letter-spacing:0.12em;color:#00e5ff;text-transform:uppercase;">● COMMS OPEN</div>
