@@ -1239,6 +1239,13 @@ class App {
   // re-matching (e.g. "open comms" then "open comms please"). Reset to true
   // on every recognition.onstart — see that handler's comment.
   #emergencyPhraseArmed = true;
+  // Set right before a deliberate "clean renegotiate" recognition.stop() in
+  // #startGuardianStream/#stopGuardianStream (mic-contention fix, see those
+  // comments) — tells onend to wait for the Android HAL to actually release
+  // the hardware lock before restarting, instead of the normal immediate
+  // restart, which was racing the getUserMedia grant/release and throwing
+  // InvalidStateError on a real device.
+  #forceDelayedRestart = false;
   // 'premium' (ElevenLabs via proxy) | 'economy' (browser speechSynthesis)
   voiceMode = 'premium';
   // Independent of voiceMode — when true, Skippy never speaks at all (either
@@ -3068,7 +3075,15 @@ class App {
       console.log('[Skippy] speech recognition ended');
       this.recognitionActive = false;
       if (this.state !== 'idle' && !this.stopRequested) {
-        if (this.isSpeaking && App.#IS_ANDROID) {
+        if (this.#forceDelayedRestart) {
+          // Give the Android HAL a real beat to actually release the
+          // hardware mic lock before asking for it back — see
+          // #forceDelayedRestart's field comment.
+          this.#forceDelayedRestart = false;
+          setTimeout(() => {
+            if (this.state !== 'idle' && !this.stopRequested) this.#startRecognition();
+          }, 500);
+        } else if (this.isSpeaking && App.#IS_ANDROID) {
           // TTS has audio focus — restarting now causes a double-dong on Android
           // and immediately picks up speaker audio. Set a flag; onended restarts us.
           this._restartRecognitionAfterTTS = true;
@@ -4712,7 +4727,8 @@ class App {
     // re-negotiates the microphone now that both consumers are active,
     // rather than assuming it survives the new grant unaffected.
     if (this.recognition && this.state !== 'idle') {
-      this.recognition.stop(); // onend's existing restart logic brings it back
+      this.#forceDelayedRestart = true;
+      this.recognition.stop(); // onend restarts us after a real delay — see #forceDelayedRestart
     }
 
     const ws = new WebSocket(
@@ -4854,6 +4870,7 @@ class App {
     // — see the matching comment in #startGuardianStream. Force the same
     // clean restart on the way out, not just on the way in.
     if (this.recognition && this.state !== 'idle') {
+      this.#forceDelayedRestart = true;
       this.recognition.stop();
     }
   };
