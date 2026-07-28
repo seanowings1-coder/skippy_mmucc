@@ -3093,6 +3093,24 @@ class App {
     try {
       this.recognition.start();
     } catch (err) {
+      // Real bug caught on a real device 2026-07-27: "Failed to execute
+      // 'start' on 'SpeechRecognition': recognition has already started" —
+      // our own recognitionActive flag said it was safe to start (false),
+      // but the browser's actual native state disagreed. Almost certainly
+      // async cleanup lag after the aggressive restart cycling already
+      // documented on this device (onend fires and sets recognitionActive
+      // false slightly before the underlying native session has genuinely
+      // torn down). Previously this permanently left recognitionActive
+      // false while the mic was, per the browser's own error, still
+      // actually running — every later restart attempt hit the exact same
+      // error forever, with no recovery, which is exactly what "Skippy
+      // stopped hearing me" looks like from the outside. Correct our own
+      // bookkeeping to match reality instead of treating this as fatal.
+      if (err.name === 'InvalidStateError') {
+        console.warn('[Skippy] start() raced an already-running recognition — correcting state, not restarting');
+        this.recognitionActive = true;
+        return;
+      }
       console.error('[Skippy] recognition.start() threw:', err);
       this.statusMessage = `Couldn't start the microphone: ${err.message}`;
       this.#render();
@@ -4630,10 +4648,12 @@ class App {
     this.statusMessage = '';
     this.#requestWakeLock();
     // Force mic on so "open comms" / "stand down" work even if listening wasn't
-    // already active when the emergency fired.
+    // already active when the emergency fired. Routed through #startRecognition
+    // (not a raw .start() call) so it gets the same recognitionActive guard and
+    // InvalidStateError recovery as every other restart path.
     if (this.state === 'idle' && this.recognition) {
       this.state = 'listening';
-      this.recognition.start();
+      this.#startRecognition();
     }
     this.#render();
 
