@@ -4702,6 +4702,19 @@ class App {
       return;
     }
 
+    // Real bug found on a real device 2026-07-27: acquiring this second,
+    // independent getUserMedia stream (needed for the continuous device→
+    // listener audio relay) at the same moment SpeechRecognition already
+    // holds the mic silently starves recognition — confirmed live: voice
+    // worked fine right up until the emergency triggered, then stopped
+    // hearing anything at all, and did NOT self-heal even after standing
+    // down released this stream again. Force a clean restart so recognition
+    // re-negotiates the microphone now that both consumers are active,
+    // rather than assuming it survives the new grant unaffected.
+    if (this.recognition && this.state !== 'idle') {
+      this.recognition.stop(); // onend's existing restart logic brings it back
+    }
+
     const ws = new WebSocket(
       proxyWsUrl(`/emergency-ws?token=${this.emergencyToken}&role=device`),
     );
@@ -4836,6 +4849,13 @@ class App {
       this.emergencyWs.close();
     }
     this.emergencyWs = null;
+    // Real bug found 2026-07-27: recognition didn't come back on its own
+    // after standing down released the competing getUserMedia stream above
+    // — see the matching comment in #startGuardianStream. Force the same
+    // clean restart on the way out, not just on the way in.
+    if (this.recognition && this.state !== 'idle') {
+      this.recognition.stop();
+    }
   };
 
   // "Skippy, stand down" — no phrase was specified in the original spec for
