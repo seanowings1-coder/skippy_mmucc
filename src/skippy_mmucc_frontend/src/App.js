@@ -1099,6 +1099,13 @@ class App {
   emergencyId = null;
   emergencyWs = null;
   emergencyRecorder = null;
+  // Screen Wake Lock held for the duration of a Ghost Mode emergency — see
+  // #requestWakeLock. Without this, a phone with nobody touching its screen
+  // (the entire point of hiding) times out and locks itself, and Android
+  // throttles/suspends background tabs once the screen is off — which kills
+  // SpeechRecognition, explaining why "open comms"/"stand down" stop
+  // registering on mobile specifically (desktops have no screen-timeout).
+  #wakeLockSentinel = null;
   emergencyStream = null;
   // Pillar 8 (Fuel & Quotas Dashboard) — read-only balances, refreshed once
   // after login and on-demand via a manual button. "Dumb meat sack"
@@ -1371,6 +1378,15 @@ class App {
     // real gesture-anchored #unlockAudioPlayback call sets them up.
     this.audioContext = null;
     this.gainNode = null;
+    // The Wake Lock API auto-releases whenever the document goes hidden and
+    // does NOT reacquire itself — if the tab is ever backgrounded mid-emergency
+    // (a phone call, switching apps) and then comes back, re-request it rather
+    // than silently leaving the phone free to sleep again.
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'visible' && this.emergencyActive && this.ghostMode) {
+        this.#requestWakeLock();
+      }
+    });
     this.#render();
     this.#initAuth();
   }
@@ -4542,6 +4558,7 @@ class App {
     this.ghostMode = true;
     this.commsOpen = false;
     this.statusMessage = '';
+    this.#requestWakeLock();
     // Force mic on so "open comms" / "stand down" work even if listening wasn't
     // already active when the emergency fired.
     if (this.state === 'idle' && this.recognition) {
@@ -4751,6 +4768,29 @@ class App {
     this.#recordTurn(text, reply);
     this.#render();
     this.#speak(reply);
+    this.#releaseWakeLock();
+  };
+
+  // Requests a screen wake lock for the duration of a Ghost Mode emergency so
+  // "open comms"/"stand down" keep registering on mobile — see the
+  // #wakeLockSentinel field comment for the full reasoning. Silently no-ops
+  // if the API is unsupported (older browsers) or the request is refused
+  // (e.g. battery saver) — this is a mitigation, not something to block the
+  // emergency flow over if it fails.
+  #requestWakeLock = async () => {
+    if (!('wakeLock' in navigator)) return;
+    try {
+      this.#wakeLockSentinel = await navigator.wakeLock.request('screen');
+    } catch (err) {
+      console.warn('[Skippy] wake lock request failed:', err.name, err.message);
+    }
+  };
+
+  #releaseWakeLock = () => {
+    if (this.#wakeLockSentinel) {
+      this.#wakeLockSentinel.release().catch(() => {});
+      this.#wakeLockSentinel = null;
+    }
   };
 
   // Resets the 5s timer on each new message rather than stacking — only the
