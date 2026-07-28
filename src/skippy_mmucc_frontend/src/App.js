@@ -3037,19 +3037,11 @@ class App {
           // specifically, speed/reliability beats waiting for a clean final
           // transcript — same reasoning as the barge-in check just above —
           // so act the instant the INTERIM transcript matches, don't wait.
-          if (this.emergencyActive && !this.guestMode && this.#emergencyPhraseArmed) {
-            const lowerInterim = this.liveTranscript.toLowerCase();
-            if (STAND_DOWN_PHRASES.some((phrase) => lowerInterim.includes(phrase))) {
-              this.#emergencyPhraseArmed = false;
-              this.#standDownEmergency(this.liveTranscript);
-            } else if (OPEN_COMMS_PHRASES.some((phrase) => lowerInterim.includes(phrase))) {
-              this.#emergencyPhraseArmed = false;
-              this.#openComms(this.liveTranscript);
-            } else if (GO_DARK_PHRASES.some((phrase) => lowerInterim.includes(phrase))) {
-              this.#emergencyPhraseArmed = false;
-              this.#goDark(this.liveTranscript);
-            }
-          }
+          // See #tryHandleEmergencyPhrase — also called from the top of
+          // #handleFinalChunk as a second catch, since some Android/WebView
+          // combos never deliver interim results at all despite
+          // interimResults being set, making this call a silent no-op there.
+          this.#tryHandleEmergencyPhrase(this.liveTranscript);
           this.#render();
           continue;
         }
@@ -3161,7 +3153,41 @@ class App {
   // restarting immediately, restoring barge-in there.
   static #IS_ANDROID = /Android/i.test(navigator.userAgent);
 
+  // Shared by the interim-transcript check in onresult (fires the instant a
+  // match is heard) and the top of #handleFinalChunk below (fires on every
+  // final result, before any other gate) — "open comms"/"stand down"/"go
+  // dark" are a safety-critical override, not normal conversation, so they
+  // deliberately bypass isSpeaking/self-echo/debounce entirely rather than
+  // deferring to them. Returns true if a phrase matched and was handled, so
+  // callers can short-circuit rather than also treating it as a normal
+  // message.
+  #tryHandleEmergencyPhrase = (rawText) => {
+    if (!this.emergencyActive || this.guestMode || !this.#emergencyPhraseArmed) return false;
+    const lower = rawText.toLowerCase();
+    if (STAND_DOWN_PHRASES.some((phrase) => lower.includes(phrase))) {
+      this.#emergencyPhraseArmed = false;
+      this.#standDownEmergency(rawText);
+      return true;
+    }
+    if (OPEN_COMMS_PHRASES.some((phrase) => lower.includes(phrase))) {
+      this.#emergencyPhraseArmed = false;
+      this.#openComms(rawText);
+      return true;
+    }
+    if (GO_DARK_PHRASES.some((phrase) => lower.includes(phrase))) {
+      this.#emergencyPhraseArmed = false;
+      this.#goDark(rawText);
+      return true;
+    }
+    return false;
+  };
+
   #handleFinalChunk = (chunk) => {
+    // Checked first, before any other gate — see #tryHandleEmergencyPhrase's
+    // comment. Some Android/WebView combos never deliver interim results at
+    // all despite interimResults being set, which would make the onresult
+    // check above a silent no-op; this is the guaranteed second catch.
+    if (this.#tryHandleEmergencyPhrase(chunk)) return;
     // Discard anything the mic picked up while Skippy is speaking — prevents
     // his own audio output from looping back through speech recognition and
     // triggering a new reply. Barge-in is unaffected (it fires on interim
@@ -5517,10 +5543,16 @@ class App {
                 ${this.emergencyToast
                   ? html`<div style="color:#00e5ff;font-size:0.9em;text-align:center;padding:0 2em;">${this.emergencyToast}</div>`
                   : ''}
+                ${this.liveTranscript
+                  ? html`<div style="position:fixed;bottom:1em;left:1em;right:1em;color:#333;font-size:0.7em;text-align:center;">${this.liveTranscript}</div>`
+                  : ''}
               </div>`
             : html`<div style="position:fixed;inset:0;background:black;z-index:9999;display:flex;align-items:center;justify-content:center;">
                 ${this.emergencyToast
                   ? html`<div style="color:#444;font-size:0.85em;text-align:center;padding:0 2em;letter-spacing:0.03em;">${this.emergencyToast}</div>`
+                  : ''}
+                ${this.liveTranscript
+                  ? html`<div style="position:fixed;bottom:1em;left:1em;right:1em;color:#222;font-size:0.7em;text-align:center;">${this.liveTranscript}</div>`
                   : ''}
               </div>`
           : ''}
