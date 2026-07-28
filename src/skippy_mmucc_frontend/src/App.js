@@ -1223,6 +1223,11 @@ class App {
   recognition = null;
   stopRequested = false;
   recognitionActive = false;
+  // Guards the interim-transcript emergency-phrase check in #setUpRecognition
+  // against re-firing repeatedly as one growing interim transcript keeps
+  // re-matching (e.g. "open comms" then "open comms please"). Reset to true
+  // on every recognition.onstart — see that handler's comment.
+  #emergencyPhraseArmed = true;
   // 'premium' (ElevenLabs via proxy) | 'economy' (browser speechSynthesis)
   voiceMode = 'premium';
   // Independent of voiceMode — when true, Skippy never speaks at all (either
@@ -3002,6 +3007,10 @@ class App {
     this.recognition.onstart = () => {
       console.log('[Skippy] speech recognition started');
       this.recognitionActive = true;
+      // Each restart is a fresh listening window — see the emergency-phrase
+      // interim check below, which needs to fire again for a phrase spoken
+      // just after a restart rather than staying permanently armed-off.
+      this.#emergencyPhraseArmed = true;
     };
 
     this.recognition.onresult = (event) => {
@@ -3016,6 +3025,30 @@ class App {
           if (this.isSpeaking && this.liveTranscript.toLowerCase().includes('skippy')) {
             this.#stopSpeaking();
             this.statusMessage = "I'm listening...";
+          }
+          // Real bug found 2026-07-27: on a phone nobody's touching, Android
+          // Chrome's SpeechRecognition restarts itself (a real "no speech in
+          // range" cycle, audible as a repeating start/stop chime) far more
+          // often than it finalizes a result — a short phrase can get cut
+          // off mid-utterance by a restart before ever becoming a `final`
+          // result, so #handleFinalChunk's normal STAND_DOWN_PHRASES/
+          // OPEN_COMMS_PHRASES check (which only runs on final chunks, after
+          // a 700ms debounce) can simply never see it. For these two phrases
+          // specifically, speed/reliability beats waiting for a clean final
+          // transcript — same reasoning as the barge-in check just above —
+          // so act the instant the INTERIM transcript matches, don't wait.
+          if (this.emergencyActive && !this.guestMode && this.#emergencyPhraseArmed) {
+            const lowerInterim = this.liveTranscript.toLowerCase();
+            if (STAND_DOWN_PHRASES.some((phrase) => lowerInterim.includes(phrase))) {
+              this.#emergencyPhraseArmed = false;
+              this.#standDownEmergency(this.liveTranscript);
+            } else if (OPEN_COMMS_PHRASES.some((phrase) => lowerInterim.includes(phrase))) {
+              this.#emergencyPhraseArmed = false;
+              this.#openComms(this.liveTranscript);
+            } else if (GO_DARK_PHRASES.some((phrase) => lowerInterim.includes(phrase))) {
+              this.#emergencyPhraseArmed = false;
+              this.#goDark(this.liveTranscript);
+            }
           }
           this.#render();
           continue;
@@ -4752,6 +4785,8 @@ class App {
   // ending the emergency; this one was chosen to fit the existing tactical
   // theme. Flagged for the user to confirm/rename if they'd prefer another.
   #standDownEmergency = (text) => {
+    // Idempotent for the same reason as #openComms above.
+    if (!this.emergencyActive) return;
     this.#stopGuardianStream();
     this.emergencyActive = false;
     this.ghostMode = false;
@@ -4817,6 +4852,11 @@ class App {
   };
 
   #openComms = (text) => {
+    // Idempotent — the interim-transcript emergency-phrase check above and
+    // the normal final-chunk path can both legitimately fire for the same
+    // utterance; skip the duplicate state-set/spoken-reply rather than
+    // re-announcing "Comms open" twice.
+    if (this.commsOpen) return;
     this.commsOpen = true;
     this.#sendCommsState(true);
     const reply = 'Comms open.';
@@ -4829,6 +4869,7 @@ class App {
   // Ghost Mode's whole point is silence would defeat the purpose. Logged to
   // the transcript only.
   #goDark = (text) => {
+    if (!this.commsOpen) return;
     this.commsOpen = false;
     this.#sendCommsState(false);
     this.#recordTurn(text, 'Going dark.');
