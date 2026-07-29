@@ -84,7 +84,7 @@ const LEGACY_COMPRESSED_SHORTHAND_PATTERN = /^\[tone:\s*[\w\s-]+\]/i;
 // to false before this is trusted for a real emergency again — a visible
 // screen defeats Ghost Mode's whole purpose of not giving away that the
 // phone is in use.
-const DEBUG_SHOW_GHOST_MODE_UI = true;
+const DEBUG_SHOW_GHOST_MODE_UI = false;
 
 const TRIGGER_PHRASES = [
   'let me make sure i write this down',
@@ -1239,13 +1239,6 @@ class App {
   // re-matching (e.g. "open comms" then "open comms please"). Reset to true
   // on every recognition.onstart — see that handler's comment.
   #emergencyPhraseArmed = true;
-  // Set right before a deliberate "clean renegotiate" recognition.stop() in
-  // #startGuardianStream/#stopGuardianStream (mic-contention fix, see those
-  // comments) — tells onend to wait for the Android HAL to actually release
-  // the hardware lock before restarting, instead of the normal immediate
-  // restart, which was racing the getUserMedia grant/release and throwing
-  // InvalidStateError on a real device.
-  #forceDelayedRestart = false;
   // 'premium' (ElevenLabs via proxy) | 'economy' (browser speechSynthesis)
   voiceMode = 'premium';
   // Independent of voiceMode — when true, Skippy never speaks at all (either
@@ -3075,15 +3068,7 @@ class App {
       console.log('[Skippy] speech recognition ended');
       this.recognitionActive = false;
       if (this.state !== 'idle' && !this.stopRequested) {
-        if (this.#forceDelayedRestart) {
-          // Give the Android HAL a real beat to actually release the
-          // hardware mic lock before asking for it back — see
-          // #forceDelayedRestart's field comment.
-          this.#forceDelayedRestart = false;
-          setTimeout(() => {
-            if (this.state !== 'idle' && !this.stopRequested) this.#startRecognition();
-          }, 500);
-        } else if (this.isSpeaking && App.#IS_ANDROID) {
+        if (this.isSpeaking && App.#IS_ANDROID) {
           // TTS has audio focus — restarting now causes a double-dong on Android
           // and immediately picks up speaker audio. Set a flag; onended restarts us.
           this._restartRecognitionAfterTTS = true;
@@ -3130,6 +3115,34 @@ class App {
       this.statusMessage = `Couldn't start the microphone: ${err.message}`;
       this.#render();
     }
+  }
+
+  // Real bug found on a real device 2026-07-28: #setUpRecognition previously
+  // only ever ran once, in the constructor, so every restart since app load
+  // — including the emergency mic-contention "clean renegotiate" stop/start
+  // — reused the exact same native SpeechRecognition object. Confirmed live:
+  // once that object gets wedged by the emergency's second getUserMedia
+  // stream (repeating open/close chime, zero results, no self-heal even
+  // after standing down), no amount of stop()/start() on THAT SAME instance
+  // ever recovers it — only a full page reload (a fresh object) did, in
+  // testing. Discard and rebuild the whole native instance instead of
+  // trusting it to come back to life on its own. Handlers are nulled before
+  // abort() so a late event from the dying instance can't fire against
+  // whatever this.recognition points to by the time it arrives.
+  #resetRecognition() {
+    if (this.recognition) {
+      this.recognition.onstart = null;
+      this.recognition.onresult = null;
+      this.recognition.onend = null;
+      this.recognition.onerror = null;
+      try {
+        this.recognition.abort();
+      } catch {
+        // already stopped/dead — nothing to clean up
+      }
+    }
+    this.recognitionActive = false;
+    this.#setUpRecognition();
   }
 
   // How long after TTS ends to ignore mic input for the BACKGROUND SPEAKER-
@@ -4723,12 +4736,16 @@ class App {
     // holds the mic silently starves recognition — confirmed live: voice
     // worked fine right up until the emergency triggered, then stopped
     // hearing anything at all, and did NOT self-heal even after standing
-    // down released this stream again. Force a clean restart so recognition
-    // re-negotiates the microphone now that both consumers are active,
-    // rather than assuming it survives the new grant unaffected.
+    // down released this stream again. 2026-07-28: stopping/restarting the
+    // SAME native instance never recovered it in further testing — rebuild
+    // it from scratch instead (see #resetRecognition), then wait a real beat
+    // before starting the fresh instance so the Android HAL has time to
+    // actually free the hardware lock now that both consumers are active.
     if (this.recognition && this.state !== 'idle') {
-      this.#forceDelayedRestart = true;
-      this.recognition.stop(); // onend restarts us after a real delay — see #forceDelayedRestart
+      this.#resetRecognition();
+      setTimeout(() => {
+        if (this.state !== 'idle' && !this.stopRequested) this.#startRecognition();
+      }, 500);
     }
 
     const ws = new WebSocket(
@@ -4867,11 +4884,13 @@ class App {
     this.emergencyWs = null;
     // Real bug found 2026-07-27: recognition didn't come back on its own
     // after standing down released the competing getUserMedia stream above
-    // — see the matching comment in #startGuardianStream. Force the same
-    // clean restart on the way out, not just on the way in.
+    // — see the matching comment in #startGuardianStream. Rebuild the
+    // native instance on the way out too, not just on the way in.
     if (this.recognition && this.state !== 'idle') {
-      this.#forceDelayedRestart = true;
-      this.recognition.stop();
+      this.#resetRecognition();
+      setTimeout(() => {
+        if (this.state !== 'idle' && !this.stopRequested) this.#startRecognition();
+      }, 500);
     }
   };
 
@@ -5612,16 +5631,36 @@ class App {
                   ? html`<div style="color:#00e5ff;font-size:0.9em;text-align:center;padding:0 2em;">${this.emergencyToast}</div>`
                   : ''}
                 ${this.liveTranscript
-                  ? html`<div style="position:fixed;bottom:1em;left:1em;right:1em;color:#333;font-size:0.7em;text-align:center;">${this.liveTranscript}</div>`
+                  ? html`<div style="position:fixed;bottom:3.5em;left:1em;right:1em;color:#333;font-size:0.7em;text-align:center;">${this.liveTranscript}</div>`
                   : ''}
+                <div style="position:fixed;bottom:1.5em;left:0;right:0;display:flex;justify-content:center;gap:1.2em;">
+                  <button
+                    @click=${() => this.#goDark()}
+                    style="background:transparent;border:1px solid #222;color:#00e5ff;opacity:0.65;padding:0.8em 1.3em;font-size:0.7em;letter-spacing:0.08em;text-transform:uppercase;border-radius:4px;"
+                  >Go Dark</button>
+                  <button
+                    @click=${() => this.#standDownEmergency()}
+                    style="background:transparent;border:1px solid #222;color:#00e5ff;opacity:0.65;padding:0.8em 1.3em;font-size:0.7em;letter-spacing:0.08em;text-transform:uppercase;border-radius:4px;"
+                  >Stand Down</button>
+                </div>
               </div>`
-            : html`<div style="position:fixed;inset:0;background:black;z-index:9999;display:flex;align-items:center;justify-content:center;">
+            : html`<div style="position:fixed;inset:0;background:black;z-index:9999;display:flex;flex-direction:column;align-items:center;justify-content:center;">
                 ${this.emergencyToast
                   ? html`<div style="color:#444;font-size:0.85em;text-align:center;padding:0 2em;letter-spacing:0.03em;">${this.emergencyToast}</div>`
                   : ''}
                 ${this.liveTranscript
-                  ? html`<div style="position:fixed;bottom:1em;left:1em;right:1em;color:#222;font-size:0.7em;text-align:center;">${this.liveTranscript}</div>`
+                  ? html`<div style="position:fixed;bottom:3.5em;left:1em;right:1em;color:#222;font-size:0.7em;text-align:center;">${this.liveTranscript}</div>`
                   : ''}
+                <div style="position:fixed;bottom:1.5em;left:0;right:0;display:flex;justify-content:center;gap:1.2em;">
+                  <button
+                    @click=${() => this.#openComms()}
+                    style="background:transparent;border:1px solid #1a1a1a;color:#333;padding:0.8em 1.3em;font-size:0.7em;letter-spacing:0.08em;text-transform:uppercase;border-radius:4px;"
+                  >Open Comms</button>
+                  <button
+                    @click=${() => this.#standDownEmergency()}
+                    style="background:transparent;border:1px solid #1a1a1a;color:#333;padding:0.8em 1.3em;font-size:0.7em;letter-spacing:0.08em;text-transform:uppercase;border-radius:4px;"
+                  >Stand Down</button>
+                </div>
               </div>`
           : ''}
 
