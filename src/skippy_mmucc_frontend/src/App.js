@@ -5606,6 +5606,27 @@ class App {
       this.#render();
       return;
     }
+    // Real bug found on a real device 2026-08-05: taking a photo via the
+    // native camera app (as opposed to picking one from the gallery) hands
+    // the camera/mic hardware to that app while SpeechRecognition is still
+    // actively listening — the SAME hardware-contention wedging already
+    // root-caused and fixed for Guardian Emergency's second getUserMedia
+    // stream (see #startGuardianStream's comment). Confirmed live: worked
+    // fine with listening stopped first, froze (mic still cycling, but no
+    // reply ever again, even after logging out and back in) when a second
+    // photo was taken while still listening — logging out doesn't touch
+    // this.recognition at all, so a wedged native object survives it,
+    // exactly like the Guardian Emergency case needed a real page reload.
+    // Can't distinguish "came from the camera" vs "picked from gallery"
+    // from this event alone, so just always rebuild if recognition is
+    // currently active — a clean rebuild of an already-fine object is
+    // harmless, unlike leaving a genuinely wedged one running.
+    if (this.recognition && this.recognitionActive) {
+      this.#resetRecognition();
+      setTimeout(() => {
+        if (this.state !== 'idle' && !this.stopRequested) this.#startRecognition();
+      }, 500);
+    }
     this.imageCompressing = true;
     this.#render();
     try {
