@@ -1375,6 +1375,13 @@ class App {
   // lastSpokenText/lastSpeakEndTime on a barge-in interruption — see
   // #stopSpeaking's comment for the gap this closes (2026-07-19).
   currentSpeakingText = '';
+  // Timestamp until which recognition should stay paused after TTS ends —
+  // see #muteRecognitionBriefly's comment for why. An absolute timestamp
+  // rather than a flag so it self-expires: any onend firing for an
+  // unrelated reason (Chrome's periodic restart, a fresh reply's own
+  // barge-in stop) just sees a timestamp already in the past and restarts
+  // immediately as before.
+  _postTtsMuteUntil = 0;
   // Debounce/merge buffer for #handleFinalChunk — accumulates final chunks
   // that arrive in quick succession (Chrome ending/restarting recognition
   // mid-sentence) before dispatching as one utterance. See the dispatch
@@ -1889,9 +1896,10 @@ class App {
       // still covers the instant-overlap case.
       this.lastSpokenText = '';
       this.#render();
+      this.#muteRecognitionBriefly();
       if (this._restartRecognitionAfterTTS && this.state !== 'idle' && !this.stopRequested && !this.recognitionActive) {
         this._restartRecognitionAfterTTS = false;
-        setTimeout(() => this.#startRecognition(), 300);
+        setTimeout(() => this.#startRecognition(), App.#POST_TTS_MUTE_MS);
       }
       if (onComplete) onComplete();
     };
@@ -3073,7 +3081,20 @@ class App {
           // and immediately picks up speaker audio. Set a flag; onended restarts us.
           this._restartRecognitionAfterTTS = true;
         } else {
-          this.#startRecognition();
+          // See #muteRecognitionBriefly — this covers both the deliberate
+          // post-TTS stop() it issues (the common case: recognition was
+          // still running straight through TTS ending) and the Android
+          // died-mid-speech case above once its own onended sets the same
+          // timestamp. A stale/expired timestamp (any ordinary restart
+          // unrelated to TTS) restarts immediately, unchanged from before.
+          const muteRemaining = this._postTtsMuteUntil - Date.now();
+          if (muteRemaining > 0) {
+            setTimeout(() => {
+              if (this.state !== 'idle' && !this.stopRequested) this.#startRecognition();
+            }, muteRemaining);
+          } else {
+            this.#startRecognition();
+          }
         }
       }
     };
@@ -3143,6 +3164,42 @@ class App {
     }
     this.recognitionActive = false;
     this.#setUpRecognition();
+  }
+
+  // How long to actually stop capturing audio right when TTS ends, before
+  // recognition resumes. Real bug found 2026-08-05: on phone speaker (no
+  // headphones), his own audio's room echo/reverb tail can get finalized by
+  // SpeechRecognition as a short, GARBLED result — one or two words that
+  // bear little resemblance to what he actually said. #isLikelySelfEcho
+  // can't catch this: its whole mechanism is word overlap against his last
+  // reply, but a garbled fragment has near-zero overlap by nature, which is
+  // structurally indistinguishable from a genuine short reply ("no", "why")
+  // by content alone. Rather than guess at content, stop listening for this
+  // short a beat while the echo is loudest, then resume with a clean
+  // buffer — same tradeoff already accepted once for the equivalent
+  // dispatch-side cooldown (2026-07-11: a genuine reply spoken in this
+  // exact window can be missed), just applied to capture instead of
+  // dispatch, and much shorter than that rejected flat cooldown.
+  static #POST_TTS_MUTE_MS = 500;
+
+  // Called from every TTS-completion site (premium segments, premium
+  // error-after-start, Economy, karaoke song playback) once a reply has
+  // genuinely finished. If recognition is still running (the common case —
+  // it stays active straight through TTS for barge-in), stop it now; onend
+  // sees _postTtsMuteUntil in the future and delays the restart accordingly
+  // instead of resuming with zero gap. If recognition already died mid-TTS
+  // (the Android onended-during-isSpeaking quirk, _restartRecognitionAfterTTS
+  // already true), the caller just needs the timestamp set before it
+  // restarts — see each call site.
+  #muteRecognitionBriefly() {
+    this._postTtsMuteUntil = Date.now() + App.#POST_TTS_MUTE_MS;
+    if (this.recognition && this.recognitionActive) {
+      try {
+        this.recognition.stop(); // onend restarts us after the mute window
+      } catch {
+        // already stopping — onend will still fire and see the timestamp
+      }
+    }
   }
 
   // How long after TTS ends to ignore mic input for the BACKGROUND SPEAKER-
@@ -5191,9 +5248,10 @@ class App {
         this.lastSpokenText = totalReplyText;
         this.#render();
         // If recognition died while TTS had audio focus, restart it now.
+        this.#muteRecognitionBriefly();
         if (this._restartRecognitionAfterTTS && this.state !== 'idle' && !this.stopRequested && !this.recognitionActive) {
           this._restartRecognitionAfterTTS = false;
-          setTimeout(() => this.#startRecognition(), 300);
+          setTimeout(() => this.#startRecognition(), App.#POST_TTS_MUTE_MS);
         }
         // Karaoke-audio chaining (see #performKaraoke) — lets a spoken hype
         // line finish naturally before the real generated song starts,
@@ -5214,6 +5272,7 @@ class App {
         this.speakCooldownMs = App.#computeSpeakCooldownMs(totalReplyLength);
         this.lastSpokenText = totalReplyText;
         this.#render();
+        this.#muteRecognitionBriefly();
         return;
       }
       fallBackToEconomy('media error');
@@ -5285,9 +5344,10 @@ class App {
         // Mirrors the Premium audio path below — without this, Economy-voiced
         // replies (used for Ghost Mode/system notifications) can leave
         // recognition permanently off if it happened to end mid-utterance.
+        this.#muteRecognitionBriefly();
         if (this._restartRecognitionAfterTTS && this.state !== 'idle' && !this.stopRequested && !this.recognitionActive) {
           this._restartRecognitionAfterTTS = false;
-          setTimeout(() => this.#startRecognition(), 300);
+          setTimeout(() => this.#startRecognition(), App.#POST_TTS_MUTE_MS);
         }
         if (onComplete) onComplete();
       };
