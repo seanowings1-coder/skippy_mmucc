@@ -6689,11 +6689,19 @@ class App {
                   ? html`
                       <label class="note-mode-toggle" style="flex:1;text-align:center;cursor:pointer;">
                         ${this.imageCompressing ? '...' : this.pendingImage ? '📷 ✓' : '📷 Attach'}
+                        <!-- Real bug found on a real device 2026-08-05: display:none on a
+                             file input inside its <label> registers the tap (visible button
+                             press) but silently fails to open the native picker on some
+                             mobile browsers — the label-click delegation to a display:none
+                             input doesn't reliably fire the file dialog. Fixed with the
+                             standard visually-hidden-but-still-in-layout technique instead
+                             (absolute + 1px + clip), which keeps the input genuinely
+                             interactive while remaining invisible. -->
                         <input
                           type="file"
                           accept="image/*"
                           capture="environment"
-                          style="display:none;"
+                          style="position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0;"
                           ?disabled=${this.imageCompressing}
                           @change=${this.#handleImageAttach}
                         />
