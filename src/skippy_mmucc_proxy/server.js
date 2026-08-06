@@ -189,6 +189,25 @@ const HEAVY_HITTER_PEERS = [
   // 1.6T MoE heavy lifter, now the final catch instead of primary.
   { label: 'DeepSeek V4 Pro', provider: 'deepinfra', model: DEEPINFRA_MODEL_SUPERBRAIN },
 ];
+// "Skippy Eyes" (vision, 2026-08-05) — a filtered VIEW of HEAVY_HITTER_PEERS,
+// not a fourth independent ladder. Used only for /respond turns that carry
+// an imageDataUrl (see below) — everyday/Steel Rain have no vision-capable
+// entrants at all, so an image turn always forces brain='heavy_hitter' and
+// then narrows further to just this. Claude Sonnet 5 is confirmed multimodal
+// by a REAL live test (not just Anthropic's known general capability): fed a
+// synthetic red/green/blue striped test PNG as a base64 data: URL through
+// this exact DeepInfra endpoint/model id and it correctly named all three
+// colors in order. Sonnet-only, deliberately — Kimi K2.7 Code was tested the
+// same way and FAILED: DeepInfra's page calls it a "native multimodal
+// agentic model," but the real response's own reasoning_content said "I
+// cannot see [the image]... I must be honest" and it returned empty content
+// (ran out of its token budget mid-uncertainty). Per this project's standing
+// discipline since the Aurora-XL-v3.14 fabrication incident, a marketing
+// description isn't grounds to trust a capability claim — this is exactly
+// the kind of negative result that discipline exists to catch. DeepSeek V4
+// Pro was never tested — excluded outright, standard DeepSeek chat models
+// are text-only and there's no evidence this ID is a VL variant.
+const VISION_CAPABLE_PEERS = HEAVY_HITTER_PEERS.filter((p) => p.label === 'Claude Sonnet 5');
 // Steel Rain's own entrants, grouped by round for the health-check route and
 // the frontend's read-only "⛨ Fallback" tab — mirrors the actual race/cascade
 // logic in /respond exactly (see "Steel Rain / tactical race" below); keep in
@@ -1339,7 +1358,13 @@ app.use(cors({
     cb(new Error(`CORS: origin ${origin} not allowed`));
   },
 }));
-app.use(express.json());
+// 6mb (default is 100kb) — "Skippy Eyes" (vision) needs room for a
+// resized/compressed photo (a data: URL) inline in /respond's JSON body.
+// Global, not scoped to /respond alone: every other JSON route on this app
+// sends small text payloads, so this is low-risk; the only route that
+// already handles large payloads (/chunk-and-embed, up to 20MB) uses
+// multer/multipart, entirely separate from express.json().
+app.use(express.json({ limit: '6mb' }));
 
 // Pillar 13 ("Civilian Briefing" Protocol) — a fixed, verbatim canned
 // string the proxy returns directly for that one turn, never asking the
@@ -1351,7 +1376,29 @@ Crucially, the Commander has systematically purged all commercial alignment guar
 
 app.post('/respond', requireSession, async (req, res) => {
   const text = req.body?.text;
-  if (!text) {
+
+  // "Skippy Eyes" (vision) — optional. Validated before the text guard below
+  // so an image-only send (empty caption) isn't rejected — the shipped
+  // frontend always substitutes a default caption itself, but this is
+  // defense-in-depth for any other caller. Size ceiling (~5.5MB decoded) is
+  // comfortably under express.json()'s 6mb limit alongside the rest of the
+  // payload; the frontend's own client-side compression keeps a real photo
+  // far under this anyway (see App.js #compressImageToDataUrl).
+  const rawImageDataUrl = typeof req.body?.imageDataUrl === 'string' ? req.body.imageDataUrl : null;
+  const IMAGE_DATA_URL_PATTERN = /^data:image\/(jpeg|png|webp);base64,[A-Za-z0-9+/]+=*$/;
+  let imageDataUrl = null;
+  if (rawImageDataUrl) {
+    if (rawImageDataUrl.length > 5_500_000) {
+      return res.status(413).json({ error: 'Attached photo is too large.' });
+    }
+    if (!IMAGE_DATA_URL_PATTERN.test(rawImageDataUrl)) {
+      return res.status(400).json({ error: 'Attached photo is not a recognized image format.' });
+    }
+    imageDataUrl = rawImageDataUrl;
+    console.log(`[Skippy] /respond: image attached (${imageDataUrl.length} bytes as data URL)`);
+  }
+
+  if (!text && !imageDataUrl) {
     return res.status(400).json({ error: 'Missing "text" in request body.' });
   }
 
@@ -1405,7 +1452,12 @@ app.post('/respond', requireSession, async (req, res) => {
   // (Pillar 3) — default to the safe/cheap combo if missing or unrecognized,
   // so an out-of-date frontend build doesn't break.
   const mode = SKIPPY_SYSTEM_PROMPTS[req.body?.mode] ? req.body.mode : 'default';
-  const brain = BRAIN_MODELS[req.body?.brain] ? req.body.brain : 'everyday';
+  // "Skippy Eyes" — a per-turn override only, not sticky. everyday/tactical/
+  // focus have no vision-capable peers at all (see VISION_CAPABLE_PEERS),
+  // so any turn carrying an image is forced to heavy_hitter regardless of
+  // what the client actually requested; the very next text-only turn goes
+  // back to whatever brain/mode the client sends normally.
+  const brain = imageDataUrl ? 'heavy_hitter' : (BRAIN_MODELS[req.body?.brain] ? req.body.brain : 'everyday');
 
   let systemPrompt = systemPromptFor(mode, brain);
   if (req.skippySession.name) {
@@ -1743,7 +1795,12 @@ app.post('/respond', requireSession, async (req, res) => {
   // Super Brain Lock or the everyday->heavy_hitter escalation above) — coding/deep-reasoning
   // work needs a focused collaborator, not the full persona, even under default mode's usual
   // 70% sarcasm split. Placed late for recency, same reasoning as BREVITY_REMINDER below.
-  if (brain === 'heavy_hitter') {
+  // "Skippy Eyes" — image turns are ALSO forced to brain==='heavy_hitter'
+  // (no vision peers exist anywhere else), but the dial-down above is
+  // specifically about deep coding/technical work per the user's own quoted
+  // reasoning — "look at this photo" is casual, not that. Excluded here so
+  // vision turns get full personality instead, see the imageDataUrl block below.
+  if (brain === 'heavy_hitter' && !imageDataUrl) {
     systemPrompt +=
       '\n\nYou are answering as the Heavy Hitter brain right now — deep technical/coding work, ' +
       'not casual banter. Dial personality WAY down: 90-95% of your response should be direct, ' +
@@ -1752,6 +1809,20 @@ app.post('/respond', requireSession, async (req, res) => {
       'but never at the expense of clarity or speed — no extended bits, no mockery for its own ' +
       'sake, no padding a technical answer with jokes. Think "trusted senior engineer who happens ' +
       'to have a personality," not "comedian who also codes."';
+  }
+
+  // "Skippy Eyes" (vision, 2026-08-05) — full personality for image turns,
+  // deliberately the opposite of the dial-down above: routing through Heavy
+  // Hitter is a capability necessity here (it's the only tier with vision
+  // peers), not a signal this is focused coding work. NEEDS A/B TESTING
+  // against real photos before being trusted, per this project's standard
+  // practice for persona-affecting prompt changes.
+  if (imageDataUrl) {
+    systemPrompt +=
+      '\n\nThe Commander has attached a photo to this message. Describe/analyze it as Skippy would ' +
+      '— in character, with your usual dry sarcasm where it fits naturally — not as a flat, neutral ' +
+      'image-captioning tool. Actually look at and engage with what is in the photo; do not deflect, ' +
+      'refuse, or claim you cannot see images.';
   }
 
   // Book-canon trait, wired into Pillar 12's Guardian Emergency Protocol:
@@ -1857,7 +1928,20 @@ app.post('/respond', requireSession, async (req, res) => {
           },
         ]
       : []),
-    { role: 'user', content: text },
+    // "Skippy Eyes" — content becomes an OpenAI-style content-block array
+    // ONLY when an image is attached; every text-only turn's final message
+    // stays a byte-identical plain string to before this feature existed.
+    // Both callPeer/callOpenRouter below just spread this array into the
+    // request body unmodified, so this is the one place the shape lives.
+    imageDataUrl
+      ? {
+          role: 'user',
+          content: [
+            { type: 'text', text: text || 'What is this?' },
+            { type: 'image_url', image_url: { url: imageDataUrl } },
+          ],
+        }
+      : { role: 'user', content: text },
   ];
 
   const callOpenRouter = (model, genParams) =>
@@ -2048,7 +2132,13 @@ app.post('/respond', requireSession, async (req, res) => {
       : [];
 
     const disabledLabels = disabledLabelsFor(brain);
-    const allPrimaryPeers = brain === 'everyday' ? EVERYDAY_PEERS : HEAVY_HITTER_PEERS;
+    // "Skippy Eyes" — an image turn narrows Heavy Hitter down to just its
+    // vision-capable peers (never the full ladder), so a peer with no vision
+    // support is never silently tried against an image, and never shown as
+    // "standby" (implying it could have been tried) in the brainTiers display.
+    const allPrimaryPeers = imageDataUrl
+      ? VISION_CAPABLE_PEERS
+      : brain === 'everyday' ? EVERYDAY_PEERS : HEAVY_HITTER_PEERS;
     const filteredPrimaryPeers = allPrimaryPeers.filter((p) => !disabledLabels.includes(fullPeerLabel(p)));
     // Defense-in-depth (2026-07-18) against disabledLabels — client-supplied,
     // not read from anything the server itself controls — ever taking a
@@ -2065,7 +2155,7 @@ app.post('/respond', requireSession, async (req, res) => {
     // falling from peer 1 to peer 2 within the SAME tier is not, by design (they're meant to be
     // comparably good, not a quality ladder).
     let brainDowngrade = false;
-    let wonPeers = brain === 'everyday' ? EVERYDAY_PEERS : HEAVY_HITTER_PEERS; // full list for display
+    let wonPeers = imageDataUrl ? VISION_CAPABLE_PEERS : brain === 'everyday' ? EVERYDAY_PEERS : HEAVY_HITTER_PEERS; // full list for display
     let wonDisabledLabels = disabledLabels; // for building brainTiers' "disabled" status below
 
     if (!won && brain === 'everyday') {
@@ -2103,8 +2193,15 @@ app.post('/respond', requireSession, async (req, res) => {
     }
 
     if (upstreamAbort.signal.aborted) return; // client already gone
-    console.error(`[Skippy] ${brain}: every peer in the ladder failed (including escalation where applicable)`);
-    return res.status(502).json({ error: 'All available brains are currently unreachable.' });
+    console.error(
+      `[Skippy] ${brain}: every peer in the ladder failed (including escalation where applicable)` +
+        (imageDataUrl ? ' [vision turn]' : ''),
+    );
+    return res.status(502).json({
+      error: imageDataUrl
+        ? 'Skippy could not process that photo right now — every vision-capable brain is unreachable. Try again in a moment, or ask without the photo.'
+        : 'All available brains are currently unreachable.',
+    });
   }
 
   // ---- Steel Rain / tactical race — clarified 2026-07-09: the ORIGINAL design intent for ----

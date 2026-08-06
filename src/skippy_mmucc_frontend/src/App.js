@@ -1026,6 +1026,14 @@ class App {
   // spoken/typed trigger phrase is too much noise: toggle on, then everything
   // typed just saves silently as a note, no Skippy reply, no TTS.
   manualNoteMode = false;
+  // "Skippy Eyes" (vision) — a staged photo attachment for the NEXT text-input
+  // send only. Deliberately NOT persisted (no localStorage, no canister field,
+  // no contextHistory entry) — this is a same-turn attachment, not durable
+  // state. Cleared on successful send (#askSkippy) or explicit removal
+  // (#clearPendingImage); left staged on a failed send so the user can just
+  // retry without re-picking the photo.
+  pendingImage = null; // { dataUrl: string, fileName: string } | null
+  imageCompressing = false;
   // Dumbass Web Loop (Pillar 6, default/professional modes only) — holds the
   // *original* question while Skippy waits for permission to search the
   // web, so a follow-up "yes" searches for that, not for the literal "yes".
@@ -2597,10 +2605,14 @@ class App {
     e.preventDefault();
     const form = e.target;
     const text = form.elements.textInput.value.trim();
-    if (!text) return;
+    if (!text && !this.pendingImage) return;
     form.elements.textInput.value = '';
 
     if (this.manualNoteMode) {
+      // A staged photo has nothing to do with a silent text note — notes
+      // never touch the LLM/vision pipeline at all — so an empty note is
+      // still a no-op here even with an image attached.
+      if (!text) return;
       // Stays in note mode after saving (not a one-shot) — a meeting can
       // produce several quick notes in a row, and re-toggling between each
       // one would defeat the point of having a quiet mode at all.
@@ -2626,7 +2638,10 @@ class App {
       return;
     }
 
-    this.#askSkippy(text);
+    // Empty caption + a staged photo is a valid send ("what is this?" is the
+    // obvious implied question) — #askSkippy itself has no empty-text guard
+    // of its own, so supply the fallback here rather than there.
+    this.#askSkippy(text || 'What is this?');
   };
 
   // A <textarea> doesn't auto-submit its form on Enter the way the old
@@ -3565,10 +3580,15 @@ class App {
   // Records a completed turn (real or canned) in local + canister history,
   // capped to MAX_LOCAL_HISTORY — shared by both the normal OpenRouter path
   // and the bare-trigger-phrase acknowledgment path below.
-  #recordTurn(userText, assistantText) {
+  #recordTurn(userText, assistantText, { userImageDataUrl } = {}) {
     const now = Date.now();
     this.history.push(
-      { role: 'user', content: userText, timestamp: now },
+      // "Skippy Eyes" — imageDataUrl attached ONLY to this local `history`
+      // entry (the on-screen transcript mirror), never to contextHistory
+      // below. The canister only ever stores plain text (assistantText,
+      // Skippy's description of the photo) — the photo itself is visible
+      // only until the next reload/login, by design. See CLAUDE.md.
+      { role: 'user', content: userText, timestamp: now, ...(userImageDataUrl ? { imageDataUrl: userImageDataUrl } : {}) },
       { role: 'assistant', content: assistantText, timestamp: now },
     );
     if (this.history.length > MAX_LOCAL_HISTORY) {
@@ -3685,6 +3705,13 @@ class App {
     this.currentAbortController = new AbortController();
     const { signal } = this.currentAbortController;
     const mySeq = ++this.requestSeq;
+    // "Skippy Eyes" — snapshot now, not read live later, so a mid-flight
+    // #clearPendingImage (e.g. the user hits Remove while this request is
+    // still in flight) can't yank the image out from under an already-sent
+    // request. Only actually used/cleared in the real /respond turn below —
+    // every early-return branch above that (note retrieval, workspace
+    // create, etc.) deliberately leaves it untouched and still staged.
+    const attachedImage = this.pendingImage;
 
     const lowerText = text.toLowerCase();
     if (NOTE_RETRIEVAL_PHRASES.some((phrase) => lowerText.includes(phrase))) {
@@ -4343,6 +4370,11 @@ class App {
         },
         body: JSON.stringify({
           text: effectiveText,
+          // "Skippy Eyes" — only present when a photo is actually staged;
+          // every text-only turn's body is byte-identical to before this
+          // feature existed. See #compressImageToDataUrl for why this is
+          // already a resized/compressed JPEG data: URL, not a raw file.
+          ...(attachedImage ? { imageDataUrl: attachedImage.dataUrl } : {}),
           // Async Janitor: contextHistory, not history — this is the copy
           // that gets stale/verbose entries swapped for dense compressed
           // ones in the background, so the model doesn't imitate its own
@@ -4478,7 +4510,11 @@ class App {
       // question reappearing, which reads exactly like the "yes" was
       // dropped/ignored even though it worked correctly. The reply already
       // answers the real topic regardless of which text it's paired with.
-      this.#recordTurn(text, data.reply);
+      this.#recordTurn(text, data.reply, attachedImage ? { userImageDataUrl: attachedImage.dataUrl } : undefined);
+      // Only clear on a confirmed successful send — a failure below leaves
+      // the image staged so the user can just retry Send without having to
+      // re-pick the photo (see #clearPendingImage's other call sites).
+      if (attachedImage) this.pendingImage = null;
       this.#render();
       this.#speak(data.reply);
     } catch (err) {
@@ -5538,6 +5574,56 @@ class App {
     }
   };
 
+  // "Skippy Eyes" (vision) — client-side resize/compress BEFORE the image
+  // ever leaves the device. Keeps typical payloads well under the proxy's
+  // 6mb express.json() limit and controls DeepInfra cost/latency (a full-res
+  // phone photo can be 4-8MB; a 1024px-longest-side JPEG at q0.75 is
+  // typically 80-250KB). createImageBitmap avoids the extra <img> load/decode
+  // round-trip a FileReader.readAsDataURL + new Image() approach would need.
+  async #compressImageToDataUrl(file, { maxDim = 1024, quality = 0.75 } = {}) {
+    const bitmap = await createImageBitmap(file);
+    const scale = Math.min(1, maxDim / Math.max(bitmap.width, bitmap.height));
+    const w = Math.round(bitmap.width * scale);
+    const h = Math.round(bitmap.height * scale);
+    const canvas = document.createElement('canvas');
+    canvas.width = w;
+    canvas.height = h;
+    canvas.getContext('2d').drawImage(bitmap, 0, 0, w, h);
+    bitmap.close?.();
+    return canvas.toDataURL('image/jpeg', quality);
+  }
+
+  // Fired by the hidden attach-photo <input type="file">. Only STAGES the
+  // attachment locally (mirrors #uploadManualFile's e.target.value reset so
+  // re-selecting the identical file still fires a change event) — the actual
+  // /respond call happens on the next Send tap, see #askSkippy.
+  #handleImageAttach = async (e) => {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (!file) return;
+    if (!file.type.startsWith('image/')) {
+      this.statusMessage = 'That file is not an image.';
+      this.#render();
+      return;
+    }
+    this.imageCompressing = true;
+    this.#render();
+    try {
+      const dataUrl = await this.#compressImageToDataUrl(file);
+      this.pendingImage = { dataUrl, fileName: file.name };
+    } catch (err) {
+      this.statusMessage = `Couldn't read that photo: ${err.message}`;
+    } finally {
+      this.imageCompressing = false;
+      this.#render();
+    }
+  };
+
+  #clearPendingImage = () => {
+    this.pendingImage = null;
+    this.#render();
+  };
+
   // Neo Skin "drop a URL" upload — same pipeline as #uploadManualFile, just
   // sourced from a URL the user found and verified themselves (rather than
   // a local file), via the proxy's /chunk-and-embed-url (which fetches the
@@ -6507,6 +6593,16 @@ class App {
                   (msg) => html`
                     <div class="transcript-message ${msg.role}">
                       <strong>${msg.role === 'user' ? 'You' : 'Skippy'}:</strong>
+                      ${msg.imageDataUrl
+                        ? html`
+                            <img
+                              src=${msg.imageDataUrl}
+                              alt="attached photo"
+                              style="max-width:200px;max-height:200px;display:block;border-radius:4px;margin:0.3em 0;"
+                            />
+                            <span class="status" style="font-size:0.75em;">(not saved after reload — only Skippy's reply is)</span>
+                          `
+                        : ''}
                       ${msg.compressed
                         ? html`<span class="status" style="font-style:italic;">(earlier reply, condensed for memory — original wording not retained)</span>`
                         : msg.role === 'assistant'
@@ -6580,7 +6676,44 @@ class App {
                 style="flex:1;"
                 @click=${this.#toggleVoiceMuted}
               >${this.voiceMuted ? '🔇 Muted' : 'Mute'}</button>
+              ${
+                // "Skippy Eyes" — hidden in Guest/Emergency/Ghost Mode. Ghost
+                // Mode's whole point is a silent, hidden-screen state that an
+                // interactive attach UI would defeat; emergencyActive isn't
+                // the moment for casual photo questions; Guest Mode already
+                // hides every cost/behavior-escalating action client-side
+                // (the same enforcement model every other Guest Mode
+                // restriction in this app uses), and a forced paid Heavy
+                // Hitter call is exactly that kind of escalation.
+                !this.guestMode && !this.emergencyActive && !this.ghostMode
+                  ? html`
+                      <label class="note-mode-toggle" style="flex:1;text-align:center;cursor:pointer;">
+                        ${this.imageCompressing ? '...' : this.pendingImage ? '📷 ✓' : '📷 Attach'}
+                        <input
+                          type="file"
+                          accept="image/*"
+                          capture="environment"
+                          style="display:none;"
+                          ?disabled=${this.imageCompressing}
+                          @change=${this.#handleImageAttach}
+                        />
+                      </label>
+                    `
+                  : ''
+              }
             </div>
+            ${this.pendingImage
+              ? html`
+                  <div style="display:flex;align-items:center;gap:0.6em;margin:0.4em 0;">
+                    <img
+                      src=${this.pendingImage.dataUrl}
+                      style="max-width:56px;max-height:56px;border-radius:4px;"
+                    />
+                    <span class="status" style="flex:1;">${this.pendingImage.fileName}</span>
+                    <button type="button" @click=${this.#clearPendingImage}>Remove</button>
+                  </div>
+                `
+              : ''}
             <textarea
               name="textInput"
               rows="3"
