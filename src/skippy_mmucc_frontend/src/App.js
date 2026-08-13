@@ -1034,6 +1034,10 @@ class App {
   // retry without re-picking the photo.
   pendingImage = null; // { dataUrl: string, fileName: string } | null
   imageCompressing = false;
+  // Set by #handlePhotoPickerOpening, read/cleared by #handleImageAttach —
+  // see the karaoke-pattern comment on both for why this replaced the
+  // earlier #resetRecognition()-based fix.
+  #imageAttachWasListening = false;
   // Dumbass Web Loop (Pillar 6, default/professional modes only) — holds the
   // *original* question while Skippy waits for permission to search the
   // web, so a follow-up "yes" searches for that, not for the literal "yes".
@@ -5593,39 +5597,52 @@ class App {
     return canvas.toDataURL('image/jpeg', quality);
   }
 
-  // Fired by the hidden attach-photo <input type="file">. Only STAGES the
-  // attachment locally (mirrors #uploadManualFile's e.target.value reset so
-  // re-selecting the identical file still fires a change event) — the actual
-  // /respond call happens on the next Send tap, see #askSkippy.
+  // Fires on the hidden attach-photo <input>'s own click, BEFORE its default
+  // action (opening the native file/camera picker) runs. Real bug found on a
+  // real device 2026-08-05: taking a photo via the native camera app hands
+  // the camera/mic hardware to that app while SpeechRecognition is still
+  // actively listening — the SAME hardware-contention wedging already
+  // root-caused for Guardian Emergency's second getUserMedia stream (see
+  // #startGuardianStream's comment). The first fix (rebuild the native
+  // object via #resetRecognition() AFTER the picker closed and handed a file
+  // back) still left a residual bug per live testing — the fix was reactive,
+  // cleaning up after contention already happened. Karaoke's own fix for the
+  // equivalent self-echo problem is preventative instead: stop listening
+  // entirely before the risky window opens (see #performKaraoke's comment —
+  // "nothing else can be said... the mic picking up his own hype line is
+  // exactly what caused" the collision). This click handler is the one place
+  // that fires before the OS camera app can grab hardware at all, so
+  // stopping here means the native picker never opens while listening is
+  // active — no contention, nothing to reset afterward.
+  #handlePhotoPickerOpening = () => {
+    this.#imageAttachWasListening = this.state === 'listening';
+    if (this.#imageAttachWasListening) this.#stopListening();
+  };
+
+  // Fired once the native picker closes (file chosen or cancelled). Only
+  // STAGES the attachment locally (mirrors #uploadManualFile's
+  // e.target.value reset so re-selecting the identical file still fires a
+  // change event) — the actual /respond call happens on the next Send tap,
+  // see #askSkippy. Resumes listening (if #handlePhotoPickerOpening stopped
+  // it) on every exit path, including "no file picked" and "wrong file
+  // type" — mirrors #performKaraoke's resumeListening, called only if we
+  // were the one who stopped it.
   #handleImageAttach = async (e) => {
     const file = e.target.files?.[0];
     e.target.value = '';
-    if (!file) return;
+    const resumeListening = () => {
+      if (this.#imageAttachWasListening) this.#startListening();
+      this.#imageAttachWasListening = false;
+    };
+    if (!file) {
+      resumeListening();
+      return;
+    }
     if (!file.type.startsWith('image/')) {
       this.statusMessage = 'That file is not an image.';
       this.#render();
+      resumeListening();
       return;
-    }
-    // Real bug found on a real device 2026-08-05: taking a photo via the
-    // native camera app (as opposed to picking one from the gallery) hands
-    // the camera/mic hardware to that app while SpeechRecognition is still
-    // actively listening — the SAME hardware-contention wedging already
-    // root-caused and fixed for Guardian Emergency's second getUserMedia
-    // stream (see #startGuardianStream's comment). Confirmed live: worked
-    // fine with listening stopped first, froze (mic still cycling, but no
-    // reply ever again, even after logging out and back in) when a second
-    // photo was taken while still listening — logging out doesn't touch
-    // this.recognition at all, so a wedged native object survives it,
-    // exactly like the Guardian Emergency case needed a real page reload.
-    // Can't distinguish "came from the camera" vs "picked from gallery"
-    // from this event alone, so just always rebuild if recognition is
-    // currently active — a clean rebuild of an already-fine object is
-    // harmless, unlike leaving a genuinely wedged one running.
-    if (this.recognition && this.recognitionActive) {
-      this.#resetRecognition();
-      setTimeout(() => {
-        if (this.state !== 'idle' && !this.stopRequested) this.#startRecognition();
-      }, 500);
     }
     this.imageCompressing = true;
     this.#render();
@@ -5637,6 +5654,7 @@ class App {
     } finally {
       this.imageCompressing = false;
       this.#render();
+      resumeListening();
     }
   };
 
@@ -6724,6 +6742,7 @@ class App {
                           capture="environment"
                           style="position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0;"
                           ?disabled=${this.imageCompressing}
+                          @click=${this.#handlePhotoPickerOpening}
                           @change=${this.#handleImageAttach}
                         />
                       </label>
