@@ -697,6 +697,49 @@ function systemPromptFor(mode, brain) {
   return brain === 'heavy_hitter' ? unlock + base : unlock + base + BREVITY_SUFFIX + BREVITY_EXAMPLE;
 }
 
+// Resolves how Skippy should address the current caller. A caller's own
+// set_persona_profile name always wins. Otherwise, PARTNER_PRINCIPAL (the
+// wife's whitelisted Principal) defaults to "Peanut" the moment she logs in
+// as herself — no manual profile step required (2026-08-13, real bug: she
+// logged in on her own NNS identity and still got called "Commander", since
+// the base prompts hardcode that addressing regardless of who's actually
+// calling). COMMANDER_PRINCIPAL (or an unrecognized caller) resolves to null,
+// meaning: leave the base prompt's own "Commander"/"Sean" varying text
+// untouched — no change to the existing behavior for the primary user.
+function resolveAddressName(session) {
+  if (session?.name) return session.name;
+  const principalText = session?.principal?.toText?.() ?? String(session?.principal ?? '');
+  if (PARTNER_PRINCIPAL && principalText === PARTNER_PRINCIPAL) return 'Peanut';
+  return null;
+}
+
+// Swaps the base prompt's literal "Commander"/"Sean" addressing — both the
+// instruction line and its own few-shot dialogue examples, which are strong
+// enough signal to override a plain instruction if left conflicting — for a
+// specific resolved name. Deliberately scoped, not a blind global replace:
+// "Sean" also appears in unrelated facts (e.g. "Bad Marine LLC (Sean's
+// company)") that stay true no matter who's logged in, so only literal
+// "Commander" occurrences and the explicit "OR/or Sean" addressing phrases
+// are touched, never bare "Sean" elsewhere in the prompt.
+function applyAddressName(systemPrompt, addressName) {
+  if (!addressName) return systemPrompt;
+  return systemPrompt
+    // Full-sentence swaps first — the default prompt's "vary it, never
+    // combine into X Y" caveat only makes sense for the two-option
+    // Commander/Sean case; left as a leftover catch-all replace it would
+    // turn into a nonsensical "never combine into Peanut Sean" residue.
+    .replace(
+      /Address the user strictly as "Commander" OR "Sean" \(vary it, never "Commander Sean"\)\./,
+      `Address the user as "${addressName}."`,
+    )
+    .replace(/"Commander" or "Sean,"/g, `"${addressName},"`)
+    // Catch-all for every remaining direct-address "Commander" in dialogue
+    // examples and instruction text (never touches bare "Sean" elsewhere,
+    // e.g. "Bad Marine LLC (Sean's company)", which stays true regardless
+    // of who's logged in).
+    .replace(/\bCommander\b/g, addressName);
+}
+
 // Shared by /embed (per-turn query embedding) and /chunk-and-embed (Neo Skin
 // document ingestion) — one OpenRouter call handles the whole batch either way.
 // DeepInfra migration, 2026-07-21 — primary now DeepInfra's BGE-large
@@ -1459,9 +1502,10 @@ app.post('/respond', requireSession, async (req, res) => {
   // back to whatever brain/mode the client sends normally.
   const brain = imageDataUrl ? 'heavy_hitter' : (BRAIN_MODELS[req.body?.brain] ? req.body.brain : 'everyday');
 
-  let systemPrompt = systemPromptFor(mode, brain);
-  if (req.skippySession.name) {
-    systemPrompt = `You are speaking with ${req.skippySession.name}. ${systemPrompt}`;
+  const addressName = resolveAddressName(req.skippySession);
+  let systemPrompt = applyAddressName(systemPromptFor(mode, brain), addressName);
+  if (addressName) {
+    systemPrompt = `You are speaking with ${addressName}. ${systemPrompt}`;
   }
   // Pillar 10 extension (Phase 5.6.1) — pinned per-workspace context (case
   // numbers, constraints, etc.), prepended on every turn so it survives
@@ -2912,10 +2956,12 @@ app.post('/karaoke-offer', requireSession, async (req, res) => {
   // Use the persona system prompt so the offer is in-character, but with a
   // neutral synthetic user message — NOT the literal "karaoke time" that caused
   // the model to treat it as a performance directive and launch straight into a song.
-  const offerSystemPrompt = systemPromptFor(mode || 'default', 'everyday');
+  const offerAddressName = resolveAddressName(req.skippySession);
+  const offerSystemPrompt = applyAddressName(systemPromptFor(mode || 'default', 'everyday'), offerAddressName);
+  const offerAddressLabel = offerAddressName || 'Commander';
   const offerMessages = [
     { role: 'system', content: offerSystemPrompt +
-      '\n\nIn 1-2 sentences only: express genuine excitement that the Commander wants karaoke ' +
+      `\n\nIn 1-2 sentences only: express genuine excitement that ${offerAddressLabel} wants karaoke ` +
       'and ask them to confirm before you perform. No 🎶 markers, no lyrics, no song — just ' +
       'the excited ask. Improvise something fresh, never the same offer twice.' },
     { role: 'user', content: 'Would you like to do karaoke for me?' },
