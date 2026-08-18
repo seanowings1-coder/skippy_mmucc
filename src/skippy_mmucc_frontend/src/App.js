@@ -1281,6 +1281,11 @@ class App {
   // finish — see #askSkippy's "barge-in" handling.
   requestSeq = 0;
   currentAbortController = null;
+  // Steel Rain uninterruptible until standdown (decision logged 2026-07-25,
+  // built 2026-08-18): true from the moment a tactical/focus turn commits to
+  // an actual request through to its reply finishing speech (or erroring
+  // out) — see the top of #askSkippy for what this suppresses and why.
+  steelRainInFlight = false;
   // True only while Skippy's voice is actually audible — lets the wake word
   // "Skippy" cut him off the instant it's heard, even on an interim (not
   // yet finalized) recognition result, rather than waiting for the whole
@@ -3704,6 +3709,36 @@ class App {
   };
 
   #askSkippy = async (text) => {
+    // Steel Rain uninterruptible until standdown — user's explicit, on-the-
+    // record 2026-07-25 call: "Steel Rain/emergency mode trumps everything
+    // until a standdown is issued... NOTHING had better be slowing it down."
+    // Speed is Steel Rain/Focus's actual safety property (see CLAUDE.md), so
+    // a stray roster mention or mode phrase barging in and killing the race
+    // defeats the entire point. Suppress EVERY new utterance here — roster
+    // matching, mode switches, ordinary follow-ups, all of it — while a
+    // tactical/focus turn is in flight, all the way through it finishing
+    // speech (see the onComplete passed to #speak below), not just through
+    // the network call. The one exception: an emergency-management phrase
+    // for an ALREADY-active emergency must still get through even mid-race —
+    // a genuine second emergency is exactly the kind of thing that should
+    // interrupt, and this can't just rely on #tryHandleEmergencyPhrase's own
+    // voice-path bypass, since typed input skips that gate and calls
+    // #askSkippy directly (see #sendTextMessage). A brand-new emergency
+    // trigger (the Panic button/long-press) is unaffected regardless — that
+    // fires #triggerEmergencyDispatch directly and never calls #askSkippy.
+    if (this.steelRainInFlight) {
+      const lowerNew = text.toLowerCase();
+      const isEmergencyManagement =
+        this.emergencyActive &&
+        !this.guestMode &&
+        (STAND_DOWN_PHRASES.some((p) => lowerNew.includes(p)) ||
+          OPEN_COMMS_PHRASES.some((p) => lowerNew.includes(p)) ||
+          GO_DARK_PHRASES.some((p) => lowerNew.includes(p)));
+      if (!isEmergencyManagement) {
+        console.log('[Skippy] Steel Rain in flight — suppressing barge-in utterance:', text);
+        return;
+      }
+    }
     this.#stopSpeaking();
     this.currentAbortController?.abort();
     this.currentAbortController = new AbortController();
@@ -4199,6 +4234,16 @@ class App {
       return;
     }
 
+    // Arms suppression (see the top of this function) from here on — a bare
+    // ack above never reaches this point, since there's no real exchange to
+    // protect. Cleared on every exit below: the two early-return error paths
+    // clear it immediately, and the success path clears it only once #speak
+    // finishes actually saying the reply (its onComplete callback), matching
+    // the 2026-08-18 decision that suppression covers speaking the answer,
+    // not just the network round trip.
+    const isSteelRainTurn = mode === 'tactical' || mode === 'focus';
+    if (isSteelRainTurn) this.steelRainInFlight = true;
+
     this.#render();
 
     // Pillar 6 — RAG retrieval + web search happen here, before the single
@@ -4447,13 +4492,17 @@ class App {
         }),
         signal,
       });
-      if (mySeq !== this.requestSeq) return; // superseded by a newer utterance
+      if (mySeq !== this.requestSeq) {
+        if (isSteelRainTurn) this.steelRainInFlight = false;
+        return; // superseded by a newer utterance
+      }
 
       // Check ok BEFORE parsing — a non-200 response (proxy crash page, CDN/
       // gateway error, stale service-worker fallback) isn't guaranteed to be
       // JSON, and calling response.json() first would throw a raw parse error
       // here instead of surfacing whatever the real problem was.
       if (!response.ok) {
+        if (isSteelRainTurn) this.steelRainInFlight = false;
         let errorText = 'Skippy had nothing to say.';
         try {
           const data = await response.json();
@@ -4520,8 +4569,12 @@ class App {
       // re-pick the photo (see #clearPendingImage's other call sites).
       if (attachedImage) this.pendingImage = null;
       this.#render();
-      this.#speak(data.reply);
+      this.#speak(
+        data.reply,
+        isSteelRainTurn ? () => { this.steelRainInFlight = false; } : null,
+      );
     } catch (err) {
+      if (isSteelRainTurn) this.steelRainInFlight = false;
       if (err.name === 'AbortError' || mySeq !== this.requestSeq) return;
       this.statusMessage = `Couldn't reach Skippy's brain (proxy unreachable — ${PROXY_URL}): ${err.message}`;
       this.#render();
