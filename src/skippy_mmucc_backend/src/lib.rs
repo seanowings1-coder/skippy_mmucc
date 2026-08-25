@@ -998,7 +998,7 @@ fn to_hex(bytes: &[u8]) -> String {
 // across all candid/num-bigint version combinations and doesn't require
 // num-traits in scope. Performance is irrelevant for a daily timer.
 fn nat_to_u128(n: candid::Nat) -> u128 {
-    n.to_string().parse::<u128>().unwrap_or(u128::MAX)
+    n.to_string().replace('_', "").parse::<u128>().unwrap_or(u128::MAX)
 }
 
 /// Master Fuel Pump (Pillar 21) — runs daily to top up the frontend asset
