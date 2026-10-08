@@ -3302,6 +3302,14 @@ class App {
       return false;
     }
     const msSinceSpeak = Date.now() - this.lastSpeakEndTime;
+    // A long chunk that is nearly all his own last reply is his echo whenever it turns up: on a
+    // phone the recogniser can hand back a whole reply well after he stopped (2026-10-08, a full
+    // reply came back word for word as "You:"). Nobody says eight of his words back by chance.
+    const chunkWords = chunk.trim().split(/\s+/).filter(Boolean).length;
+    if (chunkWords >= 8 && msSinceSpeak <= 45000 && wordOverlapRatio(chunk, this.lastSpokenText) >= 0.8) {
+      console.log(`[Skippy self-echo] long chunk, ${chunkWords} words, nearly all from his last reply (${msSinceSpeak}ms ago) - dropping:`, chunk);
+      return true;
+    }
     if (msSinceSpeak > 8000) {
       console.log(`[Skippy self-echo] ${msSinceSpeak}ms since last speak — too stale to compare, treating as genuine:`, chunk);
       return false;
@@ -3388,7 +3396,14 @@ class App {
       this.pendingKaraokeOffer || !!this.pendingWebSearchQuery || !!this.pendingRosterStep ||
       !!this.pendingContactDisambiguation || !!this.pendingEmailContact || !!this.pendingEmailDraft ||
       this.pendingEmailRecipientPrompt;
-    const skipSelfEchoCheck = this.pendingKaraokeOffer || !!this.pendingWebSearchQuery || !!this.pendingRosterStep;
+    // ...and only for a SHORT answer. Found live 2026-10-08: his own karaoke offer ("Oh, now THAT
+    // got my attention...") was heard back while the offer was pending, sailed through here
+    // unchecked, and was taken as the answer - it used the offer up, so the real "yes" a moment
+    // later landed as ordinary chat. A long chunk gets the echo check whatever is pending; a real
+    // yes is a few words.
+    const chunkWordCount = chunk.trim().split(/\s+/).filter(Boolean).length;
+    const skipSelfEchoCheck =
+      (this.pendingKaraokeOffer || !!this.pendingWebSearchQuery || !!this.pendingRosterStep) && chunkWordCount < 5;
     if (
       (!awaitingConfirmation && Date.now() - this.lastSpeakEndTime < App.#FINAL_CHUNK_MIN_GAP_MS) ||
       (!skipSelfEchoCheck && this.#isLikelySelfEcho(chunk))
@@ -4180,9 +4195,9 @@ class App {
       // An explicit decline ("no, not karaoke, check the weather") must still
       // win even though it mentions the trigger word — don't let the
       // repeated-trigger shortcut above override a real "no."
-      const isDecline = ['no', 'not', "don't", 'cancel', 'stop', 'nevermind', 'never mind'].some(
-        (word) => lowerText.includes(word),
-      );
+      // Whole words: "now", "know", "nothing" and "notice" are not a no (2026-10-08 - "now" alone
+      // turned any sentence containing it into a decline).
+      const isDecline = /\b(no|nope|not|don't|dont|cancel|stop|nevermind|never mind)\b/.test(lowerText);
       const repeatedTrigger = !isDecline && KARAOKE_TRIGGER_PHRASES.some((phrase) => lowerText.includes(phrase));
       this.pendingKaraokeOffer = false; // any response resolves the offer, yes or no
       // "Yes Skippy go" is a clean yes, but on a phone it often arrives with a few stray words
