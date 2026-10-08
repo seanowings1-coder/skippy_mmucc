@@ -277,6 +277,16 @@ const AFFIRMATION_PHRASES = [
   'go for it',
   'go',
   'rock out',
+  // Added 2026-10-08 (Sean: "yes Skippy go" wasn't landing): more of the natural ways to say yes
+  // to an offer.
+  'yep',
+  'yup',
+  'absolutely',
+  'hit it',
+  'sing it',
+  'take it away',
+  "let's hear it",
+  'lets hear it',
 ];
 
 // Pillar 23 phase 2 — send-confirmation cues for the email compose session,
@@ -731,6 +741,24 @@ const COMMAND_LEXICON_ENTRIES = [
     phrases: CIVILIAN_BRIEFING_PHRASES,
     description:
       'One-shot monologue. Bypasses normal generation to deliver a fixed, verbatim tech-flex monologue for live audiences. Reverts to normal persona immediately after.',
+  },
+  {
+    category: '10. Demos & Entertainment',
+    phrases: ['(to say yes to his karaoke offer) "yes Skippy go" / "yes" / "yeah" / "go for it" / "hit it" / "sing it" / "let\'s hear it" — or say "karaoke" again'],
+    description:
+      'Answers Skippy\'s "Karaoke time?" offer. Add a subject to steer the song: "yes, about the rain". "No" / "not now" / "cancel" turns it down.',
+  },
+  {
+    category: '11. Email (Contacts)',
+    phrases: ['"send an email to …" / "email the …" / "email my …"', '"write an email" / "compose an email" / "draft an email" / "I need to send an email"'],
+    description:
+      'Name someone from your Contacts panel ("email my wife", "send an email to the plumber") and Skippy asks what it should say; with no name he asks who it\'s to. He drafts it and reads it back.',
+  },
+  {
+    category: '11. Email (Contacts)',
+    phrases: EMAIL_SEND_CONFIRMATION_PHRASES,
+    description:
+      'After the read-back: any of these opens the finished draft in Gmail for you to check and send yourself (Skippy never sends on his own). Say anything else to change it ("make it shorter", "add that I\'ll call Friday"). "Cancel" / "never mind" / "forget it" scraps it.',
   },
   {
     category: '10. Demos & Entertainment',
@@ -4157,7 +4185,13 @@ class App {
       );
       const repeatedTrigger = !isDecline && KARAOKE_TRIGGER_PHRASES.some((phrase) => lowerText.includes(phrase));
       this.pendingKaraokeOffer = false; // any response resolves the offer, yes or no
-      if ((hasAffirmation && isTrivialRemainder(remainder)) || repeatedTrigger) {
+      // "Yes Skippy go" is a clean yes, but on a phone it often arrives with a few stray words
+      // stuck to it - the tail of his own offer, picked up by the mic (the self-echo check is off
+      // while an offer is pending, on purpose). So a yes with no "no" in it and only a few words
+      // left over still counts (Sean, 2026-10-08), not just a yes with nothing left over at all.
+      const leftoverWords = remainder.replace(FILLER_WORDS_PATTERN, ' ').replace(/[^a-z0-9' ]/gi, ' ').split(/\s+/).filter(Boolean);
+      const yesWithStrayWords = hasAffirmation && !isDecline && leftoverWords.length <= 4;
+      if ((hasAffirmation && isTrivialRemainder(remainder)) || yesWithStrayWords || repeatedTrigger) {
         // A topic given on the confirm turn itself ("yes, about the rain")
         // overrides one given on the original trigger, since it's more
         // recent. If the confirm itself was a style-implying trigger phrase

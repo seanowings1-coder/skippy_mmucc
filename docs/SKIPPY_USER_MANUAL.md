@@ -58,7 +58,7 @@ Skippy listens continuously via the Web Speech API. Speak naturally — no wake 
 - Desktop/Mobile: ✋ button in the Tactical Dock (amber, fixed-width, isolated to avoid fat-finger)
 - Desktop: also available in the mic controls section
 
-**TTS cooldown:** after Skippy finishes speaking, voice input is suppressed for 1.2 seconds to prevent his own audio from being transcribed as your input. This is intentional.
+**Pause after he speaks:** when Skippy finishes talking, the microphone stays off for a moment so he doesn't hear his own voice: half a second on a computer, one second on an Android phone. On Android the listening chime plays when the mic comes back; start talking after it.
 
 ---
 
@@ -171,9 +171,32 @@ Skippy's karaoke mode performs original compositions — never real song lyrics.
 
 | What to say | Result |
 |---|---|
-| "Karaoke" / "sing a song" / "jam out" / "rock out" | Skippy gets excited and offers — confirm with any affirmation to proceed |
+| "Karaoke" / "sing a song" / "jam out" / "rock out" | Skippy gets excited and offers to perform |
+| "Yes Skippy go" / "yes" / "yeah" / "sure" / "go for it" / "go ahead" / "do it" / "let's go" / "hit it" / "sing it" / "take it away" / "let's hear it" / "absolutely" — or just say "karaoke" again | Says yes to the offer, and he sings |
+| "Yes, about the rain" (any yes followed by "about …") | Says yes and gives him the subject of the song |
+| "No" / "not now" / "cancel" / "never mind" | Turns the offer down |
 
-Karaoke uses a separate ElevenLabs singing voice if configured.
+On a phone, wait for the listening chime before you answer. A yes still counts if a few stray words get picked up with it.
+
+Karaoke uses a separate singing voice if one is configured (Fish Audio).
+
+---
+
+### 8a. Email
+
+Skippy writes emails to people in your Contacts panel. He never sends one himself: he opens the finished draft in Gmail and you press send. Not available in Guest Mode.
+
+| What to say | Result |
+|---|---|
+| "Send an email to …" / "email the …" / "email my …" (for example "email my wife", "send an email to the plumber") | Finds that person in Contacts by name, relationship, company or keyword, and asks what the email should say |
+| "Write an email" / "compose an email" / "draft an email" / "create an email" / "I need to send an email" / "I want to email" / "let's write an email" | Starts an email with nobody named; he asks who it's to |
+| (a name, when he asks "Which one?") | Picks between contacts that both matched |
+| (just talk, when he asks what it should say) | He drafts the email from what you said and reads the subject and body back |
+| "Send it" / "send" / "ship it" / "good to go" / "that's good" / "it's good" / "that's fine" / "that's great" / "sounds good" / "looks good" / "perfect" / "that works" / "go for it" / "yes" / "yeah" / "sure" | Opens the draft in Gmail, addressed and filled in. If the browser blocks the pop-up, tap **Open in Gmail** on screen |
+| Anything else after the read-back ("make it shorter", "add that I'll call Friday") | He revises the draft and reads it back again |
+| "Cancel" / "never mind" / "forget it" | Scraps the email |
+
+If nobody in Contacts matches, he says so; add the person in the Contacts panel first.
 
 ---
 
