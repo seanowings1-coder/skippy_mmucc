@@ -2,6 +2,10 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Pending handoff — read first
+
+`READ_ME_2026-10-03_ticket_bridge_and_key_security.md` (repo root, kept out of git on purpose because this repository is public; copies are on the Commander's Desktop under `Skippy/` and in `~/Skippy-proxy`) holds an unbuilt plan for Claude Code sessions to pull customer tickets from the Bad Marine website canister, plus open decisions for the Commander. Read it before starting related work; remove this section once it has been dealt with.
+
 ## Repository Layout
 
 This is a **monorepo** — but Railway deploys the proxy from a **separate** GitHub repo:
