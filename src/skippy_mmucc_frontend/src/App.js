@@ -1916,7 +1916,7 @@ class App {
       this.#muteRecognitionBriefly();
       if (this._restartRecognitionAfterTTS && this.state !== 'idle' && !this.stopRequested && !this.recognitionActive) {
         this._restartRecognitionAfterTTS = false;
-        setTimeout(() => this.#startRecognition(), App.#POST_TTS_MUTE_MS);
+        setTimeout(() => this.#startRecognition(), App.#postTtsMuteMs);
       }
       if (onComplete) onComplete();
     };
@@ -3205,6 +3205,13 @@ class App {
   // exact window can be missed), just applied to capture instead of
   // dispatch, and much shorter than that rejected flat cooldown.
   static #POST_TTS_MUTE_MS = 500;
+  // Android gets twice as long (Sean, 2026-10-08): on a phone speaker the tail of his own reply
+  // was still in the room when the mic reopened, so he kept hearing himself. A getter, not a
+  // field, because #IS_ANDROID is declared further down and static fields initialise in order.
+  static #POST_TTS_MUTE_MS_ANDROID = 1000;
+  static get #postTtsMuteMs() {
+    return App.#IS_ANDROID ? App.#POST_TTS_MUTE_MS_ANDROID : App.#POST_TTS_MUTE_MS;
+  }
 
   // Called from every TTS-completion site (premium segments, premium
   // error-after-start, Economy, karaoke song playback) once a reply has
@@ -3216,7 +3223,7 @@ class App {
   // already true), the caller just needs the timestamp set before it
   // restarts — see each call site.
   #muteRecognitionBriefly() {
-    this._postTtsMuteUntil = Date.now() + App.#POST_TTS_MUTE_MS;
+    this._postTtsMuteUntil = Date.now() + App.#postTtsMuteMs;
     if (this.recognition && this.recognitionActive) {
       try {
         this.recognition.stop(); // onend restarts us after the mute window
@@ -5344,7 +5351,7 @@ class App {
         this.#muteRecognitionBriefly();
         if (this._restartRecognitionAfterTTS && this.state !== 'idle' && !this.stopRequested && !this.recognitionActive) {
           this._restartRecognitionAfterTTS = false;
-          setTimeout(() => this.#startRecognition(), App.#POST_TTS_MUTE_MS);
+          setTimeout(() => this.#startRecognition(), App.#postTtsMuteMs);
         }
         // Karaoke-audio chaining (see #performKaraoke) — lets a spoken hype
         // line finish naturally before the real generated song starts,
@@ -5440,7 +5447,7 @@ class App {
         this.#muteRecognitionBriefly();
         if (this._restartRecognitionAfterTTS && this.state !== 'idle' && !this.stopRequested && !this.recognitionActive) {
           this._restartRecognitionAfterTTS = false;
-          setTimeout(() => this.#startRecognition(), App.#POST_TTS_MUTE_MS);
+          setTimeout(() => this.#startRecognition(), App.#postTtsMuteMs);
         }
         if (onComplete) onComplete();
       };
