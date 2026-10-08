@@ -1751,6 +1751,22 @@ fn pop_pending_courier_messages() -> Vec<CourierMessage> {
     })
 }
 
+/// Pillar 7 — which of these courier messages the caller sent are still waiting in the queue (not
+/// yet collected by the other Principal's Skippy). Lets the sender's app notice a message that has
+/// sat uncollected and fall back to a push to the recipient's phone (2026-10-08). Only the caller's
+/// own messages are ever reported, and nothing about their content.
+#[query]
+fn courier_messages_pending(ids: Vec<u64>) -> Vec<u64> {
+    let caller = assert_whitelisted();
+    COURIER_QUEUE.with(|q| {
+        let q = q.borrow();
+        ids.into_iter()
+            .take(50)
+            .filter(|id| q.get(id).is_some_and(|m| m.sender == caller))
+            .collect()
+    })
+}
+
 fn assert_emergency_owner(caller: Principal, emergency_id: u64) -> EmergencyEvent {
     let event = EMERGENCY_EVENTS.with(|e| e.borrow().get(&emergency_id));
     match event {

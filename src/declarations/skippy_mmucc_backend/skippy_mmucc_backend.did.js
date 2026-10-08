@@ -184,6 +184,11 @@ export const idlFactory = ({ IDL }) => {
       ),
     'append_turn' : IDL.Func([IDL.Nat64, IDL.Text, IDL.Text], [IDL.Nat64], []),
     'archive_workspace' : IDL.Func([IDL.Nat64], [], []),
+    'courier_messages_pending' : IDL.Func(
+        [IDL.Vec(IDL.Nat64)],
+        [IDL.Vec(IDL.Nat64)],
+        ['query'],
+      ),
     'create_workspace' : IDL.Func([IDL.Text], [IDL.Nat64], []),
     'delete_artifact' : IDL.Func([IDL.Nat64], [], []),
     'delete_contact' : IDL.Func([IDL.Nat64], [], []),

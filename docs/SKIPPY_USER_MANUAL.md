@@ -153,6 +153,8 @@ Two-user feature — sends a message to the other whitelisted user. It is delive
 | "Let my husband/wife/partner know [message]" | Same |
 | "Pass this along / pass that along [message]" | Same |
 
+Their Skippy reads the message out when it is open (it checks about every 90 seconds). If the message is still uncollected about two minutes after you sent it, Skippy pushes its full text to their phone through the Pushover app and tells you he did. The message stays queued as well, so their Skippy still passes it along later. The phone push needs the Pushover app on their phone and their Pushover key in the proxy's settings (`PARTNER_PUSHOVER_USER_KEY` for the partner; the Commander's existing `PUSHOVER_USER_KEY` is used in the other direction). Until that is set up, the message simply waits for their Skippy.
+
 ---
 
 ### 7. Persona & Feedback

@@ -203,6 +203,7 @@ service : (principal, principal, principal) -> {
 
     "queue_courier_message": (text) -> (nat64);
     "pop_pending_courier_messages": () -> (vec CourierMessage);
+    "courier_messages_pending": (vec nat64) -> (vec nat64) query;
 
     "start_emergency": (text) -> (nat64);
     "append_emergency_audio_chunk": (nat64, blob) -> (nat64);

@@ -4677,7 +4677,8 @@ class App {
     }
     this.statusMessage = 'Queuing message...';
     this.#render();
-    await this.backendActor.queue_courier_message(content);
+    const courierId = await this.backendActor.queue_courier_message(content);
+    this.#watchCourierMessage(courierId, content);
     if (mySeq !== this.requestSeq) return; // superseded by a newer utterance
 
     const reply = "Message queued. I'll pass it along the moment they show their face.";
@@ -4715,12 +4716,71 @@ class App {
   // so a Principal who stays logged in for hours never saw a message queued
   // for them without manually logging out and back in. 90s is frequent
   // enough to feel timely without hammering the canister with idle queries.
+  // Courier fallback (2026-10-08, Sean: "contact my wife via her Skippy and if that fails send her a
+  // text"). A message only reaches the other person when their Skippy is next open. So each one I
+  // send is remembered here, and if it is still uncollected a couple of minutes later the proxy
+  // pushes its full text to their phone (/courier-fallback, Pushover). It stays queued too, so their
+  // Skippy still passes it along. Kept in localStorage so closing the app doesn't lose the watch.
+  static #COURIER_WATCH_KEY = 'skippy_courier_watch';
+  static #COURIER_FALLBACK_AFTER_MS = 120000;
+
+  #courierWatchList() {
+    try {
+      const list = JSON.parse(localStorage.getItem(App.#COURIER_WATCH_KEY) || '[]');
+      return Array.isArray(list) ? list : [];
+    } catch {
+      return [];
+    }
+  }
+
+  #watchCourierMessage = (id, content) => {
+    const list = this.#courierWatchList().filter((m) => Date.now() - m.at < 24 * 60 * 60 * 1000);
+    list.push({ id: String(id), content, at: Date.now() });
+    localStorage.setItem(App.#COURIER_WATCH_KEY, JSON.stringify(list.slice(-20)));
+    setTimeout(() => {
+      this.#checkCourierWatch().catch((err) => console.error('[Skippy] courier fallback check failed:', err));
+    }, App.#COURIER_FALLBACK_AFTER_MS + 5000);
+  };
+
+  #checkCourierWatch = async () => {
+    if (this.guestMode || !this.backendActor || !this.sessionToken) return;
+    const list = this.#courierWatchList();
+    const due = list.filter((m) => Date.now() - m.at >= App.#COURIER_FALLBACK_AFTER_MS);
+    if (due.length === 0) return;
+    // Each message gets one fallback attempt, collected or not - never a repeat push.
+    localStorage.setItem(App.#COURIER_WATCH_KEY, JSON.stringify(list.filter((m) => !due.includes(m))));
+    const stillWaiting = new Set(
+      (await this.backendActor.courier_messages_pending(due.map((m) => BigInt(m.id)))).map(String),
+    );
+    for (const message of due.filter((m) => stillWaiting.has(m.id))) {
+      const response = await fetch(`${PROXY_URL}/courier-fallback`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Skippy-Session': this.sessionToken },
+        body: JSON.stringify({ content: message.content }),
+      });
+      const result = response.ok ? await response.json() : { sent: false, reason: 'push-failed' };
+      if (result.sent) {
+        const line = "They hadn't picked up your message, so I pushed it to their phone.";
+        this.#recordTurn('', line);
+        this.#render();
+        if (!this.isSpeaking) this.#speak(line);
+      } else {
+        this.statusMessage =
+          result.reason === 'no-phone'
+            ? "Your message is still waiting for them — phone alerts for them aren't set up yet."
+            : "Your message is still waiting for them — couldn't reach their phone.";
+        this.#render();
+      }
+    }
+  };
+
   #startCourierPolling = () => {
     if (this.#courierPollHandle || this.guestMode) return;
     this.#courierPollHandle = setInterval(() => {
       this.#deliverPendingCourierMessages().catch((err) => {
         console.error('[Skippy] courier poll failed:', err);
       });
+      this.#checkCourierWatch().catch((err) => console.error('[Skippy] courier fallback check failed:', err));
     }, 90000);
   };
 

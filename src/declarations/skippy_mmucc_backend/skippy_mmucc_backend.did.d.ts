@@ -176,6 +176,10 @@ export interface _SERVICE {
   >,
   'append_turn' : ActorMethod<[bigint, string, string], bigint>,
   'archive_workspace' : ActorMethod<[bigint], undefined>,
+  'courier_messages_pending' : ActorMethod<
+    [BigUint64Array | bigint[]],
+    BigUint64Array | bigint[]
+  >,
   'create_workspace' : ActorMethod<[string], bigint>,
   'delete_artifact' : ActorMethod<[bigint], undefined>,
   'delete_contact' : ActorMethod<[bigint], undefined>,
