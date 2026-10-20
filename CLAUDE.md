@@ -12,10 +12,10 @@ This is a **monorepo** — but Railway deploys the proxy from a **separate** Git
 
 | Repo | GitHub | Purpose |
 |---|---|---|
-| `skippy_mmucc` | `seanowings1-coder/skippy_mmucc` | ICP canisters (backend + frontend), local dev |
-| `Skippy-proxy` | `seanowings1-coder/Skippy-proxy` | Node.js proxy — Railway autodeploys from this repo |
+| `skippy_mmucc` | `seanowings1-coder/skippy_mmucc` (**public**) | ICP canisters (backend + frontend), local dev |
+| `Skippy-proxy` | `seanowings1-coder/Skippy-proxy` (private) | Node.js proxy, cloned at `~/Skippy-proxy` — Railway autodeploys from this repo |
 
-**Pushing `skippy_mmucc` does NOT update Railway.** Proxy changes (`src/skippy_mmucc_proxy/server.js`) must also be committed and pushed to the `Skippy-proxy` repo for Railway to pick them up.
+**The proxy lives only in `~/Skippy-proxy`.** This repo used to carry a copy at `src/skippy_mmucc_proxy/`, but it fell ~1,800 lines behind (no Ghost Skippy at all) and was removed 2026-10-19. Never recreate it or copy a proxy file in either direction — Ghost Skippy's code is deliberately kept out of this public repo. Edit, commit and push proxy changes in `~/Skippy-proxy` only.
 
 ## Commands
 
@@ -34,7 +34,9 @@ npm run build                         # production build (calls dfx generate fir
 npm run generate                      # regenerate TS bindings from backend Candid
 
 # ─── Proxy ────────────────────────────────────────────────────────────────────
-cd src/skippy_mmucc_proxy && node --watch server.js   # dev proxy (auto-restarts)
+cd ~/Skippy-proxy && node --env-file=$HOME/skippy_mmucc/.env --watch server.js   # dev proxy (auto-restarts)
+                                      # needs `npm install` in ~/Skippy-proxy once; --env-file because
+                                      # server.js's own dotenv path (../../.env) assumed the old nested layout
 
 # ─── Backend canister (Rust) ──────────────────────────────────────────────────
 cargo build --target wasm32-unknown-unknown --release -p skippy_mmucc_backend
@@ -106,7 +108,7 @@ Any new field added to a stored struct (`Workspace`, `DocumentSection`, etc.) **
 - **Long-term memory (Pillar 24, 2026-07-20)**: `append_turn` used to permanently discard anything trimmed off the 40-message window. It now archives drained messages into `LONG_TERM_LOG` (`MemoryId` 17) instead, via `archive_to_long_term_log`. The Critic Loop's closing-history capture (`#resolveCriticLoop` in App.js) prepends a workspace's long-term log before self-critiquing, so a session that runs past 40 messages isn't invisible to personality evolution.
 - **What Skippy Knows (Pillar 25, 2026-07-20)**: visible/editable relational-continuity facts (`KnownFact`, `MemoryId` 18) — pets, family, ongoing projects, likes/dislikes, recurring events — deliberately separate from Pillar 19's Evolution Matrix (that's personality; this is facts). Populated by the proxy's tight-whitelist `/extract-facts` pass (fire-and-forget, every 4 real turns) or direct manual entry in the frontend panel. Standing facts are always injected into `/respond`'s system prompt; a fact with a `follow_up_at` in the past surfaces once as a gentle nudge, then gets cleared. This is the safe alternative built after reviewing and rejecting a "Troll Protocol" autonomous memory-harvesting spec — no leverage-tagging, no covert emotional-intensity scoring, everything user-visible and user-deletable.
 
-## Proxy Server (`src/skippy_mmucc_proxy/server.js`)
+## Proxy Server (`~/Skippy-proxy/server.js`, separate private repo)
 
 Express.js server. All routes require the `requireSession` middleware (validates `X-Skippy-Session` via `validate_session` on the canister).
 
